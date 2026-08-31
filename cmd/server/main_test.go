@@ -135,3 +135,24 @@ func TestLoadConfigEnableDecryptFromEnv(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadConfigInvalidPortEnvIgnored documents that malformed
+// KUBESEAL_API_PORT values fall back to the flag default rather than
+// silently zeroing the port. Regression test for errcheck lint finding.
+func TestLoadConfigInvalidPortEnvIgnored(t *testing.T) {
+	t.Setenv("KUBESEAL_API_PORT", "not-a-number")
+	cfg := loadConfig()
+	if cfg.Port != 8080 {
+		t.Fatalf("expected fallback to default port 8080 on invalid env, got %d", cfg.Port)
+	}
+}
+
+// TestLoadConfigValidPortEnvApplies confirms well-formed port env values
+// do override the flag default.
+func TestLoadConfigValidPortEnvApplies(t *testing.T) {
+	t.Setenv("KUBESEAL_API_PORT", "9090")
+	cfg := loadConfig()
+	if cfg.Port != 9090 {
+		t.Fatalf("expected env port 9090, got %d", cfg.Port)
+	}
+}

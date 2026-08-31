@@ -46,7 +46,10 @@ func loadConfig() Config {
 	port := *flagPort
 	level := *flagLevel
 	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {
-		fmt.Sscanf(v, "%d", &port)
+		parsed, sErr := fmt.Sscanf(v, "%d", &port)
+		if sErr != nil || parsed != 1 {
+			slog.Warn("ignoring invalid KUBESEAL_API_PORT", "value", v, "error", sErr)
+		}
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		level = v
@@ -124,7 +127,12 @@ func newRouter(cfg Config) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// middleware.RealIP is deprecated (GHSA-3fxj-6jh8-hvhx / GHSA-rjr7-jggh-pgcp /
+	// GHSA-9g5q-2w5x-hmxf) — IP spoofable via X-Forwarded-For. We deliberately
+	// omit it; downstream handlers that need the real client IP should set
+	// r.RemoteAddr from a trusted proxy layer (Traefik → forwarded header
+	// middleware) instead of trusting client-supplied headers. See
+	// internal-docs/security/threat-model.md for the proxy chain.
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
