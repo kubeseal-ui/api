@@ -48,6 +48,7 @@ var sensitiveKeyMarkers = []string{
 	"csrf",
 	"pem",
 	"cert", // "certificate" content; the cert metadata (subject, issuer) is safe but value not
+	"client_id", // OIDC client identifier — not the token itself but identifies the integration
 }
 
 // isSensitiveKey reports whether the given attribute key matches a
