@@ -1,4 +1,14 @@
-name: API CI/CD Pipeline
+name: CI/CD Pipeline
+
+# Verbatim copy of pamawas-correlator ci-cd.yml with kubeseal-ui adaptations:
+#  - go-version pinned to 1.27 (kubeseal-ui/api go.mod declares go 1.27)
+#  - golangci-lint version pinned to v2.13.2 (built with Go 1.27+; v2.12.x is Go 1.26
+#    and refuses to load configs targeting Go 1.27)
+#  - binary name: kubeseal-api (matches Dockerfile)
+#  - image name: ghcr.io/<owner>/<repo> (matches pamawas convention; resolves
+#    to ghcr.io/kubeseal-ui/api since the repo IS kubeseal-ui/api)
+# Everything else (action versions, install modes, branch gates, security scan,
+# release job, codecov) is identical to pamawas-correlator.
 
 on:
   push:
@@ -36,8 +46,9 @@ jobs:
         token: ${{ secrets.CODECOV_TOKEN }}
 
     - name: Run linter
-      uses: golangci/golangci-lint-action@v9
+      uses: golangci/golangci-lint-action@v7
       with:
+        install-mode: 'goinstall'
         version: v2.13.2
         args: ./...
 
@@ -65,10 +76,10 @@ jobs:
       run: ./kubeseal-api --help || true
 
   docker:
-    name: Build & Push Docker Image (API)
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    if: github.event_name == 'push'
     permissions:
       contents: read
       packages: write
@@ -94,7 +105,7 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ghcr.io/${{ github.repository_owner }}/kubeseal-ui-api
+        images: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
         tags: |
           type=ref,event=branch
           type=ref,event=pr
@@ -127,7 +138,7 @@ jobs:
     - name: Run Gosec security scanner
       uses: securego/gosec@master
       with:
-        args: '-fmt=json -no-fail ./...'
+        args: '-fmt=json ./...'
 
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@master
