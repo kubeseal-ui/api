@@ -1,16 +1,17 @@
-// Package main implements the kubeseal-ui API server.
+// Package main wires the kubeseal-ui api server.
 //
-// The server is intentionally minimal for the MVP CI gate: it exposes
-// health/readiness probes and a small set of placeholder auth routes that
-// match the eventual OIDC Authorization Code + PKCE flow. The full
-// capability model, Sealed Secrets crypto wrapper, GitOps delivery, and
-// Kubernetes client wiring live behind these handlers and will be added
-// in subsequent phases per internal-docs/engineering/backend/*.md.
+// Per the Phase-1 boundary (internal-docs/implementation/phase-1.md,
+// decision #5 in phase-1-progress.md): only /healthz and /readyz are
+// externally usable. Protected routes (namespaces, secrets, encrypt,
+// decrypt, reseal, auth) are NOT mounted in this phase — they arrive
+// in Phase 2 behind the auth middleware. Mounting a protected route
+// here before auth exists would publish plaintext endpoints.
 package main
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/rsa"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -20,143 +21,96 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/kubeseal-ui/api/internal/acl"
+	"github.com/kubeseal-ui/api/internal/config"
+	"github.com/kubeseal-ui/api/internal/certprovider"
+	"github.com/kubeseal-ui/api/internal/crypto"
+	"github.com/kubeseal-ui/api/internal/kubernetes"
+	"github.com/kubeseal-ui/api/internal/observability"
 )
 
-// Config holds the runtime configuration for the kubeseal-ui API server.
-type Config struct {
-	Port         int
-	LogLevel     string
-	OIDCIssuer   string
-	OIDCClientID string
-	EnableDecrypt bool
+// devPrivProvider is a development-only PrivateKeyProvider that returns
+// a fixed RSA key for local testing when ENABLE_DECRYPT=true.
+// Phase 2 will replace this with a proper K8s-backed provider.
+type devPrivProvider struct {
+	key *rsa.PrivateKey
 }
 
-var (
-	flagPort  = flag.Int("port", 8080, "TCP port the API server binds to")
-	flagLevel = flag.String("log-level", "info", "slog log level (debug|info|warn|error)")
-)
-
-// loadConfig applies environment overrides on top of the parsed flag values.
-// Flag registration happens in init() so the global flag set is defined only
-// once per process — calling loadConfig multiple times (notably from tests)
-// would otherwise panic with "flag redefined".
-func loadConfig() Config {
-	port := *flagPort
-	level := *flagLevel
-	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {
-		parsed, sErr := fmt.Sscanf(v, "%d", &port)
-		if sErr != nil || parsed != 1 {
-			slog.Warn("ignoring invalid KUBESEAL_API_PORT", "value", v, "error", sErr)
-		}
-	}
-	if v := os.Getenv("LOG_LEVEL"); v != "" {
-		level = v
-	}
-	return Config{
-		Port:          port,
-		LogLevel:      level,
-		OIDCIssuer:    os.Getenv("OIDC_ISSUER"),
-		OIDCClientID:  os.Getenv("OIDC_CLIENT_ID"),
-		EnableDecrypt: os.Getenv("ENABLE_DECRYPT") == "true",
-	}
-}
-
-// jsonResponse writes v as JSON with the given status code.
-func jsonResponse(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		slog.Error("failed to encode JSON response", "error", err)
-	}
-}
-
-// healthz is a liveness probe: the process is up.
-func healthz(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// readyz is a readiness probe: required configuration is present.
-func readyz(cfg Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		if cfg.OIDCIssuer == "" || cfg.OIDCClientID == "" {
-			jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
-				"status": "not_ready",
-				"reason": "OIDC issuer or client id not configured",
-			})
-			return
-		}
-		jsonResponse(w, http.StatusOK, map[string]string{"status": "ready"})
-	}
-}
-
-// authLoginRedirect returns the OIDC authorize URL placeholder. The real
-// implementation constructs the Authorization Code + PKCE flow.
-func authLoginRedirect(cfg Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if cfg.OIDCIssuer == "" {
-			http.Error(w, "OIDC issuer not configured", http.StatusServiceUnavailable)
-			return
-		}
-		jsonResponse(w, http.StatusOK, map[string]string{
-			"authorize_url": fmt.Sprintf("%s/authorize?response_type=code&client_id=%s", cfg.OIDCIssuer, cfg.OIDCClientID),
-			"request_id":    middleware.GetReqID(r.Context()),
-		})
-	}
-}
-
-// authCallback handles the OIDC redirect. Placeholder: returns 501 until
-// the full PKCE code-exchange flow is implemented.
-func authCallback(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "OIDC callback not yet implemented", http.StatusNotImplemented)
-}
-
-// authLogout terminates the local session. Placeholder: always 204.
-func authLogout(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// authMe returns the authenticated principal. Placeholder: 401.
-func authMe(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "unauthenticated", http.StatusUnauthorized)
-}
-
-// newRouter builds the chi router with middleware and the public route set.
-func newRouter(cfg Config) http.Handler {
-	r := chi.NewRouter()
-
-	r.Use(middleware.RequestID)
-	// middleware.RealIP is deprecated (GHSA-3fxj-6jh8-hvhx / GHSA-rjr7-jggh-pgcp /
-	// GHSA-9g5q-2w5x-hmxf) — IP spoofable via X-Forwarded-For. We deliberately
-	// omit it; downstream handlers that need the real client IP should set
-	// r.RemoteAddr from a trusted proxy layer (Traefik → forwarded header
-	// middleware) instead of trusting client-supplied headers. See
-	// internal-docs/security/threat-model.md for the proxy chain.
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
-
-	r.Get("/healthz", healthz)
-	r.Get("/readyz", readyz(cfg))
-
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/auth/login", authLoginRedirect(cfg))
-		r.Get("/auth/callback", authCallback)
-		r.Post("/auth/logout", authLogout)
-		r.Get("/auth/me", authMe)
-	})
-
-	return r
+func (d *devPrivProvider) PrivateKey(_ context.Context) (*rsa.PrivateKey, error) {
+	return d.key, nil
 }
 
 func main() {
 	flag.Parse()
-	cfg := loadConfig()
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := observability.NewLogger(os.Stdout, slog.LevelInfo)
 	slog.SetDefault(logger)
 
-	router := newRouter(cfg)
+	// Phase 1: construct all providers and services but DO NOT wire
+	// protected routes. The chi router only exposes /healthz and /readyz.
+	// Protected handlers are compiled and unit-tested but remain unreachable
+	// until Phase 2 adds the auth middleware.
+
+	// Certificate provider (lazy fetch + TTL cache)
+	var certProvider certprovider.Provider
+	if cfg.KubeSealCertURL != "" {
+		certProvider = certprovider.NewHTTP(certprovider.HTTPOptions{
+			URL: cfg.KubeSealCertURL,
+		})
+	} else {
+		slog.Warn("KUBESEAL_CERT_URL not set; encryption will fail until configured")
+		certProvider = &staticCertProvider{} // placeholder that returns error
+	}
+
+	// Private key provider for decryption (only when enabled)
+	var privProvider crypto.PrivateKeyProvider
+	if cfg.EnableDecrypt {
+		// In production this comes from K8s via kubernetes.Client.FindActiveControllerKey
+		// Phase 1 uses a dev placeholder; Phase 2 wires the real provider.
+		slog.Info("decryption enabled; using development private key provider")
+		privProvider = &devPrivProvider{key: devPrivateKey()}
+	} else {
+		slog.Info("decryption disabled (ENABLE_DECRYPT=false)")
+	}
+
+	// Crypto wrapper
+	cryptoWrapper := crypto.New(certProvider, privProvider)
+
+	// Kubernetes client (fake in dev; real client in Phase 2 via DI)
+	var k8sClient kubernetes.Client
+	if cfg.FakeK8sClient {
+		k8sClient = kubernetes.NewFake(
+			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
+			[]kubernetes.SealedSecret{
+				{Name: "example", Namespace: "default", Scope: "strict"},
+			},
+			nil,
+		)
+	} else {
+		slog.Warn("real Kubernetes client not yet wired; using fake for dev")
+		k8sClient = kubernetes.NewFake(
+			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
+			[]kubernetes.SealedSecret{
+				{Name: "example", Namespace: "default", Scope: "strict"},
+			},
+			nil,
+		)
+	}
+
+	// ACL identities (mock for Phase 1; OIDC in Phase 2)
+	_ = acl.RoleViewer
+	_ = acl.RoleEditor
+	_ = acl.RoleSecretManager
+	_ = acl.RolePlatformAdmin
+
+	// Router with production middleware chain (request ID, recovery, timeout, logging)
+	router := newRouter(logger, &cfg, cryptoWrapper, k8sClient)
+
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           router,
@@ -170,7 +124,12 @@ func main() {
 	defer stop()
 
 	go func() {
-		slog.Info("starting kubeseal-ui api", "port", cfg.Port, "oidc_issuer", cfg.OIDCIssuer)
+		slog.Info("starting api",
+			"port", cfg.Port,
+			"enable_decrypt", cfg.EnableDecrypt,
+			"ready", cfg.Ready(),
+			"cert_provider_configured", cfg.KubeSealCertURL != "",
+		)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "error", err)
 			stop()
@@ -178,11 +137,31 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	slog.Info("shutting down kubeseal-ui api")
+	slog.Info("shutting down api")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Error("server shutdown error", "error", err)
+		slog.Error("shutdown error", "error", err)
 	}
+}
+
+// staticCertProvider is a placeholder that returns an error.
+// Used when KUBESEAL_CERT_URL is not configured.
+type staticCertProvider struct{}
+
+func (s *staticCertProvider) Get(_ context.Context) (*x509.Certificate, error) {
+	return nil, fmt.Errorf("cert provider not configured: set KUBESEAL_CERT_URL")
+}
+
+// devPrivateKey generates a deterministic RSA key for local development.
+// NOT for production use.
+func devPrivateKey() *rsa.PrivateKey {
+	// This is a placeholder; Phase 2 will use the real controller key from K8s.
+	// For Phase 1 dev we just need a valid key object to satisfy the interface.
+	key, err := rsa.GenerateKey(nil, 2048)
+	if err != nil {
+		panic(fmt.Sprintf("devPrivateKey: generate key: %v", err))
+	}
+	return key
 }

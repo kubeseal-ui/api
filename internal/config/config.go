@@ -56,6 +56,16 @@ type Config struct {
 	// controller-private-key RBAC are wired. Phase-1 default is false.
 	// Sources: ENABLE_DECRYPT env (must be literal "true" to enable).
 	EnableDecrypt bool
+
+	// KubeSealCertURL is the HTTP endpoint for fetching the controller
+	// public certificate. Required for encryption.
+	// Sources: -cert-url flag, KUBESEAL_CERT_URL env.
+	KubeSealCertURL string
+
+	// FakeK8sClient controls whether to use the fake Kubernetes client
+	// for development. Default true.
+	// Sources: -fake-k8s flag, FAKE_K8S_CLIENT env.
+	FakeK8sClient bool
 }
 
 // Load parses configuration from process flags + environment and returns
@@ -67,11 +77,13 @@ type Config struct {
 // from tests) would otherwise panic with "flag redefined".
 func Load() (Config, error) {
 	cfg := Config{
-		Port:          *flagPort,
-		LogLevel:      *flagLevel,
-		OIDCIssuer:    os.Getenv("OIDC_ISSUER"),
-		OIDCClientID:  os.Getenv("OIDC_CLIENT_ID"),
-		EnableDecrypt: os.Getenv("ENABLE_DECRYPT") == "true",
+		Port:            *flagPort,
+		LogLevel:        *flagLevel,
+		OIDCIssuer:      os.Getenv("OIDC_ISSUER"),
+		OIDCClientID:    os.Getenv("OIDC_CLIENT_ID"),
+		EnableDecrypt:   os.Getenv("ENABLE_DECRYPT") == "true",
+		KubeSealCertURL: *flagCertURL,
+		FakeK8sClient:   *flagFakeK8s,
 	}
 
 	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {
@@ -86,6 +98,14 @@ func Load() (Config, error) {
 
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
+	}
+
+	if v := os.Getenv("KUBESEAL_CERT_URL"); v != "" {
+		cfg.KubeSealCertURL = v
+	}
+
+	if v := os.Getenv("FAKE_K8S_CLIENT"); v != "" {
+		cfg.FakeK8sClient = v == "true"
 	}
 
 	if err := cfg.validate(); err != nil {
