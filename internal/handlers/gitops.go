@@ -36,6 +36,7 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitops.Change, policy.Gi
 }
 
 func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.Request) {
+	defer h.emitSecurityEvent(r, "gitops_dry_run", "", "", "", "", "attempt")
 	change, mapping, err := h.gitChange(r)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
@@ -59,6 +60,7 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 }
 
 func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.Request) {
+	defer h.emitSecurityEvent(r, "gitops_delivery", "", "", "", "", "attempt")
 	change, mapping, err := h.gitChange(r)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")

@@ -28,8 +28,22 @@ type ProtectedHandlers struct {
 	GitMappings       *policy.PolicyStore
 	GitTransport      gitops.GitTransport
 	ProposalProviders map[string]gitops.ProposalProvider
+	SecurityEvents    SecurityEventSink
 	idempotencyMu     sync.Mutex
 	idempotencyKeys   map[string]struct{}
+}
+
+// SecurityEventSink receives bounded audit records for sensitive operations.
+type SecurityEventSink interface {
+	EmitSecurityEvent(operation, subject, namespace, secret, key, mode, result, requestID string)
+}
+
+func (h *ProtectedHandlers) emitSecurityEvent(r *http.Request, operation, namespace, secret, key, mode, result string) {
+	if h.SecurityEvents == nil {
+		return
+	}
+	identity, _ := authmw.GetIdentity(r.Context())
+	h.SecurityEvents.EmitSecurityEvent(operation, identity.Subject, namespace, secret, key, mode, result, requestID(r))
 }
 
 // NewProtectedHandlers constructs handlers for protected resources.
@@ -187,6 +201,8 @@ func validName(value string) bool {
 
 // DecryptHandler returns one requested key only after internal decryption.
 func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Request) {
+	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
+	defer h.emitSecurityEvent(r, "reveal", namespace, name, "", "", "attempt")
 	if !requireCapability(w, r, policy.SecretDecrypt) {
 		return
 	}
@@ -226,6 +242,8 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 
 // ResealHandler mutates exactly one encrypted key.
 func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request) {
+	namespace, name, key := chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), chi.URLParam(r, "key")
+	defer h.emitSecurityEvent(r, "patch", namespace, name, key, "", "attempt")
 	if !requireCapability(w, r, policy.SecretSeal, policy.SecretDecrypt) {
 		return
 	}
@@ -247,6 +265,10 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 	}
 	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key")
+		return
+	}
+	if !h.claimIdempotency(r) {
+		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
 		return
 	}
 	op := crypto.ResealOp(req.Operation)
