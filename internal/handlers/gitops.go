@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
 	"github.com/kubeseal-ui/api/internal/gitops"
@@ -65,6 +66,18 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	}
 	if !hasGitCapability(r, mapping.Mode) {
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+		return
+	}
+	if mapping.Mode == policy.GitDeliveryProposal && h.ProposalProviders[mapping.Repository] == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
+		return
+	}
+	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key")
+		return
+	}
+	if !h.claimIdempotency(r) {
+		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
 		return
 	}
 	pushed, err := h.GitTransport.PushBranch(r.Context(), change)

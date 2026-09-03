@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
@@ -27,15 +28,33 @@ type ProtectedHandlers struct {
 	GitMappings       *policy.PolicyStore
 	GitTransport      gitops.GitTransport
 	ProposalProviders map[string]gitops.ProposalProvider
+	idempotencyMu     sync.Mutex
+	idempotencyKeys   map[string]struct{}
 }
 
 // NewProtectedHandlers constructs handlers for protected resources.
 func NewProtectedHandlers(k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, enableDecrypt bool) *ProtectedHandlers {
-	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt}
+	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, idempotencyKeys: make(map[string]struct{})}
 }
 
 func NewProtectedHandlersWithGitOps(store *policy.PolicyStore, transport gitops.GitTransport, k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, enableDecrypt bool) *ProtectedHandlers {
-	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, GitMappings: store, GitTransport: transport, ProposalProviders: make(map[string]gitops.ProposalProvider)}
+	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, GitMappings: store, GitTransport: transport, ProposalProviders: make(map[string]gitops.ProposalProvider), idempotencyKeys: make(map[string]struct{})}
+}
+
+func (h *ProtectedHandlers) claimIdempotency(r *http.Request) bool {
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		return false
+	}
+	id, _ := authmw.GetIdentity(r.Context())
+	compound := id.Subject + "\x00" + key
+	h.idempotencyMu.Lock()
+	defer h.idempotencyMu.Unlock()
+	if _, exists := h.idempotencyKeys[compound]; exists {
+		return false
+	}
+	h.idempotencyKeys[compound] = struct{}{}
+	return true
 }
 
 func requireCapability(w http.ResponseWriter, r *http.Request, required ...policy.Capability) bool {

@@ -55,6 +55,7 @@ func TestGitOpsDeliverDirectUsesTransport(t *testing.T) {
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
 	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", `{"namespace":"payments","name":"api","yaml":"new","base_commit":"abc"}`, protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "direct-1")
 	rr := httptest.NewRecorder()
 	h.GitOpsDeliverHandler(rr, req)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"commit_sha"`) {
