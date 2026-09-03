@@ -1,11 +1,6 @@
 // Package main wires the kubeseal-ui api server.
 //
-// Per the Phase-1 boundary (internal-docs/implementation/phase-1.md,
-// decision #5 in phase-1-progress.md): only /healthz and /readyz are
-// externally usable. Protected routes (namespaces, secrets, encrypt,
-// decrypt, reseal, auth) are NOT mounted in this phase — they arrive
-// in Phase 2 behind the auth middleware. Mounting a protected route
-// here before auth exists would publish plaintext endpoints.
+// The server exposes health endpoints and authenticated Phase 2 API routes.
 package main
 
 import (
@@ -14,24 +9,29 @@ import (
 	"crypto/x509"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/kubeseal-ui/api/internal/acl"
-	"github.com/kubeseal-ui/api/internal/config"
+	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
+	"github.com/kubeseal-ui/api/internal/auth/oidc"
 	"github.com/kubeseal-ui/api/internal/certprovider"
+	"github.com/kubeseal-ui/api/internal/config"
 	"github.com/kubeseal-ui/api/internal/crypto"
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 	"github.com/kubeseal-ui/api/internal/observability"
+	"k8s.io/client-go/rest"
 )
 
 // devPrivProvider is a development-only PrivateKeyProvider that returns
 // a fixed RSA key for local testing when ENABLE_DECRYPT=true.
-// Phase 2 will replace this with a proper K8s-backed provider.
+// Production uses the Kubernetes-backed provider.
 type devPrivProvider struct {
 	key *rsa.PrivateKey
 }
@@ -67,21 +67,7 @@ func main() {
 		certProvider = &staticCertProvider{} // placeholder that returns error
 	}
 
-	// Private key provider for decryption (only when enabled)
-	var privProvider crypto.PrivateKeyProvider
-	if cfg.EnableDecrypt {
-		// In production this comes from K8s via kubernetes.Client.FindActiveControllerKey
-		// Phase 1 uses a dev placeholder; Phase 2 wires the real provider.
-		slog.Info("decryption enabled; using development private key provider")
-		privProvider = &devPrivProvider{key: devPrivateKey()}
-	} else {
-		slog.Info("decryption disabled (ENABLE_DECRYPT=false)")
-	}
-
-	// Crypto wrapper
-	cryptoWrapper := crypto.New(certProvider, privProvider)
-
-	// Kubernetes client (fake in dev; real client in Phase 2 via DI)
+	// Kubernetes client (fake in explicit fake mode; production client otherwise)
 	var k8sClient kubernetes.Client
 	if cfg.FakeK8sClient {
 		k8sClient = kubernetes.NewFake(
@@ -92,15 +78,25 @@ func main() {
 			nil,
 		)
 	} else {
-		slog.Warn("real Kubernetes client not yet wired; using fake for dev")
-		k8sClient = kubernetes.NewFake(
-			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
-			[]kubernetes.SealedSecret{
-				{Name: "example", Namespace: "default", Scope: "strict"},
-			},
-			nil,
-		)
+		kubeConfig, configErr := rest.InClusterConfig()
+		if configErr != nil {
+			log.Fatal("kubernetes config", "error", configErr)
+		}
+		k8sClient, configErr = kubernetes.NewClientFromConfig(kubeConfig, kubernetes.Options{ControllerNamespace: cfg.ControllerNamespace, ActiveKeyLabel: cfg.ActiveKeyLabel})
+		if configErr != nil {
+			log.Fatal("kubernetes client", "error", configErr)
+		}
 	}
+
+	var privProvider crypto.PrivateKeyProvider
+	if cfg.EnableDecrypt {
+		if cfg.FakeK8sClient {
+			privProvider = &devPrivProvider{key: devPrivateKey()}
+		} else {
+			privProvider = kubePrivateKeyProvider{client: k8sClient}
+		}
+	}
+	cryptoWrapper := crypto.New(certProvider, privProvider)
 
 	// ACL identities (mock for Phase 1; OIDC in Phase 2)
 	_ = acl.RoleViewer
@@ -109,7 +105,38 @@ func main() {
 	_ = acl.RolePlatformAdmin
 
 	// Router with production middleware chain (request ID, recovery, timeout, logging)
-	router := newRouter(logger, &cfg, cryptoWrapper, k8sClient)
+	// OIDC discovery is injected by the server startup path.
+	var oidcProvider *oidc.Provider
+	if cfg.OIDCIssuer != "" && cfg.OIDCClientID != "" {
+		oidcCfg := oidc.Config{
+			IssuerURL: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID,
+			ClientSecret: cfg.OIDCClientSecret, RedirectURL: cfg.OIDCRedirectURL,
+			Scopes: strings.Fields(cfg.OIDCScopes), GroupsClaim: cfg.OIDCGroupsClaim,
+			UsernameClaim: cfg.OIDCUsernameClaim, CookieSecure: true,
+		}
+		if len(oidcCfg.Scopes) == 0 {
+			oidcCfg.Scopes = []string{"openid", "profile", "email", "groups"}
+		}
+		if oidcCfg.GroupsClaim == "" {
+			oidcCfg.GroupsClaim = "groups"
+		}
+		if oidcCfg.UsernameClaim == "" {
+			oidcCfg.UsernameClaim = "preferred_username"
+		}
+		if oidcCfg.ClientSecret == "" || oidcCfg.RedirectURL == "" {
+			slog.Error("OIDC configuration incomplete", "error", "client secret and redirect URL are required")
+		} else {
+			discoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			var discoveryErr error
+			oidcProvider, discoveryErr = oidc.NewProvider(discoveryCtx, oidcCfg)
+			cancel()
+			if discoveryErr != nil {
+				slog.Error("OIDC provider discovery failed", "error", discoveryErr)
+			}
+		}
+	}
+	_ = authmw.DefaultAuthConfig
+	router := newRouter(logger, &cfg, cryptoWrapper, k8sClient, oidcProvider)
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),

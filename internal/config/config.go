@@ -50,7 +50,16 @@ type Config struct {
 	// OIDCClientID is the kubeseal-ui OAuth client id registered with
 	// the provider. SECRET — must not appear in logs or error envelopes.
 	// Sources: OIDC_CLIENT_ID env.
-	OIDCClientID string
+	OIDCClientID      string
+	OIDCClientSecret  string
+	OIDCRedirectURL   string
+	OIDCScopes        string
+	OIDCGroupsClaim   string
+	OIDCUsernameClaim string
+
+	// SessionSigningKey signs application session cookies. Required when
+	// authenticated routes are enabled; never log this value.
+	SessionSigningKey string
 
 	// EnableDecrypt controls whether the decrypt endpoint and the
 	// controller-private-key RBAC are wired. Phase-1 default is false.
@@ -65,7 +74,9 @@ type Config struct {
 	// FakeK8sClient controls whether to use the fake Kubernetes client
 	// for development. Default true.
 	// Sources: -fake-k8s flag, FAKE_K8S_CLIENT env.
-	FakeK8sClient bool
+	FakeK8sClient       bool
+	ControllerNamespace string
+	ActiveKeyLabel      string
 }
 
 // Load parses configuration from process flags + environment and returns
@@ -77,13 +88,21 @@ type Config struct {
 // from tests) would otherwise panic with "flag redefined".
 func Load() (Config, error) {
 	cfg := Config{
-		Port:            *flagPort,
-		LogLevel:        *flagLevel,
-		OIDCIssuer:      os.Getenv("OIDC_ISSUER"),
-		OIDCClientID:    os.Getenv("OIDC_CLIENT_ID"),
-		EnableDecrypt:   os.Getenv("ENABLE_DECRYPT") == "true",
-		KubeSealCertURL: *flagCertURL,
-		FakeK8sClient:   *flagFakeK8s,
+		Port:                *flagPort,
+		LogLevel:            *flagLevel,
+		OIDCIssuer:          os.Getenv("OIDC_ISSUER"),
+		OIDCClientID:        os.Getenv("OIDC_CLIENT_ID"),
+		OIDCClientSecret:    os.Getenv("OIDC_CLIENT_SECRET"),
+		OIDCRedirectURL:     os.Getenv("OIDC_REDIRECT_URL"),
+		OIDCScopes:          os.Getenv("OIDC_SCOPES"),
+		OIDCGroupsClaim:     os.Getenv("OIDC_GROUPS_CLAIM"),
+		OIDCUsernameClaim:   os.Getenv("OIDC_USERNAME_CLAIM"),
+		SessionSigningKey:   os.Getenv("SESSION_SIGNING_KEY"),
+		EnableDecrypt:       os.Getenv("ENABLE_DECRYPT") == "true",
+		KubeSealCertURL:     *flagCertURL,
+		FakeK8sClient:       *flagFakeK8s,
+		ControllerNamespace: os.Getenv("KUBESEAL_CONTROLLER_NAMESPACE"),
+		ActiveKeyLabel:      os.Getenv("KUBESEAL_ACTIVE_KEY_LABEL"),
 	}
 
 	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {

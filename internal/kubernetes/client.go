@@ -39,6 +39,8 @@ type SealedSecret struct {
 	// Scope is the sealed secret's mobility scope (strict,
 	// namespace-wide, cluster-wide). Derived from annotations.
 	Scope string
+	// YAML is the encrypted manifest for clients that support detail reads.
+	YAML string
 }
 
 // ActiveKey is the resolved controller private key. Callers must
