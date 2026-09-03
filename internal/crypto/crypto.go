@@ -390,6 +390,6 @@ func (f *staticPrivProvider) PrivateKey(_ context.Context) (*rsa.PrivateKey, err
 // Ensure kubeseal import is referenced — used for Seal/SealedSecret
 // integration in future phases.
 var (
-	_ = kubeseal.Seal
+	_                = kubeseal.Seal
 	_ runtime.Object = &ssv1alpha1.SealedSecret{}
 )

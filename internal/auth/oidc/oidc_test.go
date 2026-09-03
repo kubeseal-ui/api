@@ -15,25 +15,25 @@ import (
 // testConfig returns a minimal test configuration.
 func testConfig() Config {
 	return Config{
-		IssuerURL:        "https://auth.example.com",
-		ClientID:         "kubeseal-ui",
-		ClientSecret:     "test-secret",
-		RedirectURL:      "https://app.example.com/api/v1/auth/callback",
-		Scopes:           []string{"openid", "profile", "email", "groups"},
-		GroupsClaim:      "groups",
-		UsernameClaim:    "preferred_username",
-		CookieSecure:     false, // Tests don't use HTTPS
-		CookieDomain:     "",
+		IssuerURL:          "https://auth.example.com",
+		ClientID:           "kubeseal-ui",
+		ClientSecret:       "test-secret",
+		RedirectURL:        "https://app.example.com/api/v1/auth/callback",
+		Scopes:             []string{"openid", "profile", "email", "groups"},
+		GroupsClaim:        "groups",
+		UsernameClaim:      "preferred_username",
+		CookieSecure:       false, // Tests don't use HTTPS
+		CookieDomain:       "",
 		CSRFTrustedOrigins: []string{"https://app.example.com"},
 	}
 }
 
 // mockProvider implements a minimal OIDC provider for testing.
 type mockProvider struct {
-	server     *httptest.Server
-	issuerURL  string
-	clientID   string
-	keySet     *oidc.KeySet
+	server    *httptest.Server
+	issuerURL string
+	clientID  string
+	keySet    *oidc.KeySet
 }
 
 func newMockProvider(t *testing.T) *mockProvider {
@@ -206,7 +206,7 @@ func TestSplitCSVHandlesVariousInputs(t *testing.T) {
 		{"single", []string{"single"}},
 		{"a,b,c", []string{"a", "b", "c"}},
 		{"a, b, c", []string{"a", "b", "c"}},
-		{"a,,b", []string{"a", "b"}}, // empty entries skipped
+		{"a,,b", []string{"a", "b"}},    // empty entries skipped
 		{" a , b ", []string{"a", "b"}}, // whitespace trimmed
 	}
 

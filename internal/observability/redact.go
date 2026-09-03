@@ -47,7 +47,7 @@ var sensitiveKeyMarkers = []string{
 	"refresh",
 	"csrf",
 	"pem",
-	"cert", // "certificate" content; the cert metadata (subject, issuer) is safe but value not
+	"cert",      // "certificate" content; the cert metadata (subject, issuer) is safe but value not
 	"client_id", // OIDC client identifier — not the token itself but identifies the integration
 }
 
@@ -115,7 +115,6 @@ func (h *redactingJSONHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 func (h *redactingJSONHandler) WithGroup(name string) slog.Handler {
 	return &redactingJSONHandler{inner: h.inner.WithGroup(name)}
 }
-
 
 // attrsToAny converts a slice of slog.Attr to []any so it can be spread
 // into the variadic slog.Group(key, args...) constructor.

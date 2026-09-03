@@ -135,8 +135,8 @@ func TestHTTPProviderResponseSizeLimit(t *testing.T) {
 	defer srv.Close()
 
 	p := NewHTTP(HTTPOptions{
-		URL:               srv.URL,
-		MaxResponseBytes:  1024, // deliberately tiny to trigger rejection
+		URL:              srv.URL,
+		MaxResponseBytes: 1024, // deliberately tiny to trigger rejection
 	})
 
 	_, err := p.Get(t.Context())
