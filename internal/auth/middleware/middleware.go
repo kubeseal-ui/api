@@ -191,18 +191,8 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 		slog.Debug("auth: session verification failed", "error", err)
 		// Check if session expired — attempt refresh
 		if err.Error() == "session expired" {
-			if attemptRefresh(w, r, cfg, signingKey) {
-				// The refreshed session cookie is already set on the response;
-				// re-extract to build the identity for this request.
-				raw, decErr := base64.RawURLEncoding.DecodeString(sessionCookie.Value)
-				if decErr == nil {
-					var newData sessionCookieData
-					if json.Unmarshal(raw, &newData) == nil {
-						if verifyErr := verifySessionCookie(newData.SessionData, newData.Signature, signingKey); verifyErr == nil {
-							return newData, true
-						}
-					}
-				}
+			if refreshed, ok := attemptRefresh(w, r, cfg, signingKey); ok {
+				return refreshed, true
 			}
 		}
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
@@ -213,16 +203,16 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 }
 
 // attemptRefresh tries to refresh the session using the refresh token.
-func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte) bool {
+func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte) (sessionCookieData, bool) {
 	if cfg.OIDCProvider == nil || len(signingKey) == 0 {
 		if w != nil {
 			clearAuthCookies(w, cfg)
 		}
-		return false
+		return sessionCookieData{}, false
 	}
 	refreshCookie, err := r.Cookie(cfg.RefreshCookie)
 	if err != nil {
-		return false
+		return sessionCookieData{}, false
 	}
 
 	ctx := r.Context()
@@ -233,7 +223,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 		if w != nil {
 			clearAuthCookies(w, cfg)
 		}
-		return false
+		return sessionCookieData{}, false
 	}
 
 	// Verify new ID token
@@ -247,7 +237,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 		if w != nil {
 			clearAuthCookies(w, cfg)
 		}
-		return false
+		return sessionCookieData{}, false
 	}
 
 	// Get existing CSRF from session cookie to preserve it
@@ -284,7 +274,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	cookieJSON, err := json.Marshal(newCookieData)
 	if err != nil {
 		slog.Debug("auth: failed to marshal new session", "error", err)
-		return false
+		return sessionCookieData{}, false
 	}
 	encodedSession := base64.RawURLEncoding.EncodeToString(cookieJSON)
 
@@ -305,7 +295,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 		}
 	}
 
-	return true
+	return newCookieData, true
 }
 
 // scheduleAsyncRefresh schedules a background token refresh if expiry is near.
@@ -316,7 +306,7 @@ func scheduleAsyncRefresh(r *http.Request, expiry int64, cfg AuthConfig, signing
 	go func() {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		attemptRefresh(nil, r.WithContext(ctx), cfg, signingKey)
+		_, _ = attemptRefresh(nil, r.WithContext(ctx), cfg, signingKey)
 	}()
 }
 
@@ -423,7 +413,7 @@ func validateCSRFToken(cookieToken, headerToken string) bool {
 // isTrustedOrigin checks if the origin is in the trusted origins list.
 func isTrustedOrigin(origin string, trustedOrigins []string) bool {
 	if origin == "" {
-		return true // No origin header is acceptable
+		return false
 	}
 	for _, trusted := range trustedOrigins {
 		if origin == trusted {

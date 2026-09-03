@@ -50,12 +50,14 @@ type Config struct {
 	// OIDCClientID is the kubeseal-ui OAuth client id registered with
 	// the provider. SECRET — must not appear in logs or error envelopes.
 	// Sources: OIDC_CLIENT_ID env.
-	OIDCClientID      string
-	OIDCClientSecret  string
-	OIDCRedirectURL   string
-	OIDCScopes        string
-	OIDCGroupsClaim   string
-	OIDCUsernameClaim string
+	OIDCClientID       string
+	OIDCClientSecret   string
+	OIDCRedirectURL    string
+	OIDCScopes         string
+	OIDCGroupsClaim    string
+	OIDCUsernameClaim  string
+	CookieDomain       string
+	CSRFTrustedOrigins string
 
 	// SessionSigningKey signs application session cookies. Required when
 	// authenticated routes are enabled; never log this value.
@@ -97,6 +99,8 @@ func Load() (Config, error) {
 		OIDCScopes:          os.Getenv("OIDC_SCOPES"),
 		OIDCGroupsClaim:     os.Getenv("OIDC_GROUPS_CLAIM"),
 		OIDCUsernameClaim:   os.Getenv("OIDC_USERNAME_CLAIM"),
+		CookieDomain:        os.Getenv("COOKIE_DOMAIN"),
+		CSRFTrustedOrigins:  os.Getenv("CSRF_TRUSTED_ORIGINS"),
 		SessionSigningKey:   os.Getenv("SESSION_SIGNING_KEY"),
 		EnableDecrypt:       os.Getenv("ENABLE_DECRYPT") == "true",
 		KubeSealCertURL:     *flagCertURL,

@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -55,6 +56,10 @@ func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wr
 		authCfg := authmw.DefaultAuthConfig(provider)
 		authCfg.SigningKey = []byte(cfg.SessionSigningKey)
 		authCfg.CookieSecure = true
+		authCfg.CookieDomain = cfg.CookieDomain
+		if origins := strings.Fields(cfg.CSRFTrustedOrigins); len(origins) > 0 {
+			authCfg.CSRFTrustedOrigins = origins
+		}
 		policyStore := policy.NewPolicyStore()
 		authCfg.ResolveCapabilities = func(groups []string) []string {
 			caps := policyStore.CapabilitiesForGroups(groups)

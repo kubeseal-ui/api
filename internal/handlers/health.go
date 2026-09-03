@@ -1,16 +1,7 @@
 // Package handlers hosts the kubeseal-ui api HTTP handlers.
 //
-// Phase-1 boundary (per internal-docs/implementation/phase-1.md):
-//
-//	Only /healthz and /readyz are externally usable. Protected handlers
-//	(namespaces, secrets, encrypt, decrypt, reseal, gitops dry-run,
-//	gitops deliver) are intentionally NOT wired to the public router
-//	in this phase. They are compiled behind test harnesses and the
-//	auth middleware gates them in Phase 2.
-//
-// Handlers in this package take no receiver state. Cross-cutting
-// concerns (config, auth, cert provider, crypto, k8s) arrive via the
-// router context in Phase 2; Phase 1 only needs the global config.
+// The router exposes health endpoints and, once OIDC is configured, mounts
+// protected operations behind authentication and CSRF middleware.
 package handlers
 
 import (
