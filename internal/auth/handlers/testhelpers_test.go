@@ -16,16 +16,16 @@ import (
 )
 
 type fakeProvider struct {
-	loginURL  string
-	loginErr  error
-	exchange  *oidc.TokenResponse
+	loginURL    string
+	loginErr    error
+	exchange    *oidc.TokenResponse
 	exchangeErr error
-	verified  *oidc.VerifiedIDToken
-	verifyErr error
-	refresh   *oidc.TokenResponse
-	refreshErr error
-	revokeErr error
-	cookies   bool
+	verified    *oidc.VerifiedIDToken
+	verifyErr   error
+	refresh     *oidc.TokenResponse
+	refreshErr  error
+	revokeErr   error
+	cookies     bool
 }
 
 func (f *fakeProvider) LoginURL(_ *oidc.FlowState) (string, error) {
