@@ -64,7 +64,7 @@ func MustGetIdentity(ctx context.Context) Identity {
 
 // AuthConfig holds configuration for the auth middleware.
 type AuthConfig struct {
-	OIDCProvider       *oidc.Provider
+	OIDCProvider       oidc.AuthProvider
 	SessionCookie      string
 	RefreshCookie      string
 	CSRFCookie         string
@@ -78,7 +78,7 @@ type AuthConfig struct {
 }
 
 // DefaultAuthConfig returns a default auth config for testing.
-func DefaultAuthConfig(provider *oidc.Provider) AuthConfig {
+func DefaultAuthConfig(provider oidc.AuthProvider) AuthConfig {
 	return AuthConfig{
 		OIDCProvider:       provider,
 		SessionCookie:      oidc.CookieSession,

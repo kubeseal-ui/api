@@ -32,7 +32,7 @@ func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wr
 
 	// OIDC discovery is performed by main and injected here. Keeping the
 	// router free of network I/O makes it deterministic and testable.
-	var provider *oidc.Provider
+	var provider oidc.AuthProvider
 	if cfg != nil && cfg.SessionSigningKey != "" && len(providers) > 0 {
 		provider = providers[0]
 	}

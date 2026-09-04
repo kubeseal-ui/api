@@ -32,6 +32,10 @@ func extractConfiguredClaims(claims map[string]any, groupsClaim, usernameClaim s
 }
 
 func stringClaim(value any) string {
-	valueString, _ := value.(string)
-	return valueString
+	switch v := value.(type) {
+	case string:
+		return v
+	default:
+		return ""
+	}
 }

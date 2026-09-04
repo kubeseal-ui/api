@@ -245,7 +245,7 @@ func (g GitMapping) Validate() error {
 	if g.AuthRef == "" {
 		return errors.New("auth reference is required")
 	}
-	if strings.Contains(g.PathTemplate, "{namespace}") == false || strings.Contains(g.PathTemplate, "{name}") == false {
+	if !strings.Contains(g.PathTemplate, "{namespace}") || !strings.Contains(g.PathTemplate, "{name}") {
 		return errors.New("path template must contain {namespace} and {name}")
 	}
 	if strings.ContainsAny(g.PathTemplate, "\\\x00") || strings.Contains(g.PathTemplate, "..") || strings.HasPrefix(g.PathTemplate, "/") {

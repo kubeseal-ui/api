@@ -31,7 +31,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // AuthHandlers holds dependencies for auth handlers.
 type AuthHandlers struct {
-	Provider *oidc.Provider
+	Provider oidc.AuthProvider
 	Config   middleware.AuthConfig
 	// SigningKey is the HMAC key used to sign session cookies.
 	// In production this should come from a secure secret (e.g., Infisical).
@@ -39,7 +39,7 @@ type AuthHandlers struct {
 }
 
 // NewAuthHandlers creates new auth handlers.
-func NewAuthHandlers(provider *oidc.Provider, cfg middleware.AuthConfig, signingKey []byte) *AuthHandlers {
+func NewAuthHandlers(provider oidc.AuthProvider, cfg middleware.AuthConfig, signingKey []byte) *AuthHandlers {
 	return &AuthHandlers{
 		Provider:   provider,
 		Config:     cfg,
@@ -84,6 +84,65 @@ func signData(data any, key []byte) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
+// signedFlowState is the encoded PKCE cookie value. The signature covers
+// the canonical JSON encoding of the FlowState fields only; `sig` is
+// captured in the same envelope for atomic cookie transport but is
+// excluded from the bytes that get re-signed on verify.
+type signedFlowState struct {
+	oidc.FlowState
+	Signature string `json:"sig,omitempty"`
+}
+
+// flowStateBytes returns the canonical JSON encoding of the embedded
+// FlowState fields. The verifier re-derives the signature from these
+// bytes alone so an attacker cannot mutate fields without invalidating
+// the signature.
+func (s signedFlowState) flowStateBytes() ([]byte, error) {
+	s.Signature = ""
+	return json.Marshal(s.FlowState)
+}
+
+// signFlowState returns a signed, base64-encoded PKCE cookie payload.
+func signFlowState(flow oidc.FlowState, key []byte) (string, error) {
+	rawFlow, err := json.Marshal(flow)
+	if err != nil {
+		return "", fmt.Errorf("marshal flow state: %w", err)
+	}
+	sig := signDataFromRawBytes(rawFlow, key)
+	envelope := signedFlowState{FlowState: flow, Signature: sig}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		return "", fmt.Errorf("marshal signed envelope: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// verifyFlowState parses the PKCE cookie, verifies its signature, and returns
+// the decoded flow. The value never contains characters invalid for cookie
+// transport because it is base64url-encoded.
+func verifyFlowState(envelopeJSON []byte, sig string, key []byte) (oidc.FlowState, bool) {
+	var env signedFlowState
+	if err := json.Unmarshal(envelopeJSON, &env); err != nil {
+		return oidc.FlowState{}, false
+	}
+	canonical, err := env.flowStateBytes()
+	if err != nil {
+		return oidc.FlowState{}, false
+	}
+	expected := signDataFromRawBytes(canonical, key)
+	if !hmac.Equal([]byte(sig), []byte(expected)) {
+		return oidc.FlowState{}, false
+	}
+	return env.FlowState, true
+}
+
+// signDataFromRawBytes computes an HMAC over raw bytes.
+func signDataFromRawBytes(raw, key []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(raw)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
 // LoginHandler initiates the OIDC login flow.
 // GET /api/v1/auth/login
 func (h *AuthHandlers) LoginHandler(w http.ResponseWriter, r *http.Request) {
@@ -95,10 +154,11 @@ func (h *AuthHandlers) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store flow state in PKCE cookie (HttpOnly, short TTL)
-	flowJSON, err := json.Marshal(flow)
+	// Sign the PKCE cookie value. Without signing, raw JSON cannot survive
+	// net/http's cookie transport (the parser drops invalid bytes like '"').
+	signed, err := signFlowState(*flow, h.SigningKey)
 	if err != nil {
-		slog.Error("auth: failed to marshal flow state", "error", err)
+		slog.Error("auth: failed to sign flow state", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -106,7 +166,7 @@ func (h *AuthHandlers) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
 	pkceCookie := h.Provider.CookieOptions("/api/v1/auth/callback", 5*60) // 5 min
 	pkceCookie.Name = oidc.CookiePKCE
-	pkceCookie.Value = string(flowJSON)
+	pkceCookie.Value = signed
 	http.SetCookie(w, pkceCookie)
 
 	// Build login URL and redirect
@@ -130,9 +190,24 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var flow oidc.FlowState
-	if unmarshalErr := json.Unmarshal([]byte(pkceCookie.Value), &flow); unmarshalErr != nil {
+	// Decode the signed cookie value.
+	raw, decodeErr := base64.RawURLEncoding.DecodeString(pkceCookie.Value)
+	if decodeErr != nil {
+		slog.Debug("auth: invalid PKCE cookie encoding", "error", decodeErr)
+		http.Error(w, "invalid flow state", http.StatusBadRequest)
+		return
+	}
+
+	var envelope signedFlowState
+	if unmarshalErr := json.Unmarshal(raw, &envelope); unmarshalErr != nil {
 		slog.Debug("auth: invalid PKCE cookie format", "error", unmarshalErr)
+		http.Error(w, "invalid flow state", http.StatusBadRequest)
+		return
+	}
+
+	flow, ok := verifyFlowState(raw, envelope.Signature, h.SigningKey)
+	if !ok {
+		slog.Debug("auth: PKCE cookie signature mismatch")
 		http.Error(w, "invalid flow state", http.StatusBadRequest)
 		return
 	}
@@ -264,7 +339,8 @@ func (h *AuthHandlers) MeHandler(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandlers) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	// Validate CSRF
 	if !middleware.RequireCSRF(w, r, h.Config) {
-		return // RequireCSRF writes error response
+		http.Error(w, "CSRF validation failed", http.StatusForbidden)
+		return
 	}
 
 	// Get refresh token for provider revocation (best effort)
