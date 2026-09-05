@@ -23,7 +23,7 @@ func TestRequireCSRFSameTokenRequiresTrustedOrigin(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/", nil)
 			r.Header.Set("Origin", tc.origin)
 			r.Header.Set("X-CSRF-Token", "csrf")
-			r.AddCookie(&http.Cookie{Name: oidc.CookieCSRF, Value: "csrf"})
+			r.AddCookie(&http.Cookie{Name: oidc.CookieCSRF, Value: "csrf", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 			if got := RequireCSRF(httptest.NewRecorder(), r, cfg); got != tc.want {
 				t.Fatalf("RequireCSRF() = %v, want %v", got, tc.want)
 			}

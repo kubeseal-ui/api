@@ -58,9 +58,6 @@ func (f *fakeProvider) RefreshTokens(_ context.Context, _ string) (*oidc.TokenRe
 	return &oidc.TokenResponse{IDToken: "id-token", RefreshToken: "refresh-token"}, f.refreshErr
 }
 func (f *fakeProvider) RevokeToken(_ context.Context, _ string) error { return f.revokeErr }
-func (f *fakeProvider) CookieOptions(path string, maxAge int) *http.Cookie {
-	return &http.Cookie{Path: path, MaxAge: maxAge, HttpOnly: true, Secure: false, SameSite: http.SameSiteLaxMode}
-}
 
 func testAuthConfig() middleware.AuthConfig {
 	return middleware.AuthConfig{

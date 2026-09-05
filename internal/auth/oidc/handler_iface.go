@@ -4,7 +4,6 @@ package oidc
 
 import (
 	"context"
-	"net/http"
 )
 
 // AuthProvider is the handler-facing contract. *Provider implements it.
@@ -14,5 +13,4 @@ type AuthProvider interface {
 	VerifyIDToken(ctx context.Context, idToken, nonce string) (*VerifiedIDToken, error)
 	RefreshTokens(ctx context.Context, refreshToken string) (*TokenResponse, error)
 	RevokeToken(ctx context.Context, token string) error
-	CookieOptions(path string, maxAge int) *http.Cookie
 }
