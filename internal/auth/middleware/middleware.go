@@ -281,14 +281,14 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	// Set cookies
 	if w != nil {
 		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		sessionCookie := cfg.OIDCProvider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds())) //nolint:gosec
+		sessionCookie := cfg.OIDCProvider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds())) //nolint:gosec //nosec
 		sessionCookie.Name = cfg.SessionCookie
 		sessionCookie.Value = encodedSession
 		http.SetCookie(w, sessionCookie)
 
 		if tokens.RefreshToken != "" {
 			// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-						refreshCookie := cfg.OIDCProvider.CookieOptions("/api/v1", int(time.Until(verified.Expiry.Add(24*time.Hour)).Seconds())) //nolint:gosec
+						refreshCookie := cfg.OIDCProvider.CookieOptions("/api/v1", int(time.Until(verified.Expiry.Add(24*time.Hour)).Seconds())) //nolint:gosec //nosec
 			refreshCookie.Name = cfg.RefreshCookie
 			refreshCookie.Value = tokens.RefreshToken
 			http.SetCookie(w, refreshCookie)
@@ -337,7 +337,7 @@ func clearAuthCookies(w http.ResponseWriter, cfg AuthConfig) {
 		{oidc.CookiePKCE, "/api/v1/auth/callback", true},
 	} {
 		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		cookie := &http.Cookie{
+		cookie := &http.Cookie{ //nosec
 			Name:     item.name,
 			Value:    "",
 			Path:     item.path,

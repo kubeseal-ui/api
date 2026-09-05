@@ -163,7 +163,7 @@ func (h *AuthHandlers) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-	pkceCookie := h.Provider.CookieOptions("/api/v1/auth/callback", 5*60) // 5 min
+	pkceCookie := h.Provider.CookieOptions("/api/v1/auth/callback", 5*60) // 5 min //nosec
 	pkceCookie.Name = oidc.CookiePKCE
 	pkceCookie.Value = signed
 	http.SetCookie(w, pkceCookie)
@@ -281,7 +281,7 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Set session cookie
 	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-	sessionCookie := h.Provider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds()))
+	sessionCookie := h.Provider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds())) //nosec
 	sessionCookie.Name = oidc.CookieSession
 	sessionCookie.Value = sessionValue
 	http.SetCookie(w, sessionCookie)
@@ -289,7 +289,7 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	// Set refresh token cookie
 	if tokens.RefreshToken != "" {
 		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		refreshCookie := h.Provider.CookieOptions("/api/v1", int(time.Until(verified.Expiry.Add(24*time.Hour)).Seconds()))
+		refreshCookie := h.Provider.CookieOptions("/api/v1", int(time.Until(verified.Expiry.Add(24*time.Hour)).Seconds())) //nosec
 		refreshCookie.Name = oidc.CookieRefresh
 		refreshCookie.Value = tokens.RefreshToken
 		http.SetCookie(w, refreshCookie)
@@ -297,7 +297,7 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Set CSRF cookie (readable by SPA for X-CSRF-Token header)
 	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-	csrfCookie := h.Provider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds()))
+	csrfCookie := h.Provider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds())) //nosec
 	csrfCookie.Name = oidc.CookieCSRF
 	csrfCookie.Value = csrfToken
 	csrfCookie.HttpOnly = false // SPA needs to read this
@@ -305,7 +305,7 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Clear PKCE cookie
 	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-	pkceCookie = h.Provider.CookieOptions("/api/v1/auth/callback", -1)
+	pkceCookie = h.Provider.CookieOptions("/api/v1/auth/callback", -1) //nosec
 	pkceCookie.Name = oidc.CookiePKCE
 	pkceCookie.Value = ""
 	http.SetCookie(w, pkceCookie)
@@ -370,7 +370,7 @@ func clearAuthCookies(w http.ResponseWriter, cfg middleware.AuthConfig) {
 		{oidc.CookiePKCE, "/api/v1/auth/callback", true},
 	} {
 		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		cookie := &http.Cookie{
+		cookie := &http.Cookie{ //nosec
 			Name:     item.name,
 			Value:    "",
 			Path:     item.path,
@@ -397,7 +397,7 @@ func (h *AuthHandlers) CSRFHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		csrfCookie := h.Provider.CookieOptions("/", 3600) //nolint:gosec
+		csrfCookie := h.Provider.CookieOptions("/", 3600) //nolint:gosec //nosec
 		csrfCookie.Name = oidc.CookieCSRF
 		csrfCookie.Value = token
 		csrfCookie.HttpOnly = false
