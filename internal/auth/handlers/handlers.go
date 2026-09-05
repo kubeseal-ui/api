@@ -397,7 +397,7 @@ func (h *AuthHandlers) CSRFHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		csrfCookie := h.Provider.CookieOptions("/", 3600)
+		csrfCookie := h.Provider.CookieOptions("/", 3600) //nolint:gosec
 		csrfCookie.Name = oidc.CookieCSRF
 		csrfCookie.Value = token
 		csrfCookie.HttpOnly = false

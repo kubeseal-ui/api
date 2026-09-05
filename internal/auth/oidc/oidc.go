@@ -436,8 +436,7 @@ func getScopeFromToken(token *oauth2.Token) string {
 func (p *Provider) CookieOptions(path string, maxAge int) *http.Cookie {
 	// CookieSecure defaults to true in production; tests override to false
 	secure := p.cfg.CookieSecure
-	// nolint:gosec // Secure flag intentionally configurable for test environments
-	return &http.Cookie{
+	return &http.Cookie{ //nolint:gosec // Secure flag intentionally configurable for test environments
 		Path:     path,
 		MaxAge:   maxAge,
 		HttpOnly: true,

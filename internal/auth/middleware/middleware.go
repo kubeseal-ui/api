@@ -281,14 +281,14 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	// Set cookies
 	if w != nil {
 		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		sessionCookie := cfg.OIDCProvider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds()))
+		sessionCookie := cfg.OIDCProvider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds())) //nolint:gosec
 		sessionCookie.Name = cfg.SessionCookie
 		sessionCookie.Value = encodedSession
 		http.SetCookie(w, sessionCookie)
 
 		if tokens.RefreshToken != "" {
 			// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-			refreshCookie := cfg.OIDCProvider.CookieOptions("/api/v1", int(time.Until(verified.Expiry.Add(24*time.Hour)).Seconds()))
+						refreshCookie := cfg.OIDCProvider.CookieOptions("/api/v1", int(time.Until(verified.Expiry.Add(24*time.Hour)).Seconds())) //nolint:gosec
 			refreshCookie.Name = cfg.RefreshCookie
 			refreshCookie.Value = tokens.RefreshToken
 			http.SetCookie(w, refreshCookie)
