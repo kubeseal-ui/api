@@ -142,7 +142,7 @@ func (c *KubeClient) FindActiveControllerKey(ctx context.Context) (ActiveKey, er
 			continue
 		}
 		keyRSA, ok := privateKey.(*rsa.PrivateKey)
-		if !ok || keyRSA.PublicKey.N.Cmp(publicKey.N) != 0 || keyRSA.PublicKey.E != publicKey.E {
+		if !ok || keyRSA.N.Cmp(publicKey.N) != 0 || keyRSA.E != publicKey.E {
 			continue
 		}
 		valid = append(valid, item)

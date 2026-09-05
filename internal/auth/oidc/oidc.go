@@ -20,7 +20,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -99,19 +98,10 @@ func splitCSV(s string) []string {
 
 // Provider wraps the OIDC provider and OAuth2 config.
 type Provider struct {
-	cfg             Config
-	provider        *oidc.Provider
-	verifier        *oidc.IDTokenVerifier
-	oauth2Cfg       oauth2.Config
-	revocationURL   string
-	refreshMu       sync.Mutex
-	refreshInFlight map[string]*refreshCall
-}
-
-type refreshCall struct {
-	done  chan struct{}
-	token *TokenResponse
-	err   error
+	cfg       Config
+	provider  *oidc.Provider
+	verifier  *oidc.IDTokenVerifier
+	oauth2Cfg oauth2.Config
 }
 
 // NewProvider discovers the OIDC provider and initializes the verifier.

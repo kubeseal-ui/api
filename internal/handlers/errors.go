@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	handlermw "github.com/kubeseal-ui/api/internal/middleware"
@@ -20,7 +21,9 @@ type apiError struct {
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(errorBody{Error: apiError{Code: code, Message: message, RequestID: requestID(r)}})
+	if err := json.NewEncoder(w).Encode(errorBody{Error: apiError{Code: code, Message: message, RequestID: requestID(r)}}); err != nil {
+		slog.Error("failed to encode error response", "error", err)
+	}
 }
 
 func requestID(r *http.Request) string {

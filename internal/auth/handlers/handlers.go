@@ -98,7 +98,6 @@ type signedFlowState struct {
 // bytes alone so an attacker cannot mutate fields without invalidating
 // the signature.
 func (s signedFlowState) flowStateBytes() ([]byte, error) {
-	s.Signature = ""
 	return json.Marshal(s.FlowState)
 }
 

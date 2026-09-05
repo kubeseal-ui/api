@@ -36,13 +36,14 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitops.Change, policy.Gi
 }
 
 func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.Request) {
-	defer h.emitSecurityEvent(r, "gitops_dry_run", "", "", "", "", "attempt")
 	change, mapping, err := h.gitChange(r)
 	if err != nil {
+		h.emitSecurityEvent(r, "gitops_dry_run", "", "", "", "", "failed")
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
 	if !hasGitCapability(r, mapping.Mode) {
+		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
@@ -50,27 +51,32 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 	if err != nil {
 		var base *gitops.BaseCommitError
 		if errors.As(err, &base) {
+			h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "conflict")
 			writeError(w, r, http.StatusConflict, "BASE_COMMIT_CONFLICT", "Base commit conflict")
 			return
 		}
+		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "error")
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
+	h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "success")
 	jsonResponse(w, http.StatusOK, map[string]any{"diff": diff.After, "before": diff.Before, "path": change.Target.Path, "base_commit": change.BaseCommit, "mode": mapping.Mode})
 }
 
 func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.Request) {
-	defer h.emitSecurityEvent(r, "gitops_delivery", "", "", "", "", "attempt")
 	change, mapping, err := h.gitChange(r)
 	if err != nil {
+		h.emitSecurityEvent(r, "gitops_delivery", "", "", "", "", "failed")
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
 	if !hasGitCapability(r, mapping.Mode) {
+		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
 	if mapping.Mode == policy.GitDeliveryProposal && h.ProposalProviders[mapping.Repository] == nil {
+		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_unavailable")
 		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 		return
 	}
@@ -86,9 +92,11 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	if err != nil {
 		var conflict *gitops.ConflictError
 		if errors.As(err, &conflict) {
+			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "conflict")
 			writeError(w, r, http.StatusConflict, "GIT_CONFLICT", "Git conflict")
 			return
 		}
+		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "error")
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
@@ -96,16 +104,19 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	if mapping.Mode == policy.GitDeliveryProposal {
 		provider := h.ProposalProviders[mapping.Repository]
 		if provider == nil {
+			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_unavailable")
 			writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 			return
 		}
 		proposal, err := provider.OpenProposal(r.Context(), gitops.ProposalRequest{Change: change, Push: pushed})
 		if err != nil {
+			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_failed")
 			writeError(w, r, http.StatusBadGateway, "PROPOSAL_FAILED", "Proposal failed")
 			return
 		}
 		result["proposal_url"] = proposal.URL
 	}
+	h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "success")
 	jsonResponse(w, http.StatusOK, result)
 }
 

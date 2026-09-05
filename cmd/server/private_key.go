@@ -21,8 +21,9 @@ func (p kubePrivateKeyProvider) PrivateKey(ctx context.Context) (*rsa.PrivateKey
 	if block == nil {
 		return nil, fmt.Errorf("active controller key is not PEM")
 	}
-	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return key, nil
+	pkcs1Key, pkcs1Err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if pkcs1Err == nil {
+		return pkcs1Key, nil
 	}
 	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
