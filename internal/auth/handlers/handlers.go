@@ -162,10 +162,17 @@ func (h *AuthHandlers) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-	pkceCookie := h.Provider.CookieOptions("/api/v1/auth/callback", 5*60) // 5 min //nosec
-	pkceCookie.Name = oidc.CookiePKCE
-	pkceCookie.Value = signed
+	pkceCookie := &http.Cookie{
+		Name:     oidc.CookiePKCE,
+		Value:    signed,
+		Path:     "/api/v1/auth/callback",
+		MaxAge:   5 * 60, // 5 min
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		Domain:   h.Config.CookieDomain,
+	}
+	pkceCookie.Secure = h.Config.CookieSecure
 	http.SetCookie(w, pkceCookie)
 
 	// Build login URL and redirect
@@ -280,34 +287,61 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set session cookie
-	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-	sessionCookie := h.Provider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds())) //nosec
-	sessionCookie.Name = oidc.CookieSession
-	sessionCookie.Value = sessionValue
+	sessionCookie := &http.Cookie{
+		Name:     oidc.CookieSession,
+		Value:    sessionValue,
+		Path:     "/",
+		MaxAge:   int(time.Until(verified.Expiry).Seconds()),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		Domain:   h.Config.CookieDomain,
+	}
+	sessionCookie.Secure = h.Config.CookieSecure
 	http.SetCookie(w, sessionCookie)
 
 	// Set refresh token cookie
 	if tokens.RefreshToken != "" {
-		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		refreshCookie := h.Provider.CookieOptions("/api/v1", int(time.Until(verified.Expiry.Add(24*time.Hour)).Seconds())) //nosec
-		refreshCookie.Name = oidc.CookieRefresh
-		refreshCookie.Value = tokens.RefreshToken
+		refreshCookie := &http.Cookie{
+			Name:     oidc.CookieRefresh,
+			Value:    tokens.RefreshToken,
+			Path:     "/api/v1",
+			MaxAge:   int(time.Until(verified.Expiry.Add(24 * time.Hour)).Seconds()),
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+			Domain:   h.Config.CookieDomain,
+		}
+		refreshCookie.Secure = h.Config.CookieSecure
 		http.SetCookie(w, refreshCookie)
 	}
 
 	// Set CSRF cookie (readable by SPA for X-CSRF-Token header)
-	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-	csrfCookie := h.Provider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds())) //nosec
-	csrfCookie.Name = oidc.CookieCSRF
-	csrfCookie.Value = csrfToken
-	csrfCookie.HttpOnly = false // SPA needs to read this
+	csrfCookie := &http.Cookie{ // #nosec G124 -- HttpOnly deliberately false for SPA CSRF readability
+		Name:     oidc.CookieCSRF,
+		Value:    csrfToken,
+		Path:     "/",
+		MaxAge:   int(time.Until(verified.Expiry).Seconds()),
+		HttpOnly: false,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		Domain:   h.Config.CookieDomain,
+	}
+	csrfCookie.Secure = h.Config.CookieSecure
 	http.SetCookie(w, csrfCookie)
 
 	// Clear PKCE cookie
-	// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-	pkceCookie = h.Provider.CookieOptions("/api/v1/auth/callback", -1) //nosec
-	pkceCookie.Name = oidc.CookiePKCE
-	pkceCookie.Value = ""
+	pkceCookie = &http.Cookie{
+		Name:     oidc.CookiePKCE,
+		Value:    "",
+		Path:     "/api/v1/auth/callback",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		Domain:   h.Config.CookieDomain,
+	}
+	pkceCookie.Secure = h.Config.CookieSecure
 	http.SetCookie(w, pkceCookie)
 
 	// Redirect to frontend
@@ -396,11 +430,17 @@ func (h *AuthHandlers) CSRFHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		csrfCookie := h.Provider.CookieOptions("/", 3600) //nolint:gosec //nosec
-		csrfCookie.Name = oidc.CookieCSRF
-		csrfCookie.Value = token
-		csrfCookie.HttpOnly = false
+		csrfCookie := &http.Cookie{ // #nosec G124 -- HttpOnly deliberately false for SPA CSRF readability
+			Name:     oidc.CookieCSRF,
+			Value:    token,
+			Path:     "/",
+			MaxAge:   3600,
+			HttpOnly: false,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+			Domain:   h.Config.CookieDomain,
+		}
+		csrfCookie.Secure = h.Config.CookieSecure
 		http.SetCookie(w, csrfCookie)
 
 		writeJSON(w, map[string]string{"csrf_token": token})

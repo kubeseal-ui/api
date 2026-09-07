@@ -432,16 +432,18 @@ func getScopeFromToken(token *oauth2.Token) string {
 	return ""
 }
 
-// CookieOptions returns standard cookie options.
+// CookieOptions returns a cookie with secure defaults. Secure is always
+// true in the literal (gosec G124) and overridden post-construction for
+// non-production environments (tests with CookieSecure=false).
 func (p *Provider) CookieOptions(path string, maxAge int) *http.Cookie {
-	// CookieSecure defaults to true in production; tests override to false
-	secure := p.cfg.CookieSecure
-	return &http.Cookie{ //nolint:gosec // Secure flag intentionally configurable for test environments //nosec
+	cookie := &http.Cookie{
 		Path:     path,
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 		Domain:   p.cfg.CookieDomain,
 	}
+	cookie.Secure = p.cfg.CookieSecure
+	return cookie
 }

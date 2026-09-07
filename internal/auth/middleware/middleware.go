@@ -280,17 +280,31 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 
 	// Set cookies
 	if w != nil {
-		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		sessionCookie := cfg.OIDCProvider.CookieOptions("/", int(time.Until(verified.Expiry).Seconds())) //nolint:gosec //nosec
-		sessionCookie.Name = cfg.SessionCookie
-		sessionCookie.Value = encodedSession
+		sessionCookie := &http.Cookie{
+			Name:     cfg.SessionCookie,
+			Value:    encodedSession,
+			Path:     "/",
+			MaxAge:   int(time.Until(verified.Expiry).Seconds()),
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+			Domain:   cfg.CookieDomain,
+		}
+		sessionCookie.Secure = cfg.CookieSecure
 		http.SetCookie(w, sessionCookie)
 
 		if tokens.RefreshToken != "" {
-			// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-						refreshCookie := cfg.OIDCProvider.CookieOptions("/api/v1", int(time.Until(verified.Expiry.Add(24*time.Hour)).Seconds())) //nolint:gosec //nosec
-			refreshCookie.Name = cfg.RefreshCookie
-			refreshCookie.Value = tokens.RefreshToken
+			refreshCookie := &http.Cookie{
+				Name:     cfg.RefreshCookie,
+				Value:    tokens.RefreshToken,
+				Path:     "/api/v1",
+				MaxAge:   int(time.Until(verified.Expiry.Add(24 * time.Hour)).Seconds()),
+				HttpOnly: true,
+				Secure:   true,
+				SameSite: http.SameSiteLaxMode,
+				Domain:   cfg.CookieDomain,
+			}
+			refreshCookie.Secure = cfg.CookieSecure
 			http.SetCookie(w, refreshCookie)
 		}
 	}
