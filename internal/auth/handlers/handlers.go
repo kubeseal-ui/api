@@ -403,17 +403,18 @@ func clearAuthCookies(w http.ResponseWriter, cfg middleware.AuthConfig) {
 		{cfg.CSRFCookie, "/", false},
 		{oidc.CookiePKCE, "/api/v1/auth/callback", true},
 	} {
-		// nolint:gosec // Cookie security flags configured via cfg.CookieSecure
-		cookie := &http.Cookie{ //nosec
+		cookie := &http.Cookie{
 			Name:     item.name,
 			Value:    "",
 			Path:     item.path,
 			MaxAge:   -1,
-			HttpOnly: item.httpOnly,
-			Secure:   cfg.CookieSecure,
+			HttpOnly: true,
+			Secure:   true,
 			SameSite: http.SameSiteLaxMode,
 			Domain:   cfg.CookieDomain,
 		}
+		cookie.HttpOnly = item.httpOnly
+		cookie.Secure = cfg.CookieSecure
 		http.SetCookie(w, cookie)
 	}
 }
