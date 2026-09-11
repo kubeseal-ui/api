@@ -112,9 +112,13 @@ func projectSealedSecret(obj *unstructured.Unstructured) (SealedSecret, error) {
 	// Extract key names and creation timestamp from the unstructured object.
 	// These are metadata the UI needs without decrypting.
 	var keys []string
-	if ed, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "encryptedData"); found {
-		keys = make([]string, 0, len(ed))
-		for k := range ed {
+	d, found, err := unstructured.NestedStringMap(obj.Object, "spec", "encryptedData")
+	if err != nil {
+		return SealedSecret{}, fmt.Errorf("read encryptedData: %w", err)
+	}
+	if found {
+		keys = make([]string, 0, len(d))
+		for k := range d {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
@@ -123,9 +127,8 @@ func projectSealedSecret(obj *unstructured.Unstructured) (SealedSecret, error) {
 	if ct, found := obj.GetAnnotations()["sealedsecrets.bitnami.com/creation-timestamp"]; found {
 		createdAt = ct
 	}
-	ts := obj.GetCreationTimestamp()
-	if !ts.IsZero() {
-		createdAt = ts.Time.Format(time.RFC3339)
+	if ts := obj.GetCreationTimestamp(); !ts.IsZero() {
+		createdAt = ts.UTC().Format(time.RFC3339)
 	}
 	return SealedSecret{
 		Name:      obj.GetName(),
