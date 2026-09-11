@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -93,6 +96,60 @@ func requireCapability(w http.ResponseWriter, r *http.Request, required ...polic
 	return true
 }
 
+func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML, baseCommit string) (map[string]any, error) {
+	status := map[string]any{"managed": false, "drift": kubernetes.DriftUnknown}
+	if h.GitMappings == nil || h.GitTransport == nil {
+		return status, nil
+	}
+	mapping, ok := h.GitMappings.GetGitMapping(namespace)
+	if !ok {
+		return status, nil
+	}
+	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: mapping.RenderPath(namespace, name)}
+	status = map[string]any{
+		"managed": true, "drift": kubernetes.DriftUnknown, "path": target.Path,
+		"repository": target.Repository, "branch": target.Branch,
+	}
+	if target.Path == "" {
+		return status, errors.New("invalid Git mapping")
+	}
+	snapshot, err := h.GitTransport.ReadManifest(r.Context(), target)
+	if err != nil {
+		return status, err
+	}
+	status["base_commit"] = snapshot.Commit
+	if baseCommit != "" && snapshot.Commit != baseCommit {
+		return status, &gitops.BaseCommitError{Expected: baseCommit, Actual: snapshot.Commit}
+	}
+	liveCanonical, err := canonicalSealedSecret(liveYAML)
+	if err != nil {
+		return status, err
+	}
+	gitCanonical, err := canonicalSealedSecret(string(snapshot.Content))
+	if err != nil {
+		return status, err
+	}
+	if bytes.Equal(liveCanonical, gitCanonical) {
+		status["drift"] = kubernetes.DriftSync
+		return status, nil
+	}
+	status["drift"] = kubernetes.DriftDiverged
+	return status, nil
+}
+
+func canonicalSealedSecret(manifest string) ([]byte, error) {
+	var value any
+	if err := yaml.Unmarshal([]byte(manifest), &value); err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
+}
+
+func encryptedChecksum(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
 // SecretHandler returns encrypted metadata for one SealedSecret.
 func (h *ProtectedHandlers) SecretHandler(w http.ResponseWriter, r *http.Request) {
 	if !requireCapability(w, r, policy.MetadataRead) {
@@ -112,20 +169,43 @@ func (h *ProtectedHandlers) SecretHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
 	}
-	jsonResponse(w, http.StatusOK, secret)
+	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, "")
+	if gitErr != nil {
+		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"name": secret.Name, "namespace": secret.Namespace, "scope": secret.Scope,
+		"keys": secret.Keys, "key_count": secret.KeyCount, "created_at": secret.CreatedAt,
+		"git": git, "sealed_secret_yaml": secret.YAML,
+	})
 }
 
 // NamespacesHandler lists namespaces visible to the API service account.
+// When a PolicyStore is configured, each namespace includes its Git
+// delivery mode and target repository so the UI can show managed vs
+// unmanaged namespaces and adapt the editor workflow accordingly.
 func (h *ProtectedHandlers) NamespacesHandler(w http.ResponseWriter, r *http.Request) {
 	if !requireCapability(w, r, policy.MetadataRead) {
 		return
 	}
-	namespaces, err := h.Kubernetes.ListNamespaces(r.Context())
+	nsList, err := h.Kubernetes.ListNamespaces(r.Context())
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"namespaces": namespaces})
+	// Enrich with Git mapping info if available.
+	if h.GitMappings != nil {
+		for i, ns := range nsList {
+			mapping, ok := h.GitMappings.GetGitMapping(ns.Name)
+			if ok {
+				nsList[i].GitManaged = true
+				nsList[i].DeliveryMode = string(mapping.Mode)
+				nsList[i].GitRepository = mapping.Repository
+			}
+		}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"namespaces": nsList})
 }
 
 // SecretsHandler lists SealedSecrets in a namespace.
@@ -139,7 +219,19 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"secrets": secrets})
+	items := make([]map[string]any, 0, len(secrets))
+	for i := range secrets {
+		git, gitErr := h.gitStatus(r, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "")
+		if gitErr != nil {
+			git = map[string]any{"managed": true, "drift": kubernetes.DriftUnknown}
+		}
+		items = append(items, map[string]any{
+			"name": secrets[i].Name, "namespace": secrets[i].Namespace,
+			"scope": secrets[i].Scope, "key_count": secrets[i].KeyCount,
+			"created_at": secrets[i].CreatedAt, "git": git,
+		})
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"secrets": items})
 }
 
 type encryptRequest struct {
@@ -226,6 +318,11 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
+	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
+	if gitErr != nil || git["drift"] != kubernetes.DriftSync {
+		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
+		return
+	}
 	plain, err := h.Crypto.DecryptYAML(r.Context(), secret.YAML)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "DECRYPTION_FAILED", "Unable to decrypt secret")
@@ -238,6 +335,58 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	jsonResponse(w, http.StatusOK, map[string]string{"key": req.Key, "value": value})
+}
+
+// DiffHandler computes an encrypted before/after diff without persisting it.
+func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) {
+	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
+	if !requireCapability(w, r, policy.SecretSeal, policy.SecretDecrypt) {
+		return
+	}
+	if !h.EnableDecrypt || h.Crypto == nil {
+		writeError(w, r, http.StatusForbidden, "DECRYPT_DISABLED", "Decrypt is disabled")
+		return
+	}
+	var req struct {
+		Key        string `json:"key"`
+		Operation  string `json:"operation"`
+		Value      string `json:"value"`
+		BaseCommit string `json:"base_commit"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil || strings.TrimSpace(req.Key) == "" || strings.TrimSpace(req.BaseCommit) == "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
+		return
+	}
+	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key")
+		return
+	}
+	if !h.claimIdempotency(r) {
+		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
+		return
+	}
+	op := crypto.ResealOp(req.Operation)
+	if op != crypto.ResealReplace && op != crypto.ResealAdd && op != crypto.ResealDelete {
+		writeError(w, r, http.StatusBadRequest, "INVALID_OPERATION", "Invalid operation")
+		return
+	}
+	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), namespace, name)
+	if err != nil || secret.YAML == "" {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
+		return
+	}
+	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
+	if gitErr != nil || git["drift"] != kubernetes.DriftSync {
+		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
+		return
+	}
+	after, err := h.Crypto.Reseal(r.Context(), secret.YAML, req.Key, req.Value, op)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to reseal secret")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jsonResponse(w, http.StatusOK, map[string]string{"before": secret.YAML, "after": after, "key": req.Key, "base_commit": req.BaseCommit, "checksum": encryptedChecksum(after)})
 }
 
 // ResealHandler mutates exactly one encrypted key.
@@ -281,13 +430,18 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
+	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
+	if gitErr != nil || git["drift"] != kubernetes.DriftSync {
+		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
+		return
+	}
 	sealed, err := h.Crypto.Reseal(r.Context(), secret.YAML, chi.URLParam(r, "key"), req.Value, op)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to reseal secret")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed})
+	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed, "checksum": encryptedChecksum(sealed), "diff_before": secret.YAML, "diff_after": sealed})
 }
 
 func extractStringDataKey(yamlText, key string) (string, bool) {

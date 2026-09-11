@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -108,7 +109,33 @@ func projectSealedSecret(obj *unstructured.Unstructured) (SealedSecret, error) {
 	}
 	var annotations = obj.GetAnnotations()
 	scope := annotations["sealedsecrets.bitnami.com/scope"]
-	return SealedSecret{Name: obj.GetName(), Namespace: obj.GetNamespace(), Scope: scope, YAML: string(raw)}, nil
+	// Extract key names and creation timestamp from the unstructured object.
+	// These are metadata the UI needs without decrypting.
+	var keys []string
+	if ed, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "encryptedData"); found {
+		keys = make([]string, 0, len(ed))
+		for k := range ed {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+	}
+	createdAt := ""
+	if ct, found := obj.GetAnnotations()["sealedsecrets.bitnami.com/creation-timestamp"]; found {
+		createdAt = ct
+	}
+	ts := obj.GetCreationTimestamp()
+	if !ts.IsZero() {
+		createdAt = ts.Time.Format(time.RFC3339)
+	}
+	return SealedSecret{
+		Name:      obj.GetName(),
+		Namespace: obj.GetNamespace(),
+		Scope:     scope,
+		KeyCount:  len(keys),
+		Keys:      keys,
+		CreatedAt: createdAt,
+		YAML:      string(raw),
+	}, nil
 }
 
 func (c *KubeClient) FindActiveControllerKey(ctx context.Context) (ActiveKey, error) {

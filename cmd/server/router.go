@@ -20,8 +20,23 @@ import (
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
+func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers) {
+	r.Use(middleware.BodyLimit(10 * 1024 * 1024))
+	r.Get("/namespaces", protected.NamespacesHandler)
+	r.Get("/secrets", protected.SecretsHandler)
+	r.Get("/secrets/{namespace}/{name}", protected.SecretHandler)
+	r.Post("/secrets/{namespace}/{name}/diff", protected.DiffHandler)
+	r.Post("/gitops/dry-run", protected.GitOpsDryRunHandler)
+	r.Post("/gitops/deliver", protected.GitOpsDeliverHandler)
+	r.Post("/secrets/{namespace}/{name}/reveal", protected.DecryptHandler)
+	r.Patch("/secrets/{namespace}/{name}/values/{key}", protected.ResealHandler)
+	r.Post("/secrets/encrypt", protected.EncryptHandler)
+}
+
 // newRouter builds the chi router with authenticated Phase 2 routes.
-func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wrapper, k8s kubernetes.Client, providers ...*oidc.Provider) http.Handler {
+// Git mappings and transport are injected by the handler constructor when
+// production Git-backed editing is enabled in the later delivery phase.
+func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wrapper, k8s kubernetes.Client, providers ...oidc.AuthProvider) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
@@ -39,15 +54,7 @@ func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wr
 
 	protected := handlers.NewProtectedHandlers(k8s, cryptoWrapper, cfg != nil && cfg.EnableDecrypt)
 	protectedRoutes := func(r chi.Router) {
-		r.Use(middleware.BodyLimit(10 * 1024 * 1024))
-		r.Get("/namespaces", protected.NamespacesHandler)
-		r.Get("/secrets", protected.SecretsHandler)
-		r.Get("/secrets/{namespace}/{name}", protected.SecretHandler)
-		r.Post("/gitops/dry-run", protected.GitOpsDryRunHandler)
-		r.Post("/gitops/deliver", protected.GitOpsDeliverHandler)
-		r.Post("/secrets/{namespace}/{name}/reveal", protected.DecryptHandler)
-		r.Patch("/secrets/{namespace}/{name}/values/{key}", protected.ResealHandler)
-		r.Post("/secrets/encrypt", protected.EncryptHandler)
+		registerProtectedRoutes(r, protected)
 	}
 
 	// No provider means no auth route is exposed. This preserves the

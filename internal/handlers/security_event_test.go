@@ -22,7 +22,7 @@ func (s *eventSink) EmitSecurityEvent(operation, subject, namespace, secret, key
 
 func TestSensitiveHandlerEmitsBoundedSecurityEvent(t *testing.T) {
 	sink := &eventSink{}
-	h := NewProtectedHandlers(protectedK8s{secret: kubernetes.SealedSecret{YAML: "not sealed yaml"}}, &crypto.Wrapper{}, true)
+	h := NewProtectedHandlers(protectedK8s{secrets: []kubernetes.SealedSecret{{YAML: "not sealed yaml"}}}, &crypto.Wrapper{}, true)
 	h.SecurityEvents = sink
 	req := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/reveal", `{"key":"password","base_commit":"abc","value":"must-not-appear"}`, protectedIdentity(policy.SecretDecrypt))
 	req.Header.Set("X-Request-Id", "req-1")

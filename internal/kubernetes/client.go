@@ -27,20 +27,38 @@ import (
 // Namespace is the minimal metadata projection of a namespace used by
 // the api. Only fields the UI needs flow across the boundary.
 type Namespace struct {
-	Name string
+	Name          string `json:"name"`
+	GitManaged    bool   `json:"git_managed"`
+	DeliveryMode  string `json:"delivery_mode,omitempty"`
+	GitRepository string `json:"git_mapping,omitempty"`
 }
+
+// DriftStatus describes the relationship between the live SealedSecret
+// and its Git-managed counterpart.
+type DriftStatus string
+
+const (
+	// DriftSync means the live SealedSecret matches its Git-managed version.
+	DriftSync DriftStatus = "in-sync"
+	// DriftDiverged means the live and Git versions differ.
+	DriftDiverged DriftStatus = "diverged"
+	// DriftUnknown means drift could not be determined (e.g. no Git mapping).
+	DriftUnknown DriftStatus = "unknown"
+)
 
 // SealedSecret is the minimal metadata projection of a SealedSecret.
 // Ciphertext and other spec internals are deliberately NOT exposed
 // here — the api returns YAML on demand through the crypto layer.
 type SealedSecret struct {
-	Name      string
-	Namespace string
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
 	// Scope is the sealed secret's mobility scope (strict,
 	// namespace-wide, cluster-wide). Derived from annotations.
-	Scope string
-	// YAML is the encrypted manifest for clients that support detail reads.
-	YAML string
+	Scope     string   `json:"scope"`
+	KeyCount  int      `json:"key_count"`
+	Keys      []string `json:"keys,omitempty"`
+	CreatedAt string   `json:"created_at,omitempty"`
+	YAML      string   `json:"-"`
 }
 
 // ActiveKey is the resolved controller private key. Callers must

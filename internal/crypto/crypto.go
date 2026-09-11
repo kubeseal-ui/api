@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -240,6 +241,22 @@ const (
 	ResealAdd     ResealOp = "add"
 	ResealDelete  ResealOp = "delete"
 )
+
+// ExtractKeys returns the key names from a SealedSecret's encrypted data
+// without decrypting. This lets the UI show which keys exist in the secret
+// so the user can pick a target for reveal/patch without exposing values.
+func (w *Wrapper) ExtractKeys(yamlStr string) ([]string, error) {
+	ss, err := parseSealedSecret(yamlStr)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(ss.Spec.EncryptedData))
+	for k := range ss.Spec.EncryptedData {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
 
 // ValidateSealedSecretYAML verifies that the given YAML parses as a
 // valid SealedSecret. Used by callers to validate before returning.

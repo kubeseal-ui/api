@@ -2,17 +2,25 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/kubeseal-ui/api/internal/auth/oidc"
 	"github.com/kubeseal-ui/api/internal/config"
 	"github.com/kubeseal-ui/api/internal/crypto"
+	"github.com/kubeseal-ui/api/internal/handlers"
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 )
 
@@ -52,6 +60,120 @@ func testK8s() kubernetes.Client {
 		},
 		nil,
 	)
+}
+
+func TestRegisterProtectedRoutesMountsPhase3Routes(t *testing.T) {
+	r := chi.NewRouter()
+	protected := handlers.NewProtectedHandlers(testK8s(), testCrypto(), false)
+	registerProtectedRoutes(r, protected)
+	for _, path := range []string{
+		"/secrets/ns/name/diff",
+		"/secrets/ns/name/reveal",
+		"/secrets/ns/name/values/password",
+	} {
+		rr := httptest.NewRecorder()
+		method := http.MethodPost
+		if strings.Contains(path, "/values/") {
+			method = http.MethodPatch
+		}
+		r.ServeHTTP(rr, httptest.NewRequest(method, path, strings.NewReader(`{}`)))
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s: status = %d, want 401", method, path, rr.Code)
+		}
+	}
+}
+
+type routerFakeProvider struct{}
+
+func (routerFakeProvider) LoginURL(*oidc.FlowState) (string, error) {
+	return "https://auth.example/login", nil
+}
+func (routerFakeProvider) ExchangeCode(context.Context, string, string) (*oidc.TokenResponse, error) {
+	return nil, fmt.Errorf("not used")
+}
+func (routerFakeProvider) VerifyIDToken(context.Context, string, string) (*oidc.VerifiedIDToken, error) {
+	return nil, fmt.Errorf("not used")
+}
+func (routerFakeProvider) RefreshTokens(context.Context, string) (*oidc.TokenResponse, error) {
+	return nil, fmt.Errorf("not used")
+}
+func (routerFakeProvider) RevokeToken(context.Context, string) error { return nil }
+
+func TestRouterProtectedPhase3RoutesRequireAuthentication(t *testing.T) {
+	cfg := testConfig()
+	cfg.SessionSigningKey = "router-test-signing-key"
+	router := newRouter(testLogger(), cfg, testCrypto(), testK8s(), routerFakeProvider{})
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/namespaces"},
+		{http.MethodGet, "/api/v1/secrets"},
+		{http.MethodPost, "/api/v1/secrets/ns/name/diff"},
+		{http.MethodPost, "/api/v1/secrets/ns/name/reveal"},
+		{http.MethodPatch, "/api/v1/secrets/ns/name/values/password"},
+	} {
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`)))
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s: status = %d, want 401", tc.method, tc.path, rr.Code)
+		}
+	}
+}
+
+// TestRouterHealthzReturns200 verifies the liveness probe is mounted.
+func TestRouterProtectedRoutesAcceptValidSessionAndCSRF(t *testing.T) {
+	cfg := testConfig()
+	cfg.SessionSigningKey = "router-test-signing-key"
+	cfg.CSRFTrustedOrigins = "https://app.example.com"
+	router := newRouter(testLogger(), cfg, testCrypto(), testK8s(), routerFakeProvider{})
+	csrf := "csrf-router-test"
+	data := struct {
+		Subject  string   `json:"sub"`
+		Email    string   `json:"email"`
+		Name     string   `json:"name"`
+		Username string   `json:"username"`
+		Groups   []string `json:"groups"`
+		Expiry   int64    `json:"exp"`
+		IssuedAt int64    `json:"iat"`
+		CSRF     string   `json:"csrf"`
+	}{"user-1", "user@example.com", "User", "user", []string{"secret-managers"}, time.Now().Add(time.Hour).Unix(), time.Now().Unix(), csrf}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, []byte(cfg.SessionSigningKey))
+	_, _ = mac.Write(raw)
+	signedEnvelope := struct {
+		Subject   string   `json:"sub"`
+		Email     string   `json:"email"`
+		Name      string   `json:"name"`
+		Username  string   `json:"username"`
+		Groups    []string `json:"groups"`
+		Expiry    int64    `json:"exp"`
+		IssuedAt  int64    `json:"iat"`
+		CSRF      string   `json:"csrf"`
+		Signature string   `json:"sig"`
+	}{data.Subject, data.Email, data.Name, data.Username, data.Groups, data.Expiry, data.IssuedAt, data.CSRF, base64.RawURLEncoding.EncodeToString(mac.Sum(nil))}
+	signed, err := json.Marshal(signedEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := base64.RawURLEncoding.EncodeToString(signed)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", strings.NewReader(`{"key":"password","operation":"replace","value":"new","base_commit":"abc"}`))
+	req.AddCookie(&http.Cookie{Name: oidc.CookieSession, Value: session})
+	req.AddCookie(&http.Cookie{Name: oidc.CookieCSRF, Value: csrf})
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Idempotency-Key", "router-auth-1")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code == http.StatusUnauthorized {
+		t.Fatalf("authenticated request rejected: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Code == http.StatusForbidden && strings.Contains(rr.Body.String(), "CSRF") {
+		t.Fatalf("CSRF rejected authenticated request: %s", rr.Body.String())
+	}
+	if rr.Code != http.StatusConflict && rr.Code != http.StatusBadGateway && rr.Code != http.StatusNotFound && rr.Code != http.StatusForbidden {
+		t.Fatalf("request reached unexpected status=%d body=%s", rr.Code, rr.Body.String())
+	}
 }
 
 // TestRouterHealthzReturns200 verifies the liveness probe is mounted.

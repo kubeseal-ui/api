@@ -26,13 +26,13 @@ var sealedSecretGVR = schema.GroupVersionResource{Group: "bitnami.com", Version:
 func TestClientListsAndGetsSealedSecrets(t *testing.T) {
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "bitnami.com/v1alpha1", "kind": "SealedSecret",
-		"metadata": map[string]any{"name": "db", "namespace": "apps", "annotations": map[string]any{"sealedsecrets.bitnami.com/scope": "strict"}},
+		"metadata": map[string]any{"name": "db", "namespace": "apps", "creationTimestamp": "2026-09-01T12:00:00Z", "annotations": map[string]any{"sealedsecrets.bitnami.com/scope": "strict"}},
 		"spec":     map[string]any{"encryptedData": map[string]any{"password": "cipher"}},
 	}}
 	d := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{sealedSecretGVR: "SealedSecretList"}, obj)
 	c := NewClient(corefake.NewSimpleClientset(), d, Options{})
 	got, err := c.GetSealedSecret(context.Background(), "apps", "db")
-	if err != nil || got.Name != "db" || got.Scope != "strict" || !strings.Contains(got.YAML, "SealedSecret") {
+	if err != nil || got.Name != "db" || got.Scope != "strict" || got.KeyCount != 1 || len(got.Keys) != 1 || got.Keys[0] != "password" || got.CreatedAt != "2026-09-01T12:00:00Z" || !strings.Contains(got.YAML, "SealedSecret") {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
 	list, err := c.ListSealedSecrets(context.Background(), "apps")
