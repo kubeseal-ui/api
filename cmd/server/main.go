@@ -24,6 +24,7 @@ import (
 	"github.com/kubeseal-ui/api/internal/certprovider"
 	"github.com/kubeseal-ui/api/internal/config"
 	"github.com/kubeseal-ui/api/internal/crypto"
+	"github.com/kubeseal-ui/api/internal/gitops"
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 	"github.com/kubeseal-ui/api/internal/observability"
 	"k8s.io/client-go/rest"
@@ -38,6 +39,59 @@ type devPrivProvider struct {
 
 func (d *devPrivProvider) PrivateKey(_ context.Context) (*rsa.PrivateKey, error) {
 	return d.key, nil
+}
+
+// gitopsTransport builds the production go-git transport and typed
+// credential resolver from configuration. Returns nils when GitOps is
+// disabled — the serving path then has no Git-backed editing, matching
+// the fail-closed contract.
+func gitopsTransport(cfg *config.Config) (gitops.GitTransport, error) {
+	if !cfg.GitOpsEnabled {
+		return nil, nil
+	}
+	resolver, err := gitops.NewFileCredentialResolver(parseCredentialRefs(cfg.GitCredentialRefs))
+	if err != nil {
+		return nil, err
+	}
+	worktreeDir := cfg.GitWorktreeDir
+	if worktreeDir == "" {
+		worktreeDir = "/tmp/kubeseal-ui/gitops"
+	}
+	transport, err := gitops.NewGoGitTransport(gitops.GoGitOptions{
+		ScratchDir:  worktreeDir,
+		AuthorName:  cfg.GitAuthorName,
+		AuthorEmail: cfg.GitAuthorEmail,
+		Credentials: resolver,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return transport, nil
+}
+
+// parseCredentialRefs parses the comma-separated typed credential list.
+// Each entry is auth_ref:mode:username:token_file; empty usernames are
+// allowed (the transport defaults them).
+func parseCredentialRefs(raw string) []gitops.FileCredential {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var refs []gitops.FileCredential
+	for _, entry := range strings.Split(raw, ",") {
+		parts := strings.Split(strings.TrimSpace(entry), ":")
+		if len(parts) < 2 {
+			continue
+		}
+		ref := gitops.FileCredential{AuthRef: parts[0], Mode: gitops.AuthMode(strings.TrimSpace(parts[1]))}
+		if len(parts) > 2 {
+			ref.Username = parts[2]
+		}
+		if len(parts) > 3 {
+			ref.TokenFile = parts[3]
+		}
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 func main() {
@@ -136,7 +190,15 @@ func main() {
 		}
 	}
 	_ = authmw.DefaultAuthConfig
-	router := newRouter(logger, &cfg, cryptoWrapper, k8sClient, oidcProvider)
+	transport, transportErr := gitopsTransport(&cfg)
+	if transportErr != nil {
+		slog.Error("gitops transport construction failed", "error", transportErr)
+		os.Exit(1)
+	}
+	if transport != nil {
+		slog.Info("gitops delivery enabled", "worktree_dir", cfg.GitWorktreeDir, "credentials", len(parseCredentialRefs(cfg.GitCredentialRefs)))
+	}
+	router := newRouter(logger, &cfg, cryptoWrapper, k8sClient, transport, oidcProvider)
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),

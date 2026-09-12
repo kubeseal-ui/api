@@ -14,6 +14,7 @@ import (
 	"github.com/kubeseal-ui/api/internal/auth/oidc"
 	"github.com/kubeseal-ui/api/internal/config"
 	"github.com/kubeseal-ui/api/internal/crypto"
+	"github.com/kubeseal-ui/api/internal/gitops"
 	"github.com/kubeseal-ui/api/internal/handlers"
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 	"github.com/kubeseal-ui/api/internal/middleware"
@@ -34,9 +35,10 @@ func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers
 }
 
 // newRouter builds the chi router with authenticated Phase 2 routes.
-// Git mappings and transport are injected by the handler constructor when
-// production Git-backed editing is enabled in the later delivery phase.
-func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wrapper, k8s kubernetes.Client, providers ...oidc.AuthProvider) http.Handler {
+// When transport is non-nil, protected handlers are constructed with the
+// GitOps dependencies (policy store, go-git transport) so delivery
+// endpoints are live; nil keeps the Phase 3 fail-closed behavior.
+func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wrapper, k8s kubernetes.Client, transport gitops.GitTransport, providers ...oidc.AuthProvider) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
@@ -52,7 +54,13 @@ func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wr
 		provider = providers[0]
 	}
 
-	protected := handlers.NewProtectedHandlers(k8s, cryptoWrapper, cfg != nil && cfg.EnableDecrypt)
+	var protected *handlers.ProtectedHandlers
+	policyStore := policy.NewPolicyStore()
+	if transport != nil {
+		protected = handlers.NewProtectedHandlersWithGitOps(policyStore, transport, k8s, cryptoWrapper, cfg != nil && cfg.EnableDecrypt)
+	} else {
+		protected = handlers.NewProtectedHandlers(k8s, cryptoWrapper, cfg != nil && cfg.EnableDecrypt)
+	}
 	protectedRoutes := func(r chi.Router) {
 		registerProtectedRoutes(r, protected)
 	}
@@ -67,7 +75,6 @@ func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wr
 		if origins := strings.Fields(cfg.CSRFTrustedOrigins); len(origins) > 0 {
 			authCfg.CSRFTrustedOrigins = origins
 		}
-		policyStore := policy.NewPolicyStore()
 		authCfg.ResolveCapabilities = func(groups []string) []string {
 			caps := policyStore.CapabilitiesForGroups(groups)
 			result := make([]string, 0, len(caps))

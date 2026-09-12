@@ -65,10 +65,13 @@ type ProposalResult struct {
 }
 
 // GitTransport performs portable Git operations. It has no host-provider API.
+// authRef selects the typed credential for the target repository; the
+// resolver resolves it server-side. An empty authRef is valid only for
+// remotes that need no credentials.
 type GitTransport interface {
-	ReadManifest(context.Context, Target) (ManifestSnapshot, error)
-	DryRun(context.Context, Change) (Diff, error)
-	PushBranch(context.Context, Change) (PushResult, error)
+	ReadManifest(ctx context.Context, target Target, authRef string) (ManifestSnapshot, error)
+	DryRun(ctx context.Context, change Change, authRef string) (Diff, error)
+	PushBranch(ctx context.Context, change Change, authRef string) (PushResult, error)
 }
 
 // ProposalProvider creates a host-specific review object for an already pushed branch.
@@ -113,7 +116,7 @@ func (t *LocalTransport) Seed(target Target, content, commit string) {
 	defer t.mu.Unlock()
 	t.entries[target] = localEntry{[]byte(content), commit}
 }
-func (t *LocalTransport) ReadManifest(_ context.Context, target Target) (ManifestSnapshot, error) {
+func (t *LocalTransport) ReadManifest(_ context.Context, target Target, _ string) (ManifestSnapshot, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	e, ok := t.entries[target]
@@ -122,8 +125,8 @@ func (t *LocalTransport) ReadManifest(_ context.Context, target Target) (Manifes
 	}
 	return ManifestSnapshot{target, append([]byte(nil), e.content...), e.commit}, nil
 }
-func (t *LocalTransport) DryRun(ctx context.Context, change Change) (Diff, error) {
-	s, err := t.ReadManifest(ctx, change.Target)
+func (t *LocalTransport) DryRun(ctx context.Context, change Change, _ string) (Diff, error) {
+	s, err := t.ReadManifest(ctx, change.Target, "")
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return Diff{}, err
 	}
@@ -136,7 +139,7 @@ func (t *LocalTransport) DryRun(ctx context.Context, change Change) (Diff, error
 	}
 	return Diff{change.Target, change.BaseCommit, before, append([]byte(nil), change.Content...)}, nil
 }
-func (t *LocalTransport) PushBranch(_ context.Context, change Change) (PushResult, error) {
+func (t *LocalTransport) PushBranch(_ context.Context, change Change, _ string) (PushResult, error) {
 	branch := change.Branch
 	if branch == "" {
 		branch = change.Target.Branch

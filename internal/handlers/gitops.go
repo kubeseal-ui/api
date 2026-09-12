@@ -47,7 +47,7 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
-	diff, err := h.GitTransport.DryRun(r.Context(), change)
+	diff, err := h.GitTransport.DryRun(r.Context(), change, mapping.AuthRef)
 	if err != nil {
 		var base *gitops.BaseCommitError
 		if errors.As(err, &base) {
@@ -88,7 +88,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
 		return
 	}
-	pushed, err := h.GitTransport.PushBranch(r.Context(), change)
+	pushed, err := h.GitTransport.PushBranch(r.Context(), change, mapping.AuthRef)
 	if err != nil {
 		var conflict *gitops.ConflictError
 		if errors.As(err, &conflict) {

@@ -79,6 +79,32 @@ type Config struct {
 	FakeK8sClient       bool
 	ControllerNamespace string
 	ActiveKeyLabel      string
+
+	// GitOps enables the production go-git transport and policy-backed
+	// Git mappings. Disabled boots keep the local in-memory transport
+	// (contract tests only) out of the serving path.
+	// Sources: GITOPS_ENABLED env (must be literal "true" to enable).
+	GitOpsEnabled bool
+
+	// GitAuthorName stamps delivery commits. Default "kubeseal-ui".
+	// Sources: GITOPS_AUTHOR_NAME env.
+	GitAuthorName string
+
+	// GitAuthorEmail stamps delivery commits.
+	// Sources: GITOPS_AUTHOR_EMAIL env.
+	GitAuthorEmail string
+
+	// GitWorktreeDir holds per-target go-git worktrees. Defaults to
+	// /tmp/kubeseal-ui/gitops (the mounted emptyDir).
+	// Sources: GITOPS_WORKTREE_DIR env.
+	GitWorktreeDir string
+
+	// GitCredentialRefs is the typed, file-backed credential list:
+	// auth_ref:mode:username:token_file entries, comma-separated.
+	// Token files resolve per call so Secret rotation is picked up
+	// without a restart; tokens never appear in configuration values.
+	// Sources: GITOPS_CREDENTIAL_REFS env.
+	GitCredentialRefs string
 }
 
 // Load parses configuration from process flags + environment and returns
@@ -107,6 +133,11 @@ func Load() (Config, error) {
 		FakeK8sClient:       *flagFakeK8s,
 		ControllerNamespace: os.Getenv("KUBESEAL_CONTROLLER_NAMESPACE"),
 		ActiveKeyLabel:      os.Getenv("KUBESEAL_ACTIVE_KEY_LABEL"),
+		GitOpsEnabled:       os.Getenv("GITOPS_ENABLED") == "true",
+		GitAuthorName:       os.Getenv("GITOPS_AUTHOR_NAME"),
+		GitAuthorEmail:      os.Getenv("GITOPS_AUTHOR_EMAIL"),
+		GitWorktreeDir:      os.Getenv("GITOPS_WORKTREE_DIR"),
+		GitCredentialRefs:   os.Getenv("GITOPS_CREDENTIAL_REFS"),
 	}
 
 	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {

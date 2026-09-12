@@ -113,7 +113,7 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 	if target.Path == "" {
 		return status, errors.New("invalid Git mapping")
 	}
-	snapshot, err := h.GitTransport.ReadManifest(r.Context(), target)
+	snapshot, err := h.GitTransport.ReadManifest(r.Context(), target, mapping.AuthRef)
 	if err != nil {
 		return status, err
 	}
