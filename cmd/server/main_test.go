@@ -62,6 +62,16 @@ func testK8s() kubernetes.Client {
 	)
 }
 
+// mustRouter builds the router and fails the test on a construction error.
+func mustRouter(t *testing.T, options routerOptions) http.Handler {
+	t.Helper()
+	router, err := newRouter(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return router
+}
+
 func TestRegisterProtectedRoutesMountsPhase3Routes(t *testing.T) {
 	r := chi.NewRouter()
 	protected := handlers.NewProtectedHandlers(testK8s(), testCrypto(), false)
@@ -102,7 +112,10 @@ func (routerFakeProvider) RevokeToken(context.Context, string) error { return ni
 func TestRouterProtectedPhase3RoutesRequireAuthentication(t *testing.T) {
 	cfg := testConfig()
 	cfg.SessionSigningKey = "router-test-signing-key"
-	router := newRouter(testLogger(), cfg, testCrypto(), testK8s(), nil, routerFakeProvider{})
+	router, err := newRouter(routerOptions{logger: testLogger(), cfg: cfg, crypto: testCrypto(), k8s: testK8s(), oidcProvider: routerFakeProvider{}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/namespaces"},
 		{http.MethodGet, "/api/v1/secrets"},
@@ -123,7 +136,10 @@ func TestRouterProtectedRoutesAcceptValidSessionAndCSRF(t *testing.T) {
 	cfg := testConfig()
 	cfg.SessionSigningKey = "router-test-signing-key"
 	cfg.CSRFTrustedOrigins = "https://app.example.com"
-	router := newRouter(testLogger(), cfg, testCrypto(), testK8s(), nil, routerFakeProvider{})
+	router, err := newRouter(routerOptions{logger: testLogger(), cfg: cfg, crypto: testCrypto(), k8s: testK8s(), oidcProvider: routerFakeProvider{}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	csrf := "csrf-router-test"
 	data := struct {
 		Subject  string   `json:"sub"`
@@ -179,7 +195,7 @@ func TestRouterProtectedRoutesAcceptValidSessionAndCSRF(t *testing.T) {
 // TestRouterHealthzReturns200 verifies the liveness probe is mounted.
 func TestRouterHealthzReturns200(t *testing.T) {
 	rr := httptest.NewRecorder()
-	newRouter(testLogger(), testConfig(), testCrypto(), testK8s(), nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	mustRouter(t, routerOptions{logger: testLogger(), cfg: testConfig(), crypto: testCrypto(), k8s: testK8s()}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
@@ -204,7 +220,7 @@ func TestRouterReadyzReturns503WithoutConfig(t *testing.T) {
 	cfg.OIDCClientID = ""
 
 	rr := httptest.NewRecorder()
-	newRouter(testLogger(), cfg, testCrypto(), testK8s(), nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	mustRouter(t, routerOptions{logger: testLogger(), cfg: cfg, crypto: testCrypto(), k8s: testK8s()}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("want 503, got %d", rr.Code)
@@ -218,7 +234,7 @@ func TestRouterReadyzReturns200WithConfig(t *testing.T) {
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
 
 	rr := httptest.NewRecorder()
-	newRouter(testLogger(), testConfig(), testCrypto(), testK8s(), nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	mustRouter(t, routerOptions{logger: testLogger(), cfg: testConfig(), crypto: testCrypto(), k8s: testK8s()}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d (body=%s)", rr.Code, rr.Body.String())
@@ -234,7 +250,7 @@ func TestRouterDoesNotExposeProtectedRoutes(t *testing.T) {
 		"/api/v1/secrets",
 	} {
 		rr := httptest.NewRecorder()
-		newRouter(testLogger(), testConfig(), testCrypto(), testK8s(), nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		mustRouter(t, routerOptions{logger: testLogger(), cfg: testConfig(), crypto: testCrypto(), k8s: testK8s()}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
 		if rr.Code != http.StatusNotFound {
 			t.Errorf("%s: want 404, got %d", path, rr.Code)
 		}

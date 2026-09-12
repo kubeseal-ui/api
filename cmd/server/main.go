@@ -27,6 +27,7 @@ import (
 	"github.com/kubeseal-ui/api/internal/gitops"
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 	"github.com/kubeseal-ui/api/internal/observability"
+	"github.com/kubeseal-ui/api/internal/policy"
 	"k8s.io/client-go/rest"
 )
 
@@ -130,6 +131,43 @@ func parseCredentialRefs(raw string) []gitops.FileCredential {
 	return refs
 }
 
+// parseMappingSpecs parses the comma-separated namespace mapping list.
+// Each entry is namespace:repo:branch:path_template:auth_ref:mode with an
+// optional :adapter_name suffix for proposal mode; path templates use '-'
+// in place of '/'.
+func parseMappingSpecs(raw string) []policy.GitMappingSpec {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var specs []policy.GitMappingSpec
+	for _, entry := range strings.Split(raw, ",") {
+		parts := strings.Split(strings.TrimSpace(entry), ":")
+		if len(parts) < 6 {
+			continue
+		}
+		spec := policy.GitMappingSpec{
+			Namespace:    parts[0],
+			Repository:   parts[1],
+			Branch:       parts[2],
+			PathTemplate: strings.ReplaceAll(parts[3], "-", "/"),
+			AuthRef:      parts[4],
+			Mode:         policy.GitDeliveryMode(parts[5]),
+		}
+		if len(parts) > 6 {
+			spec.ProposalAdapterName = parts[6]
+		}
+		specs = append(specs, spec)
+	}
+	return specs
+}
+
+// proposalAdapters returns the named host adapters available to
+// values-driven seeding. The registry grows as concrete host adapters
+// land; platform-agnostic delivery requires none.
+func proposalAdapters() map[string]policy.ProposalAdapter {
+	return map[string]policy.ProposalAdapter{}
+}
+
 func main() {
 	flag.Parse()
 	cfg, err := config.Load()
@@ -206,8 +244,20 @@ func main() {
 	if transport != nil {
 		slog.Info("gitops delivery enabled", "worktree_dir", cfg.GitWorktreeDir, "credentials", len(parseCredentialRefs(cfg.GitCredentialRefs)))
 	}
-	router := newRouter(logger, &cfg, cryptoWrapper, k8sClient, transport, oidcProvider)
-
+	router, routerErr := newRouter(routerOptions{
+		logger:       logger,
+		cfg:          &cfg,
+		crypto:       cryptoWrapper,
+		k8s:          k8sClient,
+		transport:    transport,
+		oidcProvider: oidcProvider,
+		mappingSpecs: parseMappingSpecs(cfg.GitMappingSpecs),
+		adapters:     proposalAdapters(),
+	})
+	if routerErr != nil {
+		slog.Error("router construction failed", "error", routerErr)
+		os.Exit(1)
+	}
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           router,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -34,33 +35,59 @@ func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers
 	r.Post("/secrets/encrypt", protected.EncryptHandler)
 }
 
+// routerOptions carries the router's dependencies. The transport and
+// mapping specs are values-driven: non-nil transport enables Git-backed
+// editing, and specs seed the policy store's namespace mappings.
+type routerOptions struct {
+	logger       *slog.Logger
+	cfg          *config.Config
+	crypto       *crypto.Wrapper
+	k8s          kubernetes.Client
+	transport    gitops.GitTransport
+	oidcProvider oidc.AuthProvider
+	mappingSpecs []policy.GitMappingSpec
+	adapters     map[string]policy.ProposalAdapter
+}
+
 // newRouter builds the chi router with authenticated Phase 2 routes.
 // When transport is non-nil, protected handlers are constructed with the
-// GitOps dependencies (policy store, go-git transport) so delivery
-// endpoints are live; nil keeps the Phase 3 fail-closed behavior.
-func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wrapper, k8s kubernetes.Client, transport gitops.GitTransport, providers ...oidc.AuthProvider) http.Handler {
+// GitOps dependencies (policy store seeded from mapping specs, go-git
+// transport, named adapters) so delivery endpoints are live; a nil
+// transport keeps the Phase 3 fail-closed behavior. A seeding failure is
+// returned so main can refuse to boot with a broken mapping list.
+func newRouter(options routerOptions) (http.Handler, error) {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))
-	r.Use(middleware.RequestLogger(logger))
+	r.Use(middleware.RequestLogger(options.logger))
 	r.Get("/healthz", handlers.Healthz)
 	r.Get("/readyz", handlers.Readyz)
 
 	// OIDC discovery is performed by main and injected here. Keeping the
 	// router free of network I/O makes it deterministic and testable.
 	var provider oidc.AuthProvider
-	if cfg != nil && cfg.SessionSigningKey != "" && len(providers) > 0 {
-		provider = providers[0]
+	if options.cfg != nil && options.cfg.SessionSigningKey != "" && options.oidcProvider != nil {
+		provider = options.oidcProvider
 	}
 
-	var protected *handlers.ProtectedHandlers
 	policyStore := policy.NewPolicyStore()
-	if transport != nil {
-		protected = handlers.NewProtectedHandlersWithGitOps(policyStore, transport, k8s, cryptoWrapper, cfg != nil && cfg.EnableDecrypt)
+	var protected *handlers.ProtectedHandlers
+	if options.transport != nil {
+		protected = handlers.NewProtectedHandlersWithGitOps(policyStore, options.transport, options.k8s, options.crypto, options.cfg != nil && options.cfg.EnableDecrypt)
 	} else {
-		protected = handlers.NewProtectedHandlers(k8s, cryptoWrapper, cfg != nil && cfg.EnableDecrypt)
+		protected = handlers.NewProtectedHandlers(options.k8s, options.crypto, options.cfg != nil && options.cfg.EnableDecrypt)
 	}
+
+	// Seed the namespace Git mappings from values. Enabled GitOps with
+	// no specs boots fail-closed: delivery endpoints exist but every
+	// namespace resolves "mapping not found" until mappings are set.
+	if options.transport != nil && len(options.mappingSpecs) > 0 {
+		if err := policyStore.SeedGitMappings(options.mappingSpecs, options.adapters); err != nil {
+			return nil, fmt.Errorf("gitops mapping seeding: %w", err)
+		}
+	}
+
 	protectedRoutes := func(r chi.Router) {
 		registerProtectedRoutes(r, protected)
 	}
@@ -69,10 +96,10 @@ func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wr
 	// Phase 1 fail-closed behavior in local tests and unconfigured boots.
 	if provider != nil {
 		authCfg := authmw.DefaultAuthConfig(provider)
-		authCfg.SigningKey = []byte(cfg.SessionSigningKey)
+		authCfg.SigningKey = []byte(options.cfg.SessionSigningKey)
 		authCfg.CookieSecure = true
-		authCfg.CookieDomain = cfg.CookieDomain
-		if origins := strings.Fields(cfg.CSRFTrustedOrigins); len(origins) > 0 {
+		authCfg.CookieDomain = options.cfg.CookieDomain
+		if origins := strings.Fields(options.cfg.CSRFTrustedOrigins); len(origins) > 0 {
 			authCfg.CSRFTrustedOrigins = origins
 		}
 		authCfg.ResolveCapabilities = func(groups []string) []string {
@@ -93,5 +120,5 @@ func newRouter(logger *slog.Logger, cfg *config.Config, cryptoWrapper *crypto.Wr
 			api.With(authmw.AuthMiddleware(authCfg), authmw.CSRFMiddleware(authCfg)).Route("/", protectedRoutes)
 		})
 	}
-	return r
+	return r, nil
 }

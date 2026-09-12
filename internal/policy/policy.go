@@ -211,13 +211,17 @@ const (
 
 // GitMapping defines the Git target for a namespace.
 type GitMapping struct {
-	Namespace       string
-	Repository      string // e.g., "org/repo"
-	Branch          string // e.g., "main"
-	PathTemplate    string // e.g., "clusters/prod/{namespace}/{name}.yaml"
-	AuthRef         string // Reference to auth secret/credentials
-	Mode            GitDeliveryMode
-	ProposalAdapter ProposalAdapter // required when Mode is proposal
+	Namespace    string
+	Repository   string // e.g., "org/repo"
+	Branch       string // e.g., "main"
+	PathTemplate string // e.g., "clusters/prod/{namespace}/{name}.yaml"
+	AuthRef      string // Reference to auth secret/credentials
+	Mode         GitDeliveryMode
+	// ProposalAdapter is required when Mode is proposal. Instance wiring
+	// (tests, programmatic setup) populates the adapter; values-driven
+	// seeding populates ProposalAdapterName instead.
+	ProposalAdapter     ProposalAdapter
+	ProposalAdapterName string
 }
 
 // ProposalAdapter is the provider-specific proposal hook.
@@ -262,7 +266,7 @@ func (g GitMapping) Validate() error {
 	if _, err := template.New("path").Option("missingkey=error").Parse(parsed); err != nil {
 		return fmt.Errorf("invalid path template: %w", err)
 	}
-	if g.Mode == GitDeliveryProposal && g.ProposalAdapter == nil {
+	if g.Mode == GitDeliveryProposal && g.ProposalAdapter == nil && g.ProposalAdapterName == "" {
 		return errors.New("proposal mode requires a proposal adapter")
 	}
 	if g.Mode != GitDeliveryDirect && g.Mode != GitDeliveryProposal {
@@ -404,6 +408,47 @@ func (s *PolicyStore) ConfigureGitMappings(mappings []GitMapping) error {
 	s.GitMappings = next
 	s.mu.Unlock()
 	return nil
+}
+
+// GitMappingSpec is the values-driven mapping definition. It mirrors
+// GitMapping with the proposal adapter referenced by registry name
+// instead of by instance, so configuration never carries code.
+type GitMappingSpec struct {
+	Namespace           string
+	Repository          string
+	Branch              string
+	PathTemplate        string
+	AuthRef             string
+	Mode                GitDeliveryMode
+	ProposalAdapterName string
+}
+
+// SeedGitMappings atomically replaces all mappings from specs. Each
+// proposal-mode spec resolves its adapter from the registry; an unknown
+// name is a configuration error, never an implicit nil adapter.
+// Direct-mode specs must not name an adapter.
+func (s *PolicyStore) SeedGitMappings(specs []GitMappingSpec, adapters map[string]ProposalAdapter) error {
+	mappings := make([]GitMapping, 0, len(specs))
+	for _, spec := range specs {
+		mapping := GitMapping{
+			Namespace:           spec.Namespace,
+			Repository:          spec.Repository,
+			Branch:              spec.Branch,
+			PathTemplate:        spec.PathTemplate,
+			AuthRef:             spec.AuthRef,
+			Mode:                spec.Mode,
+			ProposalAdapterName: spec.ProposalAdapterName,
+		}
+		if spec.Mode == GitDeliveryProposal {
+			adapter, ok := adapters[spec.ProposalAdapterName]
+			if !ok {
+				return fmt.Errorf("namespace %q: unknown proposal adapter %q", spec.Namespace, spec.ProposalAdapterName)
+			}
+			mapping.ProposalAdapter = adapter
+		}
+		mappings = append(mappings, mapping)
+	}
+	return s.ConfigureGitMappings(mappings)
 }
 
 // ResolveGitMapping fails closed when a namespace is not configured.

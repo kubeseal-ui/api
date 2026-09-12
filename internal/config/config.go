@@ -105,6 +105,13 @@ type Config struct {
 	// without a restart; tokens never appear in configuration values.
 	// Sources: GITOPS_CREDENTIAL_REFS env.
 	GitCredentialRefs string
+
+	// GitMappingSpecs is the comma-separated namespace mapping list:
+	// namespace:repo:branch:path_template:auth_ref:mode[:adapter_name].
+	// Path templates use '-' in place of '/'. Only consumed when
+	// GitOps is enabled.
+	// Sources: GITOPS_NAMESPACES env.
+	GitMappingSpecs string
 }
 
 // Load parses configuration from process flags + environment and returns
@@ -138,6 +145,7 @@ func Load() (Config, error) {
 		GitAuthorEmail:      os.Getenv("GITOPS_AUTHOR_EMAIL"),
 		GitWorktreeDir:      os.Getenv("GITOPS_WORKTREE_DIR"),
 		GitCredentialRefs:   os.Getenv("GITOPS_CREDENTIAL_REFS"),
+		GitMappingSpecs:     os.Getenv("GITOPS_NAMESPACES"),
 	}
 
 	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {
