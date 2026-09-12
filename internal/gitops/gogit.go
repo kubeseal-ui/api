@@ -285,14 +285,14 @@ func (t *GoGitTransport) PushBranch(ctx context.Context, change Change, authRef 
 	// Write the file into the worktree and commit. Missing parent
 	// directories are created for the new-file vacancy case.
 	fullPath := filepath.Join(worktree.Filesystem.Root(), change.Target.Path)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o700); err != nil {
-		return PushResult{}, fmt.Errorf("create parent dirs: %w", err)
+	if mkdirErr := os.MkdirAll(filepath.Dir(fullPath), 0o700); mkdirErr != nil {
+		return PushResult{}, fmt.Errorf("create parent dirs: %w", mkdirErr)
 	}
-	if err := os.WriteFile(fullPath, change.Content, 0o600); err != nil {
-		return PushResult{}, fmt.Errorf("write file: %w", err)
+	if writeErr := os.WriteFile(fullPath, change.Content, 0o600); writeErr != nil {
+		return PushResult{}, fmt.Errorf("write file: %w", writeErr)
 	}
-	if _, err := worktree.Add(change.Target.Path); err != nil {
-		return PushResult{}, fmt.Errorf("add: %w", err)
+	if _, addErr := worktree.Add(change.Target.Path); addErr != nil {
+		return PushResult{}, fmt.Errorf("add: %w", addErr)
 	}
 	commitHash, err := worktree.Commit(change.commitMessage(), &git.CommitOptions{
 		Author: &object.Signature{
