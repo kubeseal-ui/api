@@ -35,7 +35,7 @@ main
 coverage.out
 coverage.html
 
-# Config
-config.yaml
+# Environment (nothing in this repo loads a .env file; ignored so a stray one
+# never lands in Git)
 .env
 .env.local
