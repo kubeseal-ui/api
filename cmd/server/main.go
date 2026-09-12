@@ -41,6 +41,42 @@ func (d *devPrivProvider) PrivateKey(_ context.Context) (*rsa.PrivateKey, error)
 	return d.key, nil
 }
 
+// discoverOIDC performs provider discovery when the OIDC environment is
+// complete; incomplete or absent configuration returns nil and the router
+// stays fail-closed.
+func discoverOIDC(cfg *config.Config) *oidc.Provider {
+	if cfg.OIDCIssuer == "" || cfg.OIDCClientID == "" {
+		return nil
+	}
+	oidcCfg := oidc.Config{
+		IssuerURL: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID,
+		ClientSecret: cfg.OIDCClientSecret, RedirectURL: cfg.OIDCRedirectURL,
+		Scopes: strings.Fields(cfg.OIDCScopes), GroupsClaim: cfg.OIDCGroupsClaim,
+		UsernameClaim: cfg.OIDCUsernameClaim, CookieSecure: true,
+	}
+	if len(oidcCfg.Scopes) == 0 {
+		oidcCfg.Scopes = []string{"openid", "profile", "email", "groups"}
+	}
+	if oidcCfg.GroupsClaim == "" {
+		oidcCfg.GroupsClaim = "groups"
+	}
+	if oidcCfg.UsernameClaim == "" {
+		oidcCfg.UsernameClaim = "preferred_username"
+	}
+	if oidcCfg.ClientSecret == "" || oidcCfg.RedirectURL == "" {
+		slog.Error("OIDC configuration incomplete", "error", "client secret and redirect URL are required")
+		return nil
+	}
+	discoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	provider, err := oidc.NewProvider(discoveryCtx, oidcCfg)
+	if err != nil {
+		slog.Error("OIDC provider discovery failed", "error", err)
+		return nil
+	}
+	return provider
+}
+
 // gitopsTransport builds the production go-git transport and typed
 // credential resolver from configuration. Returns nils when GitOps is
 // disabled — the serving path then has no Git-backed editing, matching
@@ -160,35 +196,7 @@ func main() {
 
 	// Router with production middleware chain (request ID, recovery, timeout, logging)
 	// OIDC discovery is injected by the server startup path.
-	var oidcProvider *oidc.Provider
-	if cfg.OIDCIssuer != "" && cfg.OIDCClientID != "" {
-		oidcCfg := oidc.Config{
-			IssuerURL: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID,
-			ClientSecret: cfg.OIDCClientSecret, RedirectURL: cfg.OIDCRedirectURL,
-			Scopes: strings.Fields(cfg.OIDCScopes), GroupsClaim: cfg.OIDCGroupsClaim,
-			UsernameClaim: cfg.OIDCUsernameClaim, CookieSecure: true,
-		}
-		if len(oidcCfg.Scopes) == 0 {
-			oidcCfg.Scopes = []string{"openid", "profile", "email", "groups"}
-		}
-		if oidcCfg.GroupsClaim == "" {
-			oidcCfg.GroupsClaim = "groups"
-		}
-		if oidcCfg.UsernameClaim == "" {
-			oidcCfg.UsernameClaim = "preferred_username"
-		}
-		if oidcCfg.ClientSecret == "" || oidcCfg.RedirectURL == "" {
-			slog.Error("OIDC configuration incomplete", "error", "client secret and redirect URL are required")
-		} else {
-			discoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			var discoveryErr error
-			oidcProvider, discoveryErr = oidc.NewProvider(discoveryCtx, oidcCfg)
-			cancel()
-			if discoveryErr != nil {
-				slog.Error("OIDC provider discovery failed", "error", discoveryErr)
-			}
-		}
-	}
+	oidcProvider := discoverOIDC(&cfg)
 	_ = authmw.DefaultAuthConfig
 	transport, transportErr := gitopsTransport(&cfg)
 	if transportErr != nil {

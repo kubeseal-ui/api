@@ -110,8 +110,11 @@ func (t *GoGitTransport) openOrClone(ctx context.Context, target Target, auth tr
 		if repo, openErr := git.PlainOpen(path); openErr == nil {
 			return repo, nil
 		}
-		// A broken scratch entry is re-cloned, not trusted.
-		_ = os.RemoveAll(path)
+		// A broken scratch entry is re-cloned, not trusted. Removal
+		// failure only forces a fresh clone to fail loudly below.
+		if removeErr := os.RemoveAll(path); removeErr != nil {
+			return nil, fmt.Errorf("reset broken worktree %s: %w", path, removeErr)
+		}
 	}
 	return git.PlainCloneContext(ctx, path, false, &git.CloneOptions{
 		URL:           remoteURL(target),
@@ -145,13 +148,13 @@ func (t *GoGitTransport) ReadManifest(ctx context.Context, target Target, authRe
 	if err != nil {
 		return ManifestSnapshot{}, fmt.Errorf("worktree: %w", err)
 	}
-	if err := worktree.PullContext(ctx, &git.PullOptions{
+	if pullErr := worktree.PullContext(ctx, &git.PullOptions{
 		RemoteName:    "origin",
 		ReferenceName: plumbing.NewBranchReferenceName(target.Branch),
 		Force:         true,
 		Auth:          auth,
-	}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return ManifestSnapshot{}, fmt.Errorf("fetch %s: %w", remoteURL(target), err)
+	}); pullErr != nil && !errors.Is(pullErr, git.NoErrAlreadyUpToDate) {
+		return ManifestSnapshot{}, fmt.Errorf("fetch %s: %w", remoteURL(target), pullErr)
 	}
 	head, err := repo.Head()
 	if err != nil {
@@ -187,7 +190,11 @@ func readFileAtHead(repo *git.Repository, path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("file reader: %w", err)
 	}
-	defer content.Close()
+	defer func() {
+		if closeErr := content.Close(); closeErr != nil {
+			err = fmt.Errorf("close file reader: %w", closeErr)
+		}
+	}()
 	return io.ReadAll(content)
 }
 
@@ -207,13 +214,13 @@ func (t *GoGitTransport) DryRun(ctx context.Context, change Change, authRef stri
 	if err != nil {
 		return Diff{}, fmt.Errorf("worktree: %w", err)
 	}
-	if err := worktree.PullContext(ctx, &git.PullOptions{
+	if pullErr := worktree.PullContext(ctx, &git.PullOptions{
 		RemoteName:    "origin",
 		ReferenceName: plumbing.NewBranchReferenceName(change.Target.Branch),
 		Force:         true,
 		Auth:          auth,
-	}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return Diff{}, fmt.Errorf("fetch %s: %w", remoteURL(change.Target), err)
+	}); pullErr != nil && !errors.Is(pullErr, git.NoErrAlreadyUpToDate) {
+		return Diff{}, fmt.Errorf("fetch %s: %w", remoteURL(change.Target), pullErr)
 	}
 	head, err := repo.Head()
 	if err != nil {
@@ -247,13 +254,13 @@ func (t *GoGitTransport) PushBranch(ctx context.Context, change Change, authRef 
 	if err != nil {
 		return PushResult{}, fmt.Errorf("worktree: %w", err)
 	}
-	if err := worktree.PullContext(ctx, &git.PullOptions{
+	if pullErr := worktree.PullContext(ctx, &git.PullOptions{
 		RemoteName:    "origin",
 		ReferenceName: plumbing.NewBranchReferenceName(change.Target.Branch),
 		Force:         true,
 		Auth:          auth,
-	}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return PushResult{}, fmt.Errorf("fetch %s: %w", remoteURL(change.Target), err)
+	}); pullErr != nil && !errors.Is(pullErr, git.NoErrAlreadyUpToDate) {
+		return PushResult{}, fmt.Errorf("fetch %s: %w", remoteURL(change.Target), pullErr)
 	}
 	head, err := repo.Head()
 	if err != nil {
