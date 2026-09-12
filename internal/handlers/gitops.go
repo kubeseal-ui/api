@@ -35,6 +35,14 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitops.Change, policy.Gi
 	return gitops.Change{Target: gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}, BaseCommit: req.BaseCommit, Content: []byte(req.YAML)}, mapping, nil
 }
 
+// proposalBranch derives the server-side proposal branch for a change.
+// Clients never choose the branch; the name is deterministic from the
+// namespace and secret so a retried delivery reconciles onto the same
+// branch rather than creating duplicates.
+func proposalBranch(namespace, name string) string {
+	return "kubeseal-ui/" + namespace + "-" + name
+}
+
 func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.Request) {
 	change, mapping, err := h.gitChange(r)
 	if err != nil {
@@ -87,6 +95,11 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	if !h.claimIdempotency(r) {
 		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
 		return
+	}
+	// Proposal namespaces push a dedicated branch, never the mapped
+	// direct branch. Direct namespaces push the mapped branch itself.
+	if mapping.Mode == policy.GitDeliveryProposal {
+		change.Branch = proposalBranch(change.Target.Repository, change.Target.Path)
 	}
 	pushed, err := h.GitTransport.PushBranch(r.Context(), change, mapping.AuthRef)
 	if err != nil {
