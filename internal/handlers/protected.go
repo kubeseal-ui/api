@@ -97,7 +97,7 @@ func requireCapability(w http.ResponseWriter, r *http.Request, required ...polic
 }
 
 func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML, baseCommit string) (map[string]any, error) {
-	status := map[string]any{"managed": false, "drift": kubernetes.DriftUnknown}
+	status := map[string]any{"managed": false, "in_sync_with_live": false, "drift": kubernetes.DriftUnknown}
 	if h.GitMappings == nil || h.GitTransport == nil {
 		return status, nil
 	}
@@ -107,8 +107,9 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 	}
 	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: mapping.RenderPath(namespace, name)}
 	status = map[string]any{
-		"managed": true, "drift": kubernetes.DriftUnknown, "path": target.Path,
-		"repository": target.Repository, "branch": target.Branch,
+		"managed": true, "in_sync_with_live": false, "drift": kubernetes.DriftUnknown,
+		"file_path": target.Path, "repository": target.Repository, "branch": target.Branch,
+		"delivery_mode": string(mapping.Mode),
 	}
 	if target.Path == "" {
 		return status, errors.New("invalid Git mapping")
@@ -131,6 +132,7 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 	}
 	if bytes.Equal(liveCanonical, gitCanonical) {
 		status["drift"] = kubernetes.DriftSync
+		status["in_sync_with_live"] = true
 		return status, nil
 	}
 	status["drift"] = kubernetes.DriftDiverged
@@ -223,7 +225,7 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 	for i := range secrets {
 		git, gitErr := h.gitStatus(r, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "")
 		if gitErr != nil {
-			git = map[string]any{"managed": true, "drift": kubernetes.DriftUnknown}
+			git = map[string]any{"managed": true, "in_sync_with_live": false, "drift": kubernetes.DriftUnknown}
 		}
 		items = append(items, map[string]any{
 			"name": secrets[i].Name, "namespace": secrets[i].Namespace,

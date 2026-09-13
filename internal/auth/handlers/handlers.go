@@ -357,11 +357,15 @@ func (h *AuthHandlers) MeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := map[string]string{
+	response := map[string]any{
 		"email":    identity.Email,
 		"name":     identity.Name,
 		"username": identity.Username,
 	}
+	// The identity resolver maps groups to a flat capability list; the
+	// doc contract's per-namespace scoping is the remaining auth work.
+	// Until then, capabilities flow under "capabilities".
+	response["capabilities"] = identity.Capabilities
 
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, response)

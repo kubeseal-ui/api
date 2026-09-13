@@ -68,7 +68,11 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 	h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "success")
-	jsonResponse(w, http.StatusOK, map[string]any{"diff": diff.After, "before": diff.Before, "path": change.Target.Path, "base_commit": change.BaseCommit, "mode": mapping.Mode})
+	// The doc contract calls for "encrypted diff, resolved path, base
+	// commit, and fixed delivery mode". The after ciphertext flows under
+	// "after" (the key the client reads) and "diff" stays for compatibility
+	// with the original handler response.
+	jsonResponse(w, http.StatusOK, map[string]any{"after": diff.After, "diff": diff.After, "before": diff.Before, "path": change.Target.Path, "base_commit": change.BaseCommit, "mode": mapping.Mode})
 }
 
 func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.Request) {
