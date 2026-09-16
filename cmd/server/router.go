@@ -39,14 +39,15 @@ func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers
 // mapping specs are values-driven: non-nil transport enables Git-backed
 // editing, and specs seed the policy store's namespace mappings.
 type routerOptions struct {
-	logger       *slog.Logger
-	cfg          *config.Config
-	crypto       *crypto.Wrapper
-	k8s          kubernetes.Client
-	transport    gitops.GitTransport
-	oidcProvider oidc.AuthProvider
-	mappingSpecs []policy.GitMappingSpec
-	adapters     map[string]policy.ProposalAdapter
+	logger         *slog.Logger
+	cfg            *config.Config
+	crypto         *crypto.Wrapper
+	k8s            kubernetes.Client
+	transport      gitops.GitTransport
+	oidcProvider   oidc.AuthProvider
+	mappingSpecs   []policy.GitMappingSpec
+	adapters       map[string]policy.ProposalAdapter
+	securityEvents handlers.SecurityEventSink
 }
 
 // newRouter builds the chi router with authenticated Phase 2 routes.
@@ -78,6 +79,10 @@ func newRouter(options routerOptions) (http.Handler, error) {
 	} else {
 		protected = handlers.NewProtectedHandlers(options.k8s, options.crypto, options.cfg != nil && options.cfg.EnableDecrypt)
 	}
+	// Security events flow to stdout through the redacting handler per
+	// the doc contract: one bounded JSON event per reveal, patch, and
+	// delivery attempt.
+	protected.SecurityEvents = options.securityEvents
 
 	// Seed the namespace Git mappings from values. Enabled GitOps with
 	// no specs boots fail-closed: delivery endpoints exist but every

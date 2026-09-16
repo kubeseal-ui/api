@@ -245,14 +245,15 @@ func main() {
 		slog.Info("gitops delivery enabled", "worktree_dir", cfg.GitWorktreeDir, "credentials", len(parseCredentialRefs(cfg.GitCredentialRefs)))
 	}
 	router, routerErr := newRouter(routerOptions{
-		logger:       logger,
-		cfg:          &cfg,
-		crypto:       cryptoWrapper,
-		k8s:          k8sClient,
-		transport:    transport,
-		oidcProvider: oidcProvider,
-		mappingSpecs: parseMappingSpecs(cfg.GitMappingSpecs),
-		adapters:     proposalAdapters(),
+		logger:         logger,
+		cfg:            &cfg,
+		crypto:         cryptoWrapper,
+		k8s:            k8sClient,
+		transport:      transport,
+		oidcProvider:   oidcProvider,
+		mappingSpecs:   parseMappingSpecs(cfg.GitMappingSpecs),
+		adapters:       proposalAdapters(),
+		securityEvents: observability.NewStdoutSecurityEventSink(),
 	})
 	if routerErr != nil {
 		slog.Error("router construction failed", "error", routerErr)
