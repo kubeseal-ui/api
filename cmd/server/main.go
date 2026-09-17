@@ -161,11 +161,82 @@ func parseMappingSpecs(raw string) []policy.GitMappingSpec {
 	return specs
 }
 
+// proposalAdapterSpec is one parsed GITOPS_PROPOSAL_ADAPTERS entry.
+type proposalAdapterSpec struct {
+	Name      string
+	Type      string
+	TokenFile string
+	BaseURL   string
+}
+
+// parseProposalAdapterSpecs parses the comma-separated proposal adapter
+// list. Each entry is name:type:token_file[:base_url]. Parsing fails
+// closed: a malformed entry, a missing name/type/token file, or a
+// duplicate name is an error rather than a silently ignored adapter.
+func parseProposalAdapterSpecs(raw string) ([]proposalAdapterSpec, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var specs []proposalAdapterSpec
+	seen := map[string]struct{}{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		// SplitN with a limit of 4 keeps colons inside the base URL
+		// (https://host/path) intact.
+		parts := strings.SplitN(entry, ":", 4)
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("proposal adapter %q must be name:type:token_file[:base_url]", entry)
+		}
+		spec := proposalAdapterSpec{Name: strings.TrimSpace(parts[0]), Type: strings.TrimSpace(parts[1]), TokenFile: strings.TrimSpace(parts[2])}
+		if len(parts) == 4 {
+			spec.BaseURL = strings.TrimSpace(parts[3])
+		}
+		if spec.Name == "" || spec.Type == "" || spec.TokenFile == "" {
+			return nil, fmt.Errorf("proposal adapter %q requires a name, a type, and a token file", entry)
+		}
+		if _, dup := seen[spec.Name]; dup {
+			return nil, fmt.Errorf("duplicate proposal adapter name %q", spec.Name)
+		}
+		seen[spec.Name] = struct{}{}
+		specs = append(specs, spec)
+	}
+	return specs, nil
+}
+
 // proposalAdapters returns the named host adapters available to
 // values-driven seeding. The registry grows as concrete host adapters
 // land; platform-agnostic delivery requires none.
-func proposalAdapters() map[string]policy.ProposalAdapter {
-	return map[string]policy.ProposalAdapter{}
+//
+// "github" opens pull requests via the GitHub REST API using a
+// fine-grained PAT read from a Secret-mounted file per call. A namespace
+// that references an adapter name this registry does not hold makes
+// PolicyStore.SeedGitMappings fail at boot (fail-closed), so an
+// unconfigured adapter can never serve proposal deliveries.
+func proposalAdapters(cfg *config.Config) (map[string]gitops.ProposalProvider, error) {
+	specs, err := parseProposalAdapterSpecs(cfg.GitOpsProposalAdapters)
+	if err != nil {
+		return nil, err
+	}
+	adapters := make(map[string]gitops.ProposalProvider, len(specs))
+	for _, spec := range specs {
+		switch spec.Type {
+		case "github":
+			provider, err := gitops.NewGitHubProposalProvider(gitops.GitHubProposalOptions{
+				TokenFile: spec.TokenFile,
+				BaseURL:   spec.BaseURL,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("proposal adapter %s: %w", spec.Name, err)
+			}
+			adapters[spec.Name] = provider
+		default:
+			return nil, fmt.Errorf("proposal adapter %s: unknown type %q", spec.Name, spec.Type)
+		}
+	}
+	return adapters, nil
 }
 
 func main() {
@@ -244,6 +315,11 @@ func main() {
 	if transport != nil {
 		slog.Info("gitops delivery enabled", "worktree_dir", cfg.GitWorktreeDir, "credentials", len(parseCredentialRefs(cfg.GitCredentialRefs)))
 	}
+	adapters, adaptersErr := proposalAdapters(&cfg)
+	if adaptersErr != nil {
+		slog.Error("proposal adapter construction failed", "error", adaptersErr)
+		os.Exit(1)
+	}
 	router, routerErr := newRouter(routerOptions{
 		logger:         logger,
 		cfg:            &cfg,
@@ -252,7 +328,7 @@ func main() {
 		transport:      transport,
 		oidcProvider:   oidcProvider,
 		mappingSpecs:   parseMappingSpecs(cfg.GitMappingSpecs),
-		adapters:       proposalAdapters(),
+		adapters:       adapters,
 		securityEvents: observability.NewStdoutSecurityEventSink(),
 	})
 	if routerErr != nil {

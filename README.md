@@ -9,7 +9,10 @@ Go backend for kubeseal-ui
 - `internal/` - Private packages organized by functionality
 - `go.mod` - Go module definition
 - `Dockerfile` - Container image build definition
-- `.github/workflows/ci.yml` - GitHub Actions CI/CD pipeline
+- `.github/workflows/ci-cd.yml` - GitHub Actions CI/CD pipeline
+- `.github/ISSUE_TEMPLATE/` - Bug, adapter, support, and security issue forms
+- `docs/` - Operator documentation (troubleshooting, proposal adapters)
+- `.env.example` - Every environment variable, with defaults and reasons
 - `.gitignore` - Files to exclude from version control
 
 ## Key Components
@@ -33,6 +36,21 @@ Go backend for kubeseal-ui
 ### Authentication
 
 Uses OIDC Authorization Code flow with PKCE. Authentik is the recommended OIDC provider.
+
+### GitOps delivery
+
+Delivery is server-mapped: clients never choose the repository, branch, path, or mode. The namespace mapping
+fixes all four, the typed credential reference selects the go-git authentication, and a proposal namespace
+additionally needs an adapter declared in `GITOPS_PROPOSAL_ADAPTERS`. See
+[docs/proposal-adapters.md](docs/proposal-adapters.md).
+
+### Documentation
+
+- [docs/troubleshooting.md](docs/troubleshooting.md) - login, drift, reveal, delivery, adapter, and
+  NetworkPolicy failure modes with the check that decides each one
+- [docs/proposal-adapters.md](docs/proposal-adapters.md) - adapter contract, configuration, GitHub PAT setup,
+  and how to add a host adapter
+- [.env.example](.env.example) - configuration reference
 
 ### Deployment
 
@@ -89,4 +107,5 @@ MIT License
 
 ## Contact
 
-For support or questions, please open an issue on GitHub.
+Open an issue on GitHub. Community support only: no hosted service, no availability SLO. Report
+vulnerabilities privately through the repository's Security tab rather than in a public issue.

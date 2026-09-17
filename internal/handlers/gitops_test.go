@@ -15,7 +15,7 @@ import (
 
 func TestGitOpsDryRunHandlerRequiresModeCapability(t *testing.T) {
 	store := policy.NewPolicyStore()
-	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryProposal, ProposalAdapter: policyTestProposalAdapter{}}); err != nil {
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryProposal, ProposalAdapter: localProposalAdapter{}}); err != nil {
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, gitops.NewLocalTransport(), nil, nil, false)
@@ -73,13 +73,6 @@ func (localProposalAdapter) OpenProposal(context.Context, gitops.ProposalRequest
 	return gitops.ProposalResult{URL: "https://review.test/1"}, nil
 }
 
-type policyTestProposalAdapter struct{}
-
-func (policyTestProposalAdapter) OpenProposal(context.Context, policy.ProposalRequest) (policy.ProposalResult, error) {
-	return policy.ProposalResult{}, nil
-}
-
-// failingProposalAdapter simulates a host outage after the branch push.
 type failingProposalAdapter struct{}
 
 func (failingProposalAdapter) OpenProposal(context.Context, gitops.ProposalRequest) (gitops.ProposalResult, error) {
@@ -90,11 +83,11 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")
 	store := policy.NewPolicyStore()
-	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryProposal, ProposalAdapter: policyTestProposalAdapter{}}); err != nil {
+	mapping := policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryProposal, ProposalAdapter: failingProposalAdapter{}}
+	if err := store.SetGitMapping(mapping); err != nil {
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
-	h.ProposalProviders["platform"] = failingProposalAdapter{}
 	body := `{"namespace":"payments","name":"api","yaml":"new","base_commit":"abc"}`
 
 	// The adapter fails after the branch push: 502, but the branch exists.
@@ -117,7 +110,10 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 	// The retry reconciles by idempotency key and branch rather than
 	// creating duplicates: the same content lands on the same branch and
 	// the successful adapter returns exactly one review URL.
-	h.ProposalProviders["platform"] = localProposalAdapter{}
+	mapping.ProposalAdapter = localProposalAdapter{}
+	if err := store.SetGitMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
 	retryReq := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", body, protectedIdentity(policy.GitOpsPropose))
 	retryReq.Header.Set("Idempotency-Key", "attempt-2")
 	retry := httptest.NewRecorder()

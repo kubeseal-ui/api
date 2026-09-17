@@ -4,12 +4,14 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/kubeseal-ui/api/internal/gitops"
 )
 
 type seedAdapter struct{}
 
-func (seedAdapter) OpenProposal(context.Context, ProposalRequest) (ProposalResult, error) {
-	return ProposalResult{}, nil
+func (seedAdapter) OpenProposal(context.Context, gitops.ProposalRequest) (gitops.ProposalResult, error) {
+	return gitops.ProposalResult{}, nil
 }
 
 func TestSeedGitMappingsSeedsDirectAndProposal(t *testing.T) {
@@ -18,7 +20,7 @@ func TestSeedGitMappingsSeedsDirectAndProposal(t *testing.T) {
 		{Namespace: "payments", Repository: "org/repo", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "platform-cred", Mode: GitDeliveryDirect},
 		{Namespace: "staging", Repository: "org/repo", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "platform-cred", Mode: GitDeliveryProposal, ProposalAdapterName: "github-pr"},
 	}
-	if err := store.SeedGitMappings(specs, map[string]ProposalAdapter{"github-pr": seedAdapter{}}); err != nil {
+	if err := store.SeedGitMappings(specs, map[string]gitops.ProposalProvider{"github-pr": seedAdapter{}}); err != nil {
 		t.Fatal(err)
 	}
 	direct, ok := store.GetGitMapping("payments")
@@ -36,7 +38,7 @@ func TestSeedGitMappingsUnknownAdapterFailsClosed(t *testing.T) {
 	specs := []GitMappingSpec{
 		{Namespace: "staging", Repository: "org/repo", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "cred", Mode: GitDeliveryProposal, ProposalAdapterName: "missing"},
 	}
-	err := store.SeedGitMappings(specs, map[string]ProposalAdapter{})
+	err := store.SeedGitMappings(specs, map[string]gitops.ProposalProvider{})
 	if err == nil || !strings.Contains(err.Error(), "unknown proposal adapter") {
 		t.Fatalf("err = %v, want unknown proposal adapter", err)
 	}
@@ -52,7 +54,7 @@ func TestSeedGitMappingsProposalValidationStillApplies(t *testing.T) {
 	specs := []GitMappingSpec{
 		{Namespace: "staging", Repository: "org/repo", Branch: "main", PathTemplate: "../{namespace}/{name}.yaml", AuthRef: "cred", Mode: GitDeliveryProposal, ProposalAdapterName: "github-pr"},
 	}
-	if err := store.SeedGitMappings(specs, map[string]ProposalAdapter{"github-pr": seedAdapter{}}); err == nil {
+	if err := store.SeedGitMappings(specs, map[string]gitops.ProposalProvider{"github-pr": seedAdapter{}}); err == nil {
 		t.Fatal("unsafe path template must fail validation")
 	}
 }

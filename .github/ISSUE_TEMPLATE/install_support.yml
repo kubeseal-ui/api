@@ -1,0 +1,58 @@
+name: Installation and configuration support
+description: Ask for help installing the chart or configuring OIDC, capabilities, and namespace mappings
+title: "[support] "
+labels: ["support", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check `docs/troubleshooting.md` first. **Never attach plaintext, ciphertext, tokens, cookies, controller keys, or credential-bearing URLs.**
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Chart version, API image tag, UI image tag, Kubernetes, and Sealed Secrets.
+      placeholder: chart 0.2.0, api 0.5.0-dev, ui 0.3.0, k8s 1.31, sealed-secrets 0.39.1
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Install or upgrade
+        - OIDC and session
+        - Capabilities and roles
+        - Git mapping and delivery
+        - Decrypt and reveal
+        - NetworkPolicy or ingress
+    validations:
+      required: true
+  - type: textarea
+    id: values
+    attributes:
+      label: Sanitized values excerpt
+      description: The chart values that matter, with Secret names, tokens, and URLs sanitized.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Include the exact commands (helm, kubectl) and their output with sensitive values removed.
+    validations:
+      required: false
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction confirmation
+      options:
+        - label: I have removed plaintext, ciphertext, controller keys, tokens, cookies, and credential-bearing URLs from this report.
+          required: true

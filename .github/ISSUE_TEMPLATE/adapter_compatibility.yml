@@ -1,0 +1,78 @@
+name: Proposal adapter compatibility
+description: Report a host adapter (GitHub pull requests, or a new host) not behaving as documented
+title: "[adapter] "
+labels: ["bug", "adapter"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The Git transport is platform-agnostic; only review-object creation is host specific. Report here when a pushed
+        proposal branch does not produce the expected pull request.
+        **Never attach tokens, credential-bearing URLs, ciphertext, or plaintext.**
+  - type: input
+    id: api-version
+    attributes:
+      label: kubeseal-ui API version
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Git host
+      options:
+        - GitHub (github.com)
+        - GitHub Enterprise Server
+        - GitLab
+        - Gitea or Forgejo
+        - other or self-hosted
+    validations:
+      required: true
+  - type: input
+    id: adapter-spec
+    attributes:
+      label: Adapter configuration
+      description: The `GITOPS_PROPOSAL_ADAPTERS` entry shape only, with the token file path. No token values.
+      placeholder: github-pr:github:/var/run/secrets/git/proposal/token
+    validations:
+      required: true
+  - type: input
+    id: host-api
+    attributes:
+      label: Host API root
+      description: Effective API base URL, or "default api.github.com".
+      placeholder: https://github.example.com/api/v3
+    validations:
+      required: false
+  - type: input
+    id: scopes
+    attributes:
+      label: Token scopes or permissions
+      description: Fine-grained PAT permissions or classic scopes, e.g. Contents read/write, Metadata read.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Delivery response (`branch`, `commit_sha`, `proposal_url`), status code, and host API response body with credentials stripped.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: request-id
+    attributes:
+      label: Request ID
+    validations:
+      required: false
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction confirmation
+      options:
+        - label: I have removed tokens, cookies, plaintext, ciphertext, and credential-bearing URLs from this report.
+          required: true

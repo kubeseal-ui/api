@@ -4,12 +4,14 @@ import (
 	"context"
 	"sync"
 	"testing"
+
+	"github.com/kubeseal-ui/api/internal/gitops"
 )
 
 type testProposalAdapter struct{}
 
-func (testProposalAdapter) OpenProposal(context.Context, ProposalRequest) (ProposalResult, error) {
-	return ProposalResult{}, nil
+func (testProposalAdapter) OpenProposal(context.Context, gitops.ProposalRequest) (gitops.ProposalResult, error) {
+	return gitops.ProposalResult{}, nil
 }
 
 func validMapping(namespace string) GitMapping {

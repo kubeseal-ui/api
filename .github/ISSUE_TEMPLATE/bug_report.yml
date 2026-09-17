@@ -1,0 +1,99 @@
+name: Bug report
+description: Report a defect in the kubeseal-ui API
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never attach plaintext, ciphertext, controller private keys, tokens, cookies, or credential-bearing URLs.**
+        Redact repository URLs and Secret names if they are sensitive.
+  - type: input
+    id: api-version
+    attributes:
+      label: kubeseal-ui API version
+      description: Image tag or commit SHA (`GITOPS_*` behaviour differs per release).
+      placeholder: v0.4.0 / 424c5b4
+    validations:
+      required: true
+  - type: input
+    id: k8s-version
+    attributes:
+      label: Kubernetes and Sealed Secrets versions
+      placeholder: k8s v1.31.2, sealed-secrets v0.39.1
+    validations:
+      required: true
+  - type: dropdown
+    id: gitops-mode
+    attributes:
+      label: Delivery mode
+      description: Namespace policy fixes the mode; pick the one in your mapping.
+      options:
+        - direct
+        - proposal
+        - gitops disabled
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Git transport and proposal adapter
+      description: Credential mode (`https-token`, `ssh-agent`, `none`) and adapter type (`github`, none).
+      placeholder: https-token + github adapter
+    validations:
+      required: true
+  - type: textarea
+    id: mapping
+    attributes:
+      label: Sanitized policy or mapping excerpt
+      description: The namespace mapping fields that matter (`repository`, `branch`, `pathTemplate`, `authRef`, `mode`), sanitized.
+      render: yaml
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open the secret editor for <namespace>/<name>
+        2. Replace key <key>
+        3. Deliver
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the error code (`GIT_CONFLICT`, `PROPOSAL_FAILED`, ...) and HTTP status.
+    validations:
+      required: true
+  - type: input
+    id: request-id
+    attributes:
+      label: Request ID
+      description: From the response header or the stdout log line for the failing request.
+      placeholder: 01J8ZC5T7Q9K3
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Structured stdout log lines for the request, with tokens, cookies, and secret values removed.
+      render: json
+    validations:
+      required: false
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction confirmation
+      options:
+        - label: I have removed plaintext, ciphertext, controller keys, tokens, cookies, and credential-bearing URLs from this report.
+          required: true

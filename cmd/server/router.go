@@ -46,7 +46,7 @@ type routerOptions struct {
 	transport      gitops.GitTransport
 	oidcProvider   oidc.AuthProvider
 	mappingSpecs   []policy.GitMappingSpec
-	adapters       map[string]policy.ProposalAdapter
+	adapters       map[string]gitops.ProposalProvider
 	securityEvents handlers.SecurityEventSink
 }
 

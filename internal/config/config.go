@@ -112,6 +112,15 @@ type Config struct {
 	// GitOps is enabled.
 	// Sources: GITOPS_NAMESPACES env.
 	GitMappingSpecs string
+
+	// GitOpsProposalAdapters lists the configured proposal adapters as
+	// name:type:token_file[:base_url] entries. A namespace mapping may only
+	// reference a name in this list; an unlisted name fails startup
+	// (fail-closed), and an empty list leaves proposal namespaces
+	// unserviceable while direct delivery keeps working. Token files are
+	// read per call so a rotated Secret takes effect without a restart.
+	// Sources: GITOPS_PROPOSAL_ADAPTERS env.
+	GitOpsProposalAdapters string
 }
 
 // Load parses configuration from process flags + environment and returns
@@ -123,29 +132,30 @@ type Config struct {
 // from tests) would otherwise panic with "flag redefined".
 func Load() (Config, error) {
 	cfg := Config{
-		Port:                *flagPort,
-		LogLevel:            *flagLevel,
-		OIDCIssuer:          os.Getenv("OIDC_ISSUER"),
-		OIDCClientID:        os.Getenv("OIDC_CLIENT_ID"),
-		OIDCClientSecret:    os.Getenv("OIDC_CLIENT_SECRET"),
-		OIDCRedirectURL:     os.Getenv("OIDC_REDIRECT_URL"),
-		OIDCScopes:          os.Getenv("OIDC_SCOPES"),
-		OIDCGroupsClaim:     os.Getenv("OIDC_GROUPS_CLAIM"),
-		OIDCUsernameClaim:   os.Getenv("OIDC_USERNAME_CLAIM"),
-		CookieDomain:        os.Getenv("COOKIE_DOMAIN"),
-		CSRFTrustedOrigins:  os.Getenv("CSRF_TRUSTED_ORIGINS"),
-		SessionSigningKey:   os.Getenv("SESSION_SIGNING_KEY"),
-		EnableDecrypt:       os.Getenv("ENABLE_DECRYPT") == "true",
-		KubeSealCertURL:     *flagCertURL,
-		FakeK8sClient:       *flagFakeK8s,
-		ControllerNamespace: os.Getenv("KUBESEAL_CONTROLLER_NAMESPACE"),
-		ActiveKeyLabel:      os.Getenv("KUBESEAL_ACTIVE_KEY_LABEL"),
-		GitOpsEnabled:       os.Getenv("GITOPS_ENABLED") == "true",
-		GitAuthorName:       os.Getenv("GITOPS_AUTHOR_NAME"),
-		GitAuthorEmail:      os.Getenv("GITOPS_AUTHOR_EMAIL"),
-		GitWorktreeDir:      os.Getenv("GITOPS_WORKTREE_DIR"),
-		GitCredentialRefs:   os.Getenv("GITOPS_CREDENTIAL_REFS"),
-		GitMappingSpecs:     os.Getenv("GITOPS_NAMESPACES"),
+		Port:                   *flagPort,
+		LogLevel:               *flagLevel,
+		OIDCIssuer:             os.Getenv("OIDC_ISSUER"),
+		OIDCClientID:           os.Getenv("OIDC_CLIENT_ID"),
+		OIDCClientSecret:       os.Getenv("OIDC_CLIENT_SECRET"),
+		OIDCRedirectURL:        os.Getenv("OIDC_REDIRECT_URL"),
+		OIDCScopes:             os.Getenv("OIDC_SCOPES"),
+		OIDCGroupsClaim:        os.Getenv("OIDC_GROUPS_CLAIM"),
+		OIDCUsernameClaim:      os.Getenv("OIDC_USERNAME_CLAIM"),
+		CookieDomain:           os.Getenv("COOKIE_DOMAIN"),
+		CSRFTrustedOrigins:     os.Getenv("CSRF_TRUSTED_ORIGINS"),
+		SessionSigningKey:      os.Getenv("SESSION_SIGNING_KEY"),
+		EnableDecrypt:          os.Getenv("ENABLE_DECRYPT") == "true",
+		KubeSealCertURL:        *flagCertURL,
+		FakeK8sClient:          *flagFakeK8s,
+		ControllerNamespace:    os.Getenv("KUBESEAL_CONTROLLER_NAMESPACE"),
+		ActiveKeyLabel:         os.Getenv("KUBESEAL_ACTIVE_KEY_LABEL"),
+		GitOpsEnabled:          os.Getenv("GITOPS_ENABLED") == "true",
+		GitAuthorName:          os.Getenv("GITOPS_AUTHOR_NAME"),
+		GitAuthorEmail:         os.Getenv("GITOPS_AUTHOR_EMAIL"),
+		GitWorktreeDir:         os.Getenv("GITOPS_WORKTREE_DIR"),
+		GitCredentialRefs:      os.Getenv("GITOPS_CREDENTIAL_REFS"),
+		GitMappingSpecs:        os.Getenv("GITOPS_NAMESPACES"),
+		GitOpsProposalAdapters: os.Getenv("GITOPS_PROPOSAL_ADAPTERS"),
 	}
 
 	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {

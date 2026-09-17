@@ -22,13 +22,14 @@
 package policy
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	pathpkg "path"
 	"strings"
 	"sync"
 	"text/template"
+
+	"github.com/kubeseal-ui/api/internal/gitops"
 )
 
 // Capability is a named permission.
@@ -220,17 +221,9 @@ type GitMapping struct {
 	// ProposalAdapter is required when Mode is proposal. Instance wiring
 	// (tests, programmatic setup) populates the adapter; values-driven
 	// seeding populates ProposalAdapterName instead.
-	ProposalAdapter     ProposalAdapter
+	ProposalAdapter     gitops.ProposalProvider
 	ProposalAdapterName string
 }
-
-// ProposalAdapter is the provider-specific proposal hook.
-type ProposalAdapter interface {
-	OpenProposal(context.Context, ProposalRequest) (ProposalResult, error)
-}
-
-type ProposalRequest struct{}
-type ProposalResult struct{}
 
 // Validate checks the GitMapping for required fields.
 func (g GitMapping) Validate() error {
@@ -427,7 +420,7 @@ type GitMappingSpec struct {
 // proposal-mode spec resolves its adapter from the registry; an unknown
 // name is a configuration error, never an implicit nil adapter.
 // Direct-mode specs must not name an adapter.
-func (s *PolicyStore) SeedGitMappings(specs []GitMappingSpec, adapters map[string]ProposalAdapter) error {
+func (s *PolicyStore) SeedGitMappings(specs []GitMappingSpec, adapters map[string]gitops.ProposalProvider) error {
 	mappings := make([]GitMapping, 0, len(specs))
 	for _, spec := range specs {
 		mapping := GitMapping{

@@ -87,7 +87,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
-	if mapping.Mode == policy.GitDeliveryProposal && h.ProposalProviders[mapping.Repository] == nil {
+	if mapping.Mode == policy.GitDeliveryProposal && mapping.ProposalAdapter == nil {
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_unavailable")
 		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 		return
@@ -119,7 +119,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	}
 	result := map[string]any{"mode": mapping.Mode, "commit_sha": pushed.Commit, "branch": pushed.Branch, "file_path": change.Target.Path, "argocd_sync_verified": false}
 	if mapping.Mode == policy.GitDeliveryProposal {
-		provider := h.ProposalProviders[mapping.Repository]
+		provider := mapping.ProposalAdapter
 		if provider == nil {
 			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_unavailable")
 			writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")

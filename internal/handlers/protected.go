@@ -25,15 +25,14 @@ const maxRequestBody = 10 * 1024 * 1024
 
 // ProtectedHandlers contains dependencies for authenticated API endpoints.
 type ProtectedHandlers struct {
-	Kubernetes        kubernetes.Client
-	Crypto            *crypto.Wrapper
-	EnableDecrypt     bool
-	GitMappings       *policy.PolicyStore
-	GitTransport      gitops.GitTransport
-	ProposalProviders map[string]gitops.ProposalProvider
-	SecurityEvents    SecurityEventSink
-	idempotencyMu     sync.Mutex
-	idempotencyKeys   map[string]struct{}
+	Kubernetes      kubernetes.Client
+	Crypto          *crypto.Wrapper
+	EnableDecrypt   bool
+	GitMappings     *policy.PolicyStore
+	GitTransport    gitops.GitTransport
+	SecurityEvents  SecurityEventSink
+	idempotencyMu   sync.Mutex
+	idempotencyKeys map[string]struct{}
 }
 
 // SecurityEventSink receives bounded audit records for sensitive operations.
@@ -55,7 +54,7 @@ func NewProtectedHandlers(k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, 
 }
 
 func NewProtectedHandlersWithGitOps(store *policy.PolicyStore, transport gitops.GitTransport, k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, enableDecrypt bool) *ProtectedHandlers {
-	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, GitMappings: store, GitTransport: transport, ProposalProviders: make(map[string]gitops.ProposalProvider), idempotencyKeys: make(map[string]struct{})}
+	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, GitMappings: store, GitTransport: transport, idempotencyKeys: make(map[string]struct{})}
 }
 
 func (h *ProtectedHandlers) claimIdempotency(r *http.Request) bool {

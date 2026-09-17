@@ -1,0 +1,30 @@
+name: Security-sensitive behavior
+description: Redirect to the private disclosure process (do not file public security reports)
+title: "[security] "
+labels: ["security", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Stop.** Do not describe an exploitable issue in a public issue.
+
+        Report privately instead, through GitHub's private vulnerability reporting on the affected repository
+        (Security tab -> Report a vulnerability). Include the affected version, the trust boundary that fails,
+        and reproduction steps.
+
+        Use this template only to ask for the disclosure channel when private reporting is unavailable. Do not
+        include exploit details, tokens, keys, or secret values here.
+  - type: input
+    id: repo
+    attributes:
+      label: Affected repository
+      placeholder: kubeseal-ui/api
+    validations:
+      required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: Disclosure channel request
+      description: State that you have a security report and how to reach you. No technical detail.
+    validations:
+      required: true
