@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -34,6 +35,11 @@ import (
 
 // githubAPIBase is the default GitHub REST endpoint.
 const githubAPIBase = "https://api.github.com"
+
+// maxGitHubResponseBody bounds the PR creation response read into memory.
+// The html_url we consume is a few hundred bytes; the limit only stops an
+// unexpected multi-megabyte body from being buffered whole.
+const maxGitHubResponseBody = 1 << 20
 
 // GitHubProposalOptions configures the GitHub proposal adapter.
 type GitHubProposalOptions struct {
@@ -119,8 +125,18 @@ func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request Propo
 	if err != nil {
 		return ProposalResult{}, fmt.Errorf("github api call: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(resp.Body)
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("github proposal adapter: close response body", "error", closeErr)
+		}
+	}()
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxGitHubResponseBody+1))
+	if readErr != nil {
+		return ProposalResult{}, fmt.Errorf("read github response: %w", readErr)
+	}
+	if int64(len(raw)) > maxGitHubResponseBody {
+		return ProposalResult{}, fmt.Errorf("github response exceeded %d bytes", maxGitHubResponseBody)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return ProposalResult{}, fmt.Errorf("github pr creation failed: %s: %s", resp.Status, truncate(string(raw), 512))
 	}
@@ -152,8 +168,10 @@ func splitRepository(repository string) (string, string, error) {
 
 // readTokenFile reads a pat file per call so Secret rotation takes effect
 // without a restart. Leading/trailing whitespace (including newlines) is
-// trimmed. An empty token is an error.
-func readTokenFile(path string) (string, error) {
+// trimmed. An empty token is an error. The path is server-side policy: a
+// Secret mount path from configuration, never client input, so the gosec
+// G304 finding is accepted at the call site.
+func readTokenFile(path string) (string, error) { // #nosec G304
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
