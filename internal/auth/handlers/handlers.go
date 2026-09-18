@@ -20,6 +20,7 @@ import (
 
 	"github.com/kubeseal-ui/api/internal/auth/middleware"
 	"github.com/kubeseal-ui/api/internal/auth/oidc"
+	"github.com/kubeseal-ui/api/internal/metrics"
 )
 
 // writeJSON writes JSON response and logs any encoding error.
@@ -192,6 +193,7 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	pkceCookie, err := r.Cookie(oidc.CookiePKCE)
 	if err != nil {
 		slog.Debug("auth: missing PKCE cookie", "error", err)
+		metrics.RecordOIDCAuth("callback_error")
 		http.Error(w, "invalid flow state", http.StatusBadRequest)
 		return
 	}
@@ -246,6 +248,7 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	tokens, err := h.Provider.ExchangeCode(ctx, code, flow.PKCEVerifier)
 	if err != nil {
 		slog.Error("auth: token exchange failed", "error", err)
+		metrics.RecordOIDCAuth("failed")
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
@@ -254,6 +257,7 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	verified, err := h.Provider.VerifyIDToken(ctx, tokens.IDToken, flow.Nonce)
 	if err != nil {
 		slog.Error("auth: ID token verification failed", "error", err)
+		metrics.RecordOIDCAuth("failed")
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
@@ -345,6 +349,7 @@ func (h *AuthHandlers) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, pkceCookie)
 
 	// Redirect to frontend
+	metrics.RecordOIDCAuth("success")
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 

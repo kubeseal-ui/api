@@ -8,6 +8,7 @@ import (
 
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
 	"github.com/kubeseal-ui/api/internal/gitops"
+	"github.com/kubeseal-ui/api/internal/metrics"
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
@@ -84,11 +85,13 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	}
 	if !hasGitCapability(r, mapping.Mode) {
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
+		metrics.RecordGitOpsDelivery(string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
 	if mapping.Mode == policy.GitDeliveryProposal && mapping.ProposalAdapter == nil {
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_unavailable")
+		metrics.RecordGitOpsDelivery(string(mapping.Mode), "proposal_unavailable")
 		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 		return
 	}
@@ -110,10 +113,12 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		var conflict *gitops.ConflictError
 		if errors.As(err, &conflict) {
 			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "conflict")
+			metrics.RecordGitOpsDelivery(string(mapping.Mode), "conflict")
 			writeError(w, r, http.StatusConflict, "GIT_CONFLICT", "Git conflict")
 			return
 		}
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "error")
+		metrics.RecordGitOpsDelivery(string(mapping.Mode), "failed")
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
@@ -128,12 +133,14 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		proposal, err := provider.OpenProposal(r.Context(), gitops.ProposalRequest{Change: change, Push: pushed})
 		if err != nil {
 			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_failed")
+			metrics.RecordGitOpsDelivery(string(mapping.Mode), "proposal_failed")
 			writeError(w, r, http.StatusBadGateway, "PROPOSAL_FAILED", "Proposal failed")
 			return
 		}
 		result["proposal_url"] = proposal.URL
 	}
 	h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "success")
+	metrics.RecordGitOpsDelivery(string(mapping.Mode), "success")
 	jsonResponse(w, http.StatusOK, result)
 }
 

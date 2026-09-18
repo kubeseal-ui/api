@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -239,6 +241,50 @@ func proposalAdapters(cfg *config.Config) (map[string]gitops.ProposalProvider, e
 	return adapters, nil
 }
 
+// setupTelemetryFromConfig derives the telemetry options from the
+// configuration and mounts the SDK. Optional: no endpoint keeps /metrics
+// at 503 and logging plain, so local and test boots never make network
+// calls. A setup failure disables telemetry with a warning rather than
+// taking the API down.
+func setupTelemetryFromConfig(cfg *config.Config, logger *slog.Logger) *observability.Telemetry {
+	version := cfg.OTelServiceVersion
+	if version == "" {
+		if info, ok := debug.ReadBuildInfo(); ok {
+			version = info.Main.Version
+		}
+	}
+	sampleRatio := 0.1
+	if cfg.OTelTraceSampleRatio != "" {
+		if parsed, parseErr := strconv.ParseFloat(cfg.OTelTraceSampleRatio, 64); parseErr == nil && parsed > 0 && parsed <= 1 {
+			sampleRatio = parsed
+		} else {
+			slog.Warn("ignoring invalid OTEL_TRACE_SAMPLE_RATIO", "value", cfg.OTelTraceSampleRatio, "error", parseErr)
+		}
+	}
+	metricInterval := 30 * time.Second
+	if cfg.OTelMetricIntervalSeconds != "" {
+		if parsed, parseErr := strconv.Atoi(cfg.OTelMetricIntervalSeconds); parseErr == nil && parsed > 0 {
+			metricInterval = time.Duration(parsed) * time.Second
+		} else {
+			slog.Warn("ignoring invalid OTEL_METRIC_INTERVAL_SECONDS", "value", cfg.OTelMetricIntervalSeconds, "error", parseErr)
+		}
+	}
+	telemetry, telemetryErr := observability.SetupTelemetry(observability.TelemetryOptions{
+		Endpoint:         strings.TrimPrefix(cfg.OTelEndpoint, "http://"),
+		ServiceName:      cfg.OTelServiceName,
+		ServiceVersion:   version,
+		Environment:      cfg.OTelEnvironment,
+		TraceSampleRatio: sampleRatio,
+		MetricInterval:   metricInterval,
+		Logger:           logger,
+	})
+	if telemetryErr != nil {
+		slog.Warn("telemetry setup failed; continuing without signals", "error", telemetryErr)
+		return &observability.Telemetry{}
+	}
+	return telemetry
+}
+
 func main() {
 	flag.Parse()
 	cfg, err := config.Load()
@@ -249,6 +295,9 @@ func main() {
 
 	logger := observability.NewLogger(os.Stdout, slog.LevelInfo)
 	slog.SetDefault(logger)
+
+	// Telemetry: OTel SDK (metrics, traces, logs over OTLP).
+	telemetry := setupTelemetryFromConfig(&cfg, logger)
 
 	// Phase 1: construct all providers and services but DO NOT wire
 	// protected routes. The chi router only exposes /healthz and /readyz.
@@ -330,6 +379,7 @@ func main() {
 		mappingSpecs:   parseMappingSpecs(cfg.GitMappingSpecs),
 		adapters:       adapters,
 		securityEvents: observability.NewStdoutSecurityEventSink(),
+		metricsHandler: telemetry.MetricsHandler(),
 	})
 	if routerErr != nil {
 		slog.Error("router construction failed", "error", routerErr)
@@ -368,6 +418,9 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
+	// Flush metrics, traces, and buffered logs before exit so a
+	// rolling restart loses no in-flight signal.
+	telemetry.Shutdown(shutdownCtx)
 }
 
 // staticCertProvider is a placeholder that returns an error.

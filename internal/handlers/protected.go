@@ -15,6 +15,7 @@ import (
 	"github.com/kubeseal-ui/api/internal/crypto"
 	"github.com/kubeseal-ui/api/internal/gitops"
 	"github.com/kubeseal-ui/api/internal/kubernetes"
+	"github.com/kubeseal-ui/api/internal/metrics"
 	"github.com/kubeseal-ui/api/internal/policy"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -41,11 +42,13 @@ type SecurityEventSink interface {
 }
 
 func (h *ProtectedHandlers) emitSecurityEvent(r *http.Request, operation, namespace, secret, key, mode, result string) {
-	if h.SecurityEvents == nil {
-		return
+	if h.SecurityEvents != nil {
+		identity, _ := authmw.GetIdentity(r.Context())
+		h.SecurityEvents.EmitSecurityEvent(operation, identity.Subject, namespace, secret, key, mode, result, requestID(r))
 	}
-	identity, _ := authmw.GetIdentity(r.Context())
-	h.SecurityEvents.EmitSecurityEvent(operation, identity.Subject, namespace, secret, key, mode, result, requestID(r))
+	// The metric carries the bounded outcome only (operation, result);
+	// namespace and secret names never become labels.
+	metrics.RecordSecretOperation(operation, result)
 }
 
 // NewProtectedHandlers constructs handlers for protected resources.

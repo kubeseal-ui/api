@@ -121,6 +121,32 @@ type Config struct {
 	// read per call so a rotated Secret takes effect without a restart.
 	// Sources: GITOPS_PROPOSAL_ADAPTERS env.
 	GitOpsProposalAdapters string
+
+	// OTelEndpoint is the OTLP gRPC host:port (no scheme) receiving
+	// metrics, traces, and logs. Empty disables the SDK: /metrics serves
+	// 503, logging stays plain slog, and no network calls are made.
+	// Sources: OTEL_EXPORTER_OTLP_ENDPOINT env.
+	OTelEndpoint string
+
+	// OTelServiceName and OTelServiceVersion land in the resource
+	// attributes. Version defaults to the build info when empty.
+	// Sources: OTEL_SERVICE_NAME, OTEL_SERVICE_VERSION env.
+	OTelServiceName    string
+	OTelServiceVersion string
+
+	// OTelEnvironment is deployment.environment.
+	// Sources: OTEL_DEPLOYMENT_ENVIRONMENT env.
+	OTelEnvironment string
+
+	// OTelTraceSampleRatio is the parent-based trace sampling ratio
+	// (0 < ratio <= 1). Out-of-range or empty means 0.1.
+	// Sources: OTEL_TRACE_SAMPLE_RATIO env.
+	OTelTraceSampleRatio string
+
+	// OTelMetricInterval is the OTLP metrics push interval in seconds.
+	// Out-of-range or empty means 30.
+	// Sources: OTEL_METRIC_INTERVAL_SECONDS env.
+	OTelMetricIntervalSeconds string
 }
 
 // Load parses configuration from process flags + environment and returns
@@ -132,30 +158,36 @@ type Config struct {
 // from tests) would otherwise panic with "flag redefined".
 func Load() (Config, error) {
 	cfg := Config{
-		Port:                   *flagPort,
-		LogLevel:               *flagLevel,
-		OIDCIssuer:             os.Getenv("OIDC_ISSUER"),
-		OIDCClientID:           os.Getenv("OIDC_CLIENT_ID"),
-		OIDCClientSecret:       os.Getenv("OIDC_CLIENT_SECRET"),
-		OIDCRedirectURL:        os.Getenv("OIDC_REDIRECT_URL"),
-		OIDCScopes:             os.Getenv("OIDC_SCOPES"),
-		OIDCGroupsClaim:        os.Getenv("OIDC_GROUPS_CLAIM"),
-		OIDCUsernameClaim:      os.Getenv("OIDC_USERNAME_CLAIM"),
-		CookieDomain:           os.Getenv("COOKIE_DOMAIN"),
-		CSRFTrustedOrigins:     os.Getenv("CSRF_TRUSTED_ORIGINS"),
-		SessionSigningKey:      os.Getenv("SESSION_SIGNING_KEY"),
-		EnableDecrypt:          os.Getenv("ENABLE_DECRYPT") == "true",
-		KubeSealCertURL:        *flagCertURL,
-		FakeK8sClient:          *flagFakeK8s,
-		ControllerNamespace:    os.Getenv("KUBESEAL_CONTROLLER_NAMESPACE"),
-		ActiveKeyLabel:         os.Getenv("KUBESEAL_ACTIVE_KEY_LABEL"),
-		GitOpsEnabled:          os.Getenv("GITOPS_ENABLED") == "true",
-		GitAuthorName:          os.Getenv("GITOPS_AUTHOR_NAME"),
-		GitAuthorEmail:         os.Getenv("GITOPS_AUTHOR_EMAIL"),
-		GitWorktreeDir:         os.Getenv("GITOPS_WORKTREE_DIR"),
-		GitCredentialRefs:      os.Getenv("GITOPS_CREDENTIAL_REFS"),
-		GitMappingSpecs:        os.Getenv("GITOPS_NAMESPACES"),
-		GitOpsProposalAdapters: os.Getenv("GITOPS_PROPOSAL_ADAPTERS"),
+		Port:                      *flagPort,
+		LogLevel:                  *flagLevel,
+		OIDCIssuer:                os.Getenv("OIDC_ISSUER"),
+		OIDCClientID:              os.Getenv("OIDC_CLIENT_ID"),
+		OIDCClientSecret:          os.Getenv("OIDC_CLIENT_SECRET"),
+		OIDCRedirectURL:           os.Getenv("OIDC_REDIRECT_URL"),
+		OIDCScopes:                os.Getenv("OIDC_SCOPES"),
+		OIDCGroupsClaim:           os.Getenv("OIDC_GROUPS_CLAIM"),
+		OIDCUsernameClaim:         os.Getenv("OIDC_USERNAME_CLAIM"),
+		CookieDomain:              os.Getenv("COOKIE_DOMAIN"),
+		CSRFTrustedOrigins:        os.Getenv("CSRF_TRUSTED_ORIGINS"),
+		SessionSigningKey:         os.Getenv("SESSION_SIGNING_KEY"),
+		EnableDecrypt:             os.Getenv("ENABLE_DECRYPT") == "true",
+		KubeSealCertURL:           *flagCertURL,
+		FakeK8sClient:             *flagFakeK8s,
+		ControllerNamespace:       os.Getenv("KUBESEAL_CONTROLLER_NAMESPACE"),
+		ActiveKeyLabel:            os.Getenv("KUBESEAL_ACTIVE_KEY_LABEL"),
+		GitOpsEnabled:             os.Getenv("GITOPS_ENABLED") == "true",
+		GitAuthorName:             os.Getenv("GITOPS_AUTHOR_NAME"),
+		GitAuthorEmail:            os.Getenv("GITOPS_AUTHOR_EMAIL"),
+		GitWorktreeDir:            os.Getenv("GITOPS_WORKTREE_DIR"),
+		GitCredentialRefs:         os.Getenv("GITOPS_CREDENTIAL_REFS"),
+		GitMappingSpecs:           os.Getenv("GITOPS_NAMESPACES"),
+		GitOpsProposalAdapters:    os.Getenv("GITOPS_PROPOSAL_ADAPTERS"),
+		OTelEndpoint:              os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		OTelServiceName:           os.Getenv("OTEL_SERVICE_NAME"),
+		OTelServiceVersion:        os.Getenv("OTEL_SERVICE_VERSION"),
+		OTelEnvironment:           os.Getenv("OTEL_DEPLOYMENT_ENVIRONMENT"),
+		OTelTraceSampleRatio:      os.Getenv("OTEL_TRACE_SAMPLE_RATIO"),
+		OTelMetricIntervalSeconds: os.Getenv("OTEL_METRIC_INTERVAL_SECONDS"),
 	}
 
 	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {

@@ -18,6 +18,7 @@ import (
 	"github.com/kubeseal-ui/api/internal/gitops"
 	"github.com/kubeseal-ui/api/internal/handlers"
 	"github.com/kubeseal-ui/api/internal/kubernetes"
+	"github.com/kubeseal-ui/api/internal/metrics"
 	"github.com/kubeseal-ui/api/internal/middleware"
 	"github.com/kubeseal-ui/api/internal/policy"
 )
@@ -48,6 +49,7 @@ type routerOptions struct {
 	mappingSpecs   []policy.GitMappingSpec
 	adapters       map[string]gitops.ProposalProvider
 	securityEvents handlers.SecurityEventSink
+	metricsHandler http.Handler
 }
 
 // newRouter builds the chi router with authenticated Phase 2 routes.
@@ -58,12 +60,25 @@ type routerOptions struct {
 // returned so main can refuse to boot with a broken mapping list.
 func newRouter(options routerOptions) (http.Handler, error) {
 	r := chi.NewRouter()
+	// OTelSpan starts a server span per request and must wrap everything
+	// (including the logger) so log lines carry trace_id/span_id. It is
+	// mounted unconditionally: with telemetry disabled the global tracer
+	// provider is a no-op and spans cost almost nothing.
 	r.Use(middleware.RequestID)
+	r.Use(middleware.OTelSpan)
 	r.Use(middleware.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))
 	r.Use(middleware.RequestLogger(options.logger))
 	r.Get("/healthz", handlers.Healthz)
 	r.Get("/readyz", handlers.Readyz)
+	// /metrics serves the Prometheus exposition. The handler comes from
+	// the telemetry wiring and returns 503 when metrics are disabled, so
+	// ServiceMonitor marks the target down instead of scraping an empty
+	// page silently. Unauthenticated by design: the exposition carries
+	// handler/method/code labels only, no identities or resource names.
+	if options.metricsHandler != nil {
+		r.Handle("/metrics", options.metricsHandler)
+	}
 
 	// OIDC discovery is performed by main and injected here. Keeping the
 	// router free of network I/O makes it deterministic and testable.
@@ -109,6 +124,13 @@ func newRouter(options routerOptions) (http.Handler, error) {
 		}
 		authCfg.ResolveCapabilities = func(groups []string) []string {
 			caps := policyStore.CapabilitiesForGroups(groups)
+			// The authorization check outcome lands as a metric with the
+			// bounded result label only; groups never become labels.
+			if len(caps) > 0 {
+				metrics.RecordOpenFGACheck("allow")
+			} else {
+				metrics.RecordOpenFGACheck("deny")
+			}
 			result := make([]string, 0, len(caps))
 			for _, cap := range caps {
 				result = append(result, string(cap))
