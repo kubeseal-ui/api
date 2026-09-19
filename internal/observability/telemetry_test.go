@@ -35,7 +35,7 @@ func TestSetupTelemetryMountsPrometheusExposition(t *testing.T) {
 	// exporter's construction, which succeeds without dialing).
 	tel, err := SetupTelemetry(TelemetryOptions{
 		Endpoint:         "localhost:14399",
-		ServiceName:      "kubeseal-gui-api",
+		ServiceName:      "kubeseal-ui-api",
 		ServiceVersion:   "test",
 		Environment:      "test",
 		TraceSampleRatio: 1,

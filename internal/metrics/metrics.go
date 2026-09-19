@@ -8,12 +8,12 @@
 // Metric names follow the observability contract
 // (internal-docs/architecture/observability.md):
 //
-//	kubeseal_gui_http_requests_total{handler,method,code}
-//	kubeseal_gui_http_request_duration_seconds{handler,method}
-//	kubeseal_gui_sealed_secret_operations_total{operation,result}
-//	kubeseal_gui_gitops_delivery_total{mode,result}
-//	kubeseal_gui_openfga_check_total{result}
-//	kubeseal_gui_oidc_auth_total{result}
+//	kubeseal_ui_http_requests_total{handler,method,code}
+//	kubeseal_ui_http_request_duration_seconds{handler,method}
+//	kubeseal_ui_sealed_secret_operations_total{operation,result}
+//	kubeseal_ui_gitops_delivery_total{mode,result}
+//	kubeseal_ui_openfga_check_total{result}
+//	kubeseal_ui_oidc_auth_total{result}
 package metrics
 
 import (
@@ -56,33 +56,33 @@ func Instruments() error {
 
 	instrumentsOnce.Do(func() {
 		var err error
-		if httpRequests, err = meter.Int64Counter("kubeseal_gui_http_requests_total",
+		if httpRequests, err = meter.Int64Counter("kubeseal_ui_http_requests_total",
 			metric.WithDescription("HTTP requests per handler, method, and status code")); err != nil {
 			instrumentsErr = err
 			return
 		}
-		if httpDuration, err = meter.Float64Histogram("kubeseal_gui_http_request_duration_seconds",
+		if httpDuration, err = meter.Float64Histogram("kubeseal_ui_http_request_duration_seconds",
 			metric.WithDescription("HTTP request duration in seconds per handler and method"),
 			metric.WithExplicitBucketBoundaries(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)); err != nil {
 			instrumentsErr = err
 			return
 		}
-		if secretOperations, err = meter.Int64Counter("kubeseal_gui_sealed_secret_operations_total",
+		if secretOperations, err = meter.Int64Counter("kubeseal_ui_sealed_secret_operations_total",
 			metric.WithDescription("Sealed secret operations by operation and result")); err != nil {
 			instrumentsErr = err
 			return
 		}
-		if gitopsDeliveries, err = meter.Int64Counter("kubeseal_gui_gitops_delivery_total",
+		if gitopsDeliveries, err = meter.Int64Counter("kubeseal_ui_gitops_delivery_total",
 			metric.WithDescription("GitOps delivery attempts by mode and result")); err != nil {
 			instrumentsErr = err
 			return
 		}
-		if openFGAChecks, err = meter.Int64Counter("kubeseal_gui_openfga_check_total",
+		if openFGAChecks, err = meter.Int64Counter("kubeseal_ui_openfga_check_total",
 			metric.WithDescription("OpenFGA authorization checks by result")); err != nil {
 			instrumentsErr = err
 			return
 		}
-		if oidcAuths, err = meter.Int64Counter("kubeseal_gui_oidc_auth_total",
+		if oidcAuths, err = meter.Int64Counter("kubeseal_ui_oidc_auth_total",
 			metric.WithDescription("OIDC authentication outcomes by result")); err != nil {
 			instrumentsErr = err
 			return

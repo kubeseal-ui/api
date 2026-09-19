@@ -1,6 +1,6 @@
 package acl
 
-// Built-in roles. Capability sets follow the kubeseal-gui design:
+// Built-in roles. Capability sets follow the kubeseal-ui design:
 //
 //	viewer          — read metadata only
 //	editor          — read + seal

@@ -111,7 +111,7 @@ func (o TelemetryOptions) resourceAttributes() (*resource.Resource, error) {
 func SetupTelemetry(opts TelemetryOptions) (*Telemetry, error) {
 	tel := &Telemetry{}
 	if opts.ServiceName == "" {
-		opts.ServiceName = "kubeseal-gui-api"
+		opts.ServiceName = "kubeseal-ui-api"
 	}
 	if opts.Environment == "" {
 		opts.Environment = "production"

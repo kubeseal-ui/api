@@ -31,7 +31,33 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// otelTracer returns the tracer used for client spans. It reads the
+// global provider per call (late binding): spans start recording once
+// SetupTelemetry installs the SDK provider, so instrumentation is safe to
+// mount unconditionally.
+func otelTracer() trace.Tracer {
+	return otel.Tracer("github.com/kubeseal-ui/api")
+}
+
+// propagationHeaderCarrier adapts http.Header to the OTel TextMapCarrier
+// for outgoing requests.
+type propagationHeaderCarrier struct{ header http.Header }
+
+func (c propagationHeaderCarrier) Get(key string) string { return c.header.Get(key) }
+func (c propagationHeaderCarrier) Set(key, value string) { c.header.Set(key, value) }
+func (c propagationHeaderCarrier) Keys() []string {
+	keys := make([]string, 0, len(c.header))
+	for k := range c.header {
+		keys = append(keys, k)
+	}
+	return keys
+}
 
 // githubAPIBase is the default GitHub REST endpoint.
 const githubAPIBase = "https://api.github.com"
@@ -113,6 +139,19 @@ func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request Propo
 		return ProposalResult{}, fmt.Errorf("encode github pr request: %w", err)
 	}
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls", p.baseURL, owner, repo)
+	// The span is a client span (SpanKindClient) named per the
+	// observability contract; the W3C traceparent is injected into the
+	// outgoing request, so the host call correlates into the delivery
+	// trace. The token never lands in span attributes.
+	ctx, span := otelTracer().Start(ctx, "GitHub.CreatePullRequest",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("http.request.method", http.MethodPost),
+			attribute.String("url.full", url),
+			attribute.String("server.address", p.baseURL),
+			attribute.String("kubeseal_ui.adapter", "github"),
+		))
+	defer span.End()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return ProposalResult{}, fmt.Errorf("build github request: %w", err)
@@ -121,8 +160,10 @@ func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request Propo
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Content-Type", "application/json")
+	otel.GetTextMapPropagator().Inject(ctx, propagationHeaderCarrier{header: req.Header})
 	resp, err := p.client.Do(req)
 	if err != nil {
+		span.RecordError(err)
 		return ProposalResult{}, fmt.Errorf("github api call: %w", err)
 	}
 	defer func() {

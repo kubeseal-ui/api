@@ -87,23 +87,23 @@ func TestInstrumentsBuildAndRecord(t *testing.T) {
 
 	got := collect(t, reader)
 	for _, name := range []string{
-		"kubeseal_gui_http_requests_total",
-		"kubeseal_gui_http_request_duration_seconds",
-		"kubeseal_gui_sealed_secret_operations_total",
-		"kubeseal_gui_gitops_delivery_total",
-		"kubeseal_gui_openfga_check_total",
-		"kubeseal_gui_oidc_auth_total",
+		"kubeseal_ui_http_requests_total",
+		"kubeseal_ui_http_request_duration_seconds",
+		"kubeseal_ui_sealed_secret_operations_total",
+		"kubeseal_ui_gitops_delivery_total",
+		"kubeseal_ui_openfga_check_total",
+		"kubeseal_ui_oidc_auth_total",
 	} {
 		if _, ok := got[name]; !ok {
 			t.Errorf("metric %s not recorded", name)
 		}
 	}
-	if req, ok := got["kubeseal_gui_http_requests_total"]; ok {
+	if req, ok := got["kubeseal_ui_http_requests_total"]; ok {
 		if !findAttrs(t, req, attribute.String("handler", "/secrets/{namespace}/{name}"), attribute.String("method", "GET"), attribute.String("code", "200")) {
 			t.Errorf("http_requests attrs mismatch: %+v", req)
 		}
 	}
-	if dlv, ok := got["kubeseal_gui_gitops_delivery_total"]; ok {
+	if dlv, ok := got["kubeseal_ui_gitops_delivery_total"]; ok {
 		if !findAttrs(t, dlv, attribute.String("mode", "proposal"), attribute.String("result", "proposal_failed")) {
 			t.Errorf("gitops_delivery attrs mismatch: %+v", dlv)
 		}
@@ -117,7 +117,7 @@ func TestEmptyLabelValuesBecomeUnknown(t *testing.T) {
 	}
 	RecordHTTPRequest("", "", 500, time.Millisecond)
 	got := collect(t, reader)
-	req := got["kubeseal_gui_http_requests_total"]
+	req := got["kubeseal_ui_http_requests_total"]
 	if !findAttrs(t, req, attribute.String("handler", "unknown"), attribute.String("method", "unknown"), attribute.String("code", "500")) {
 		t.Fatalf("empty label values not guarded: %+v", req)
 	}

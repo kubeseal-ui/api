@@ -5,7 +5,7 @@
 // live OpenFGA server. Production enforcement (OpenFGA, team-based
 // usersets) lands in Phase 2 per internal-docs/engineering/backend/.
 //
-// Capability names follow the kubeseal-gui design:
+// Capability names follow the kubeseal-ui design:
 //
 //	metadata:read   — list namespaces and SealedSecret metadata
 //	secret:seal     — encrypt / create SealedSecrets

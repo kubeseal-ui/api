@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/kubeseal-ui/api/internal/metrics"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -33,13 +34,15 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(rec, r)
+			duration := time.Since(start)
+			route := OTelSpanRoutePattern(r)
 
 			attrs := []any{
 				"method", r.Method,
 				"path", r.URL.Path,
-				"route", OTelSpanRoutePattern(r),
+				"route", route,
 				"status", rec.status,
-				"duration_ms", time.Since(start).Milliseconds(),
+				"duration_ms", duration.Milliseconds(),
 				"request_id", RequestIDFromContext(r.Context()),
 			}
 			if span := trace.SpanFromContext(r.Context()); span.SpanContext().IsValid() {
@@ -50,6 +53,12 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 				)
 			}
 			logger.Info("http_request", attrs...)
+
+			// The RED metric is recorded with the same bounded route
+			// pattern the log line carries, so rate/latency aggregate to
+			// the handler and exemplars (when the collector supports
+			// them) link back to the trace the log names.
+			metrics.RecordHTTPRequest(route, r.Method, rec.status, duration)
 		})
 	}
 }
