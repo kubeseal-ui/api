@@ -81,11 +81,18 @@ func newRouter(options routerOptions) (http.Handler, error) {
 		r.Handle("/metrics", options.metricsHandler)
 	}
 
+	logger := options.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	// OIDC discovery is performed by main and injected here. Keeping the
 	// router free of network I/O makes it deterministic and testable.
 	var provider oidc.AuthProvider
 	if options.cfg != nil && options.cfg.SessionSigningKey != "" && options.oidcProvider != nil {
 		provider = options.oidcProvider
+	} else if options.oidcProvider != nil {
+		logger.Error("SESSION_SIGNING_KEY is missing but OIDC provider is configured; /api/v1 routes will not be mounted")
 	}
 
 	policyStore := policy.NewPolicyStore()
@@ -147,6 +154,11 @@ func newRouter(options routerOptions) (http.Handler, error) {
 			api.With(authmw.AuthMiddleware(authCfg)).Get("/auth/csrf", auth.CSRFHandler)
 			api.With(authmw.AuthMiddleware(authCfg), authmw.CSRFMiddleware(authCfg)).Route("/", protectedRoutes)
 		})
+	} else {
+		logger.Warn("authenticated routes (/api/v1) disabled; running fail-closed",
+			"oidc_provider_configured", options.oidcProvider != nil,
+			"session_signing_key_configured", options.cfg != nil && options.cfg.SessionSigningKey != "",
+		)
 	}
 	return r, nil
 }

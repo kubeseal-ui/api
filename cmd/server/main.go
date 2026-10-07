@@ -49,6 +49,12 @@ func (d *devPrivProvider) PrivateKey(_ context.Context) (*rsa.PrivateKey, error)
 // stays fail-closed.
 func discoverOIDC(cfg *config.Config) *oidc.Provider {
 	if cfg.OIDCIssuer == "" || cfg.OIDCClientID == "" {
+		if cfg.OIDCIssuer != "" || cfg.OIDCClientID != "" {
+			slog.Warn("OIDC partially configured; both OIDC_ISSUER and OIDC_CLIENT_ID are required",
+				"has_issuer", cfg.OIDCIssuer != "",
+				"has_client_id", cfg.OIDCClientID != "",
+			)
+		}
 		return nil
 	}
 	oidcCfg := oidc.Config{
@@ -355,6 +361,9 @@ func main() {
 	// Router with production middleware chain (request ID, recovery, timeout, logging)
 	// OIDC discovery is injected by the server startup path.
 	oidcProvider := discoverOIDC(&cfg)
+	if cfg.OIDCIssuer != "" && cfg.SessionSigningKey == "" {
+		slog.Error("SESSION_SIGNING_KEY is not configured while OIDC is enabled; /api/v1 routes will fail closed")
+	}
 	_ = authmw.DefaultAuthConfig
 	transport, transportErr := gitopsTransport(&cfg)
 	if transportErr != nil {
