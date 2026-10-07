@@ -229,12 +229,12 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 	
 	// Build capability set from user's groups
 	var userCapabilities []policy.Capability
-	if store, ok := h.GitMappings.(*policy.PolicyStore); ok && len(userGroups) > 0 {
-		userCapabilities = store.CapabilitiesForGroups(userGroups)
+	if len(userGroups) > 0 {
+		userCapabilities = h.GitMappings.CapabilitiesForGroups(userGroups)
 	}
 	
 	// Check which namespaces user has gitops:push access to
-	canPush := make(map[string]bool)
+	_ = make(map[string]bool)
 	for _, cap := range userCapabilities {
 		if cap == policy.GitOpsPush || cap == policy.GitOpsPropose {
 			// Check all mappings - user can push to any namespace they have the capability for
@@ -255,23 +255,21 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 	}
 	
 	var result []nsPaths
-	if store, ok := h.GitMappings.(*policy.PolicyStore); ok {
-		store.mu.RLock()
-		for ns, mapping := range store.GitMappings {
-			result = append(result, nsPaths{
-				Namespace:    ns,
-				DefaultPath:  mapping.RenderPath(ns, ""),
-				AllowedPaths: mapping.AllowedPaths,
-				Repository:   mapping.Repository,
-				Branch:       mapping.Branch,
-				Mode:         string(mapping.Mode),
-			})
-		}
-		store.mu.RUnlock()
+	h.GitMappings.mu.RLock()
+	for ns, mapping := range h.GitMappings.GitMappings {
+		result = append(result, nsPaths{
+			Namespace:    ns,
+			DefaultPath:  mapping.RenderPath(ns, ""),
+			AllowedPaths: mapping.AllowedPaths,
+			Repository:   mapping.Repository,
+			Branch:       mapping.Branch,
+			Mode:         string(mapping.Mode),
+		})
 	}
+	h.GitMappings.mu.RUnlock()
 	
-	jsonResponse(w, http.StatusOK, map[string]any{"namespaces": result})
-}
+		jsonResponse(w, http.StatusOK, map[string]any{"namespaces": result})
+	}
 
 // SecretsHandler lists SealedSecrets in a namespace.
 func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Request) {
