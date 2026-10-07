@@ -18,6 +18,7 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitops.Change, policy.Gi
 		Name       string `json:"name"`
 		YAML       string `json:"yaml"`
 		BaseCommit string `json:"base_commit"`
+		TargetPath string `json:"target_path,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !validName(req.Namespace) || !validName(req.Name) || req.YAML == "" || req.BaseCommit == "" {
 		return gitops.Change{}, policy.GitMapping{}, errors.New("invalid request")
@@ -29,7 +30,17 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitops.Change, policy.Gi
 	if !ok {
 		return gitops.Change{}, policy.GitMapping{}, errors.New("mapping not found")
 	}
-	path := mapping.RenderPath(req.Namespace, req.Name)
+	
+	// If targetPath provided, validate it against the mapping's allowed paths
+	var path string
+	if req.TargetPath != "" {
+		if !mapping.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
+			return gitops.Change{}, policy.GitMapping{}, errors.New("target path not allowed by namespace mapping")
+		}
+		path = req.TargetPath
+	} else {
+		path = mapping.RenderPath(req.Namespace, req.Name)
+	}
 	if path == "" {
 		return gitops.Change{}, policy.GitMapping{}, errors.New("invalid mapping")
 	}

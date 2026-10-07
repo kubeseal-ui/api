@@ -223,6 +223,11 @@ type GitMapping struct {
 	// seeding populates ProposalAdapterName instead.
 	ProposalAdapter     gitops.ProposalProvider
 	ProposalAdapterName string
+	// AllowedPaths is an optional list of directory prefixes (relative to repo root)
+	// that users may select as the target directory for new sealed secrets.
+	// If empty, only the rendered PathTemplate is allowed.
+	// Example: ["cluster/sealed-secrets/", "cluster/kubeseal-ui/"]
+	AllowedPaths []string
 }
 
 // Validate checks the GitMapping for required fields.
@@ -414,6 +419,10 @@ type GitMappingSpec struct {
 	AuthRef             string
 	Mode                GitDeliveryMode
 	ProposalAdapterName string
+	// AllowedPaths is an optional list of directory prefixes that users
+	// may select as the target directory for new sealed secrets.
+	// If empty, only the rendered PathTemplate is allowed.
+	AllowedPaths []string
 }
 
 // SeedGitMappings atomically replaces all mappings from specs. Each
@@ -431,6 +440,7 @@ func (s *PolicyStore) SeedGitMappings(specs []GitMappingSpec, adapters map[strin
 			AuthRef:             spec.AuthRef,
 			Mode:                spec.Mode,
 			ProposalAdapterName: spec.ProposalAdapterName,
+			AllowedPaths:        spec.AllowedPaths,
 		}
 		if spec.Mode == GitDeliveryProposal {
 			adapter, ok := adapters[spec.ProposalAdapterName]
@@ -514,6 +524,41 @@ func (g GitMapping) RenderPath(namespace, name string) string {
 		return ""
 	}
 	return clean
+}
+
+// IsPathAllowed checks if a target path is allowed by this GitMapping's AllowedPaths.
+// If AllowedPaths is empty, only the exact RenderPath for the given namespace/name is allowed.
+// If AllowedPaths is set, the target path must be under one of the allowed directory prefixes.
+func (g GitMapping) IsPathAllowed(targetPath, namespace, name string) bool {
+	// Render the default path for this namespace/name
+	defaultPath := g.RenderPath(namespace, name)
+	if defaultPath == "" {
+		return false
+	}
+	
+	// If no AllowedPaths configured, only the exact default path is allowed
+	if len(g.AllowedPaths) == 0 {
+		return targetPath == defaultPath
+	}
+	
+	// Check if targetPath is under one of the allowed directory prefixes
+	for _, allowed := range g.AllowedPaths {
+		// Normalize: ensure prefix ends with /
+		prefix := allowed
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		if strings.HasPrefix(targetPath, prefix) {
+			// Also validate the target path itself is safe
+			clean := pathpkg.Clean(targetPath)
+			if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." || strings.HasPrefix(clean, "/") {
+				return false
+			}
+			// Ensure it's a valid file path (not just a directory)
+			return clean != "" && clean != "."
+		}
+	}
+	return false
 }
 
 func safePathComponent(value string) bool {

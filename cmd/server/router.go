@@ -28,6 +28,7 @@ func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers
 	r.Get("/namespaces", protected.NamespacesHandler)
 	r.Get("/secrets", protected.SecretsHandler)
 	r.Get("/secrets/{namespace}/{name}", protected.SecretHandler)
+	r.Get("/gitops/paths", protected.GitPathsHandler)
 	r.Post("/secrets/{namespace}/{name}/diff", protected.DiffHandler)
 	r.Post("/gitops/dry-run", protected.GitOpsDryRunHandler)
 	r.Post("/gitops/deliver", protected.GitOpsDeliverHandler)
