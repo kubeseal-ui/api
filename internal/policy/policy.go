@@ -298,6 +298,11 @@ func (s *PolicyStore) CapabilitiesForGroups(groups []string) []Capability {
 	defer s.mu.RUnlock()
 	seen := make(map[Capability]bool)
 	for _, group := range groups {
+		if role, ok := s.getRole(group); ok {
+			for _, cap := range role.Capabilities {
+				seen[cap] = true
+			}
+		}
 		for _, roleName := range s.GroupRoles[group] {
 			role, ok := s.getRole(roleName)
 			if !ok {
