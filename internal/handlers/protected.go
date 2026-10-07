@@ -267,7 +267,7 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 		})
 	}
 	h.GitMappings.mu.RUnlock()
-	
+
 		jsonResponse(w, http.StatusOK, map[string]any{"namespaces": result})
 	}
 
