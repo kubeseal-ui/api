@@ -253,6 +253,23 @@ func (p *Provider) ExchangeCode(ctx context.Context, code, pkceVerifier string) 
 	}, nil
 }
 
+// audience accommodates both single-string and string-array "aud" claims per RFC 7519 §4.1.3.
+type audience []string
+
+func (a *audience) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*a = []string{s}
+		return nil
+	}
+	var arr []string
+	if err := json.Unmarshal(b, &arr); err != nil {
+		return err
+	}
+	*a = arr
+	return nil
+}
+
 // VerifiedIDToken holds the validated ID token claims.
 type VerifiedIDToken struct {
 	Subject  string
@@ -285,7 +302,7 @@ func (p *Provider) VerifyIDToken(ctx context.Context, idToken, nonce string) (*V
 		Username string   `json:"preferred_username"`
 		Groups   []string `json:"groups"`
 		Issuer   string   `json:"iss"`
-		Audience []string `json:"aud"`
+		Audience audience `json:"aud"`
 		Expiry   int64    `json:"exp"`
 		IssuedAt int64    `json:"iat"`
 		Nonce    string   `json:"nonce"`

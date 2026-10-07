@@ -270,3 +270,21 @@ func TestVerifiedIDTokenHasRequiredFields(t *testing.T) {
 		t.Error("IssuedAt should be set")
 	}
 }
+
+func TestAudienceUnmarshalJSON(t *testing.T) {
+	var single audience
+	if err := json.Unmarshal([]byte(`"client-123"`), &single); err != nil {
+		t.Fatalf("failed to unmarshal single string audience: %v", err)
+	}
+	if len(single) != 1 || single[0] != "client-123" {
+		t.Fatalf("unexpected audience: %v", single)
+	}
+
+	var multi audience
+	if err := json.Unmarshal([]byte(`["client-1", "client-2"]`), &multi); err != nil {
+		t.Fatalf("failed to unmarshal array audience: %v", err)
+	}
+	if len(multi) != 2 || multi[0] != "client-1" || multi[1] != "client-2" {
+		t.Fatalf("unexpected audience: %v", multi)
+	}
+}
