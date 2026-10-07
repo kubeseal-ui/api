@@ -408,6 +408,18 @@ func (s *PolicyStore) ConfigureGitMappings(mappings []GitMapping) error {
 	return nil
 }
 
+// GetAllMappings returns a copy of all Git mappings.
+func (s *PolicyStore) GetAllMappings() map[string]GitMapping {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	// Return a copy to avoid external mutation
+	result := make(map[string]GitMapping, len(s.GitMappings))
+	for k, v := range s.GitMappings {
+		result[k] = v
+	}
+	return result
+}
+
 // GitMappingSpec is the values-driven mapping definition. It mirrors
 // GitMapping with the proposal adapter referenced by registry name
 // instead of by instance, so configuration never carries code.

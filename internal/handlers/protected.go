@@ -255,19 +255,17 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 	}
 	
 	var result []nsPaths
-	h.GitMappings.mu.RLock()
-	for ns, mapping := range h.GitMappings.GitMappings {
-		result = append(result, nsPaths{
-			Namespace:    ns,
-			DefaultPath:  mapping.RenderPath(ns, ""),
-			AllowedPaths: mapping.AllowedPaths,
-			Repository:   mapping.Repository,
-			Branch:       mapping.Branch,
-			Mode:         string(mapping.Mode),
-		})
-	}
-	h.GitMappings.mu.RUnlock()
-
+		for ns, mapping := range h.GitMappings.GetAllMappings() {
+			result = append(result, nsPaths{
+				Namespace:    ns,
+				DefaultPath:  mapping.RenderPath(ns, ""),
+				AllowedPaths: mapping.AllowedPaths,
+				Repository:   mapping.Repository,
+				Branch:       mapping.Branch,
+				Mode:         string(mapping.Mode),
+			})
+		}
+	
 		jsonResponse(w, http.StatusOK, map[string]any{"namespaces": result})
 	}
 
