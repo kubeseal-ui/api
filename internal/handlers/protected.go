@@ -234,12 +234,13 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 	}
 	
 	// Check which namespaces user has gitops:push access to
-	_ = make(map[string]bool)
+	hasPush := make(map[string]bool)
 	for _, cap := range userCapabilities {
 		if cap == policy.GitOpsPush || cap == policy.GitOpsPropose {
-			// Check all mappings - user can push to any namespace they have the capability for
-			// In practice, we need to check per-namespace RBAC, but for now we return all
-			// namespaces' allowedPaths since we don't have per-namespace capability mapping yet
+			// User has push/propose capability - they can access all mapped namespaces
+			// Per-namespace RBAC is enforced at seal time via IsPathAllowed
+			hasPush["*"] = true
+			break
 		}
 	}
 	
