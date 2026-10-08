@@ -47,6 +47,31 @@ func TestLocalTransportPushRejectsStaleBaseWithoutForce(t *testing.T) {
 	}
 }
 
+// TestLocalTransportCreatesANewFileOnTheBranchHead pins the mock transport's
+// agreement with GoGitTransport on the new-file case. A vacant path is not a
+// conflict: the change is built on the branch head, so the head and not the
+// (absent) file's own commit is what BaseCommit is compared against. Without
+// this, mock mode could not create a first Secret in a namespace.
+func TestLocalTransportCreatesANewFileOnTheBranchHead(t *testing.T) {
+	transport := NewLocalTransport()
+	transport.Seed(Target{Repository: "platform", Branch: "main", Path: "clusters/other.yaml"}, "other", "abc")
+	target := Target{Repository: "platform", Branch: "main", Path: "clusters/new.yaml"}
+
+	vacant, err := transport.ReadManifest(context.Background(), target, "")
+	if !errors.Is(err, ErrNotFound) || vacant.Commit != "abc" {
+		t.Fatalf("vacant path = %#v, %v; want the branch head with ErrNotFound", vacant, err)
+	}
+
+	pushed, err := transport.PushBranch(context.Background(), Change{Target: target, BaseCommit: vacant.Commit, Content: []byte("new")}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readBack, err := transport.ReadManifest(context.Background(), target, "")
+	if err != nil || string(readBack.Content) != "new" || readBack.Commit != pushed.Commit {
+		t.Fatalf("new file not created: %#v, %v", readBack, err)
+	}
+}
+
 func TestLocalTransportPushAndProposal(t *testing.T) {
 	transport := NewLocalTransport()
 	target := Target{Repository: "platform", Branch: "main", Path: "clusters/app.yaml"}

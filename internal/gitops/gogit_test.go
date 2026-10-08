@@ -159,10 +159,22 @@ func TestGoGitTransportMissingMappedFileIsVacancy(t *testing.T) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
 
-	// A new-file change against an empty base pushes and creates the path.
+	// The vacancy sentinel is not a zero snapshot: it carries the branch head,
+	// which is what a create must build on and what the new-secret flow reports
+	// to the client. Without it no client could deliver a first Secret into an
+	// empty namespace.
+	vacant, err := transport.ReadManifest(ctx, target, "")
+	if vacant.Commit == "" || vacant.Target.Path != target.Path {
+		t.Fatalf("vacancy snapshot lost the branch head: %#v (err = %v)", vacant, err)
+	}
+
+	// A new-file change against that head pushes and creates the path.
 	snapshot, err := transport.ReadManifest(ctx, Target{Repository: remoteURL, Branch: "main", Path: "other/README.md"}, "")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if snapshot.Commit != vacant.Commit {
+		t.Fatalf("vacant-path head %q != branch head %q", vacant.Commit, snapshot.Commit)
 	}
 	pushed, err := transport.PushBranch(ctx, Change{Target: target, BaseCommit: snapshot.Commit, Content: []byte("new-file")}, "")
 	if err != nil {

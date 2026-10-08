@@ -436,6 +436,94 @@ func TestEncryptNamespaceScopedDoesNotRequireAccessManage(t *testing.T) {
 	}
 }
 
+// TestEncryptRefusesToOverwriteAnOccupiedMappedPath pins the documented
+// "mapped target vacant" gate. A create whose name resolves onto a manifest
+// that already exists would replace it silently, which is the outcome the
+// separate create and edit flows exist to prevent.
+//
+// The crypto wrapper is deliberately broken: a 409 can then only come from the
+// vacancy gate, not from encryption failing.
+func TestEncryptRefusesToOverwriteAnOccupiedMappedPath(t *testing.T) {
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, "existing", "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{}, crypto.New(errorCertProvider{}, nil), false)
+
+	body := `{"namespace":"ns","name":"name","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: name\n  namespace: ns\nstringData:\n  password: x\n"}`
+	rr := httptest.NewRecorder()
+	h.EncryptHandler(rr, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", body, protectedIdentity(policy.SecretSeal)))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "PATH_OCCUPIED", "A manifest for this Secret already exists at the mapped path", "")
+}
+
+// TestEncryptReturnsTheBranchHeadForAVacantMappedPath covers the other half of
+// the gate: alongside the ciphertext the response carries the head the vacant
+// path was checked against, so a client can deliver the new Secret without
+// borrowing a base commit from some other Secret. No other endpoint reports a
+// head for a namespace that has no secrets yet.
+func TestEncryptReturnsTheBranchHeadForAVacantMappedPath(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := gitops.NewLocalTransport()
+	// A different file on the same repository and branch: this is what gives
+	// the mock transport a head to report.
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/other.yaml"}, "other", "head-1")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{}, w, false)
+
+	body := `{"namespace":"ns","name":"name","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: name\n  namespace: ns\nstringData:\n  password: plaintext-marker\n"}`
+	rr := httptest.NewRecorder()
+	h.EncryptHandler(rr, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", body, protectedIdentity(policy.SecretSeal)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	var response struct {
+		YAML       string `json:"yaml"`
+		BaseCommit string `json:"base_commit"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("invalid JSON response: %v (%s)", err, rr.Body.String())
+	}
+	if response.BaseCommit != "head-1" {
+		t.Fatalf("base_commit = %q, want head-1", response.BaseCommit)
+	}
+	if response.YAML == "" || strings.Contains(response.YAML, "plaintext-marker") {
+		t.Fatalf("unexpected ciphertext: %s", response.YAML)
+	}
+}
+
+// TestEncryptWithoutGitMappingSkipsTheVacancyGate is the control. A namespace
+// with no mapping has no mapped path that could be occupied, and encrypting a
+// manifest for it must not start demanding Git access.
+func TestEncryptWithoutGitMappingSkipsTheVacancyGate(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlers(protectedK8s{}, w, false)
+
+	body := `{"namespace":"ns","name":"name","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: name\n  namespace: ns\nstringData:\n  password: x\n"}`
+	rr := httptest.NewRecorder()
+	h.EncryptHandler(rr, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", body, protectedIdentity(policy.SecretSeal)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"base_commit":""`) {
+		t.Fatalf("expected an empty base commit for an unmapped namespace: %s", rr.Body.String())
+	}
+}
+
 func assertErrorEnvelope(t *testing.T, rr *httptest.ResponseRecorder, code, message, requestID string) {
 	t.Helper()
 	var body struct {

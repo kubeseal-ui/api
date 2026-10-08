@@ -104,29 +104,50 @@ type localEntry struct {
 	commit  string
 }
 
+// branchKey identifies a branch head independently of any file.
+func branchKey(repository, branch string) string {
+	return repository + "\x00" + branch
+}
+
 // LocalTransport is a concurrency-safe in-memory transport for contract tests.
 type LocalTransport struct {
 	mu      sync.RWMutex
 	entries map[Target]localEntry
+	// heads tracks a branch head per repository+branch, which is what a
+	// BaseCommit is compared against. Without it there would be no way to
+	// report a base commit for a file that does not exist yet, and mock mode
+	// could not exercise the new-secret flow at all.
+	heads map[string]string
 }
 
 func NewLocalTransport() *LocalTransport {
-	return &LocalTransport{entries: make(map[Target]localEntry)}
+	return &LocalTransport{entries: make(map[Target]localEntry), heads: make(map[string]string)}
 }
 
-// Seed initializes a target, useful for tests.
+// Seed initializes a target, useful for tests. Seeding a file also moves the
+// branch it lives on to that commit, standing in for the real remote's head.
 func (t *LocalTransport) Seed(target Target, content, commit string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.entries[target] = localEntry{[]byte(content), commit}
+	t.heads[branchKey(target.Repository, target.Branch)] = commit
 }
 
+// ReadManifest returns the entry at target. A vacant path is ErrNotFound.
+//
+// As with GoGitTransport, the error path is not a zero snapshot: it carries the
+// branch head, which is the value a new file is built on and the value a later
+// BaseCommit check compares against. A branch nothing has been seeded on has no
+// head, so the commit is empty — a caller then has no base commit to report for
+// a file that does not exist yet, which is the same answer an unmapped namespace
+// gets and which the new-secret flow surfaces rather than sending an empty base
+// commit to endpoints that reject it.
 func (t *LocalTransport) ReadManifest(_ context.Context, target Target, _ string) (ManifestSnapshot, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	e, ok := t.entries[target]
 	if !ok {
-		return ManifestSnapshot{}, ErrNotFound
+		return ManifestSnapshot{Target: target, Commit: t.heads[branchKey(target.Repository, target.Branch)]}, ErrNotFound
 	}
 	return ManifestSnapshot{target, append([]byte(nil), e.content...), e.commit}, nil
 }
@@ -206,16 +227,19 @@ func (t *LocalTransport) PushBranch(_ context.Context, change Change, _ string) 
 	target.Branch = branch
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	current, ok := t.entries[change.Target]
-	if !ok && change.BaseCommit != "" {
-		return PushResult{}, ErrNotFound
-	}
-	if ok && current.commit != change.BaseCommit {
-		return PushResult{}, &ConflictError{change.BaseCommit, current.commit}
+	// BaseCommit is checked against the head of the branch being built on, as
+	// GoGitTransport does, and not against the file's own last commit. The two
+	// differ in exactly the new-file case: the file has no commit yet, and the
+	// change is legitimately built on the current head. Comparing against the
+	// file would refuse every creation.
+	head := t.heads[branchKey(change.Target.Repository, change.Target.Branch)]
+	if change.BaseCommit != "" && change.BaseCommit != head {
+		return PushResult{}, &ConflictError{change.BaseCommit, head}
 	}
 	commitHash := sha256.Sum256(append([]byte(change.BaseCommit+"\x00"), change.Content...))
 	commit := hex.EncodeToString(commitHash[:])
 	t.entries[target] = localEntry{append([]byte(nil), change.Content...), commit}
+	t.heads[branchKey(target.Repository, branch)] = commit
 	return PushResult{change.Target.Repository, branch, commit}, nil
 }
 

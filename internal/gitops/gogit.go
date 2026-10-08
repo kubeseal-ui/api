@@ -142,6 +142,9 @@ func remoteURL(target Target) string {
 // ReadManifest fetches the remote and reads the file content at a target.
 // It returns ErrNotFound when the mapped file does not exist yet — the
 // new-file vacancy case — and surfaces fetch failures as transport errors.
+// On the ErrNotFound path the returned snapshot is not zero-valued: it still
+// carries Target and the branch head, which is what a new file must be built
+// on. Callers that only care about existence can ignore it.
 func (t *GoGitTransport) ReadManifest(ctx context.Context, target Target, authRef string) (ManifestSnapshot, error) {
 	auth, err := t.authFor(ctx, target, authRef)
 	if err != nil {
@@ -169,6 +172,12 @@ func (t *GoGitTransport) ReadManifest(ctx context.Context, target Target, authRe
 	}
 	content, err := readFileAtHead(repo, target.Path)
 	if err != nil {
+		// Vacant path: the caller still needs the branch head to build the new
+		// file on, and the head is the value a later BaseCommit check compares
+		// against. Report it alongside the sentinel rather than discarding it.
+		if errors.Is(err, ErrNotFound) {
+			return ManifestSnapshot{Target: target, Commit: head.Hash().String()}, ErrNotFound
+		}
 		return ManifestSnapshot{}, err
 	}
 	return ManifestSnapshot{Target: target, Content: content, Commit: head.Hash().String()}, nil

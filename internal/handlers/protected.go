@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -118,6 +119,35 @@ func requireCapability(w http.ResponseWriter, r *http.Request, required ...polic
 	return true
 }
 
+// lookupManifest locates a Git manifest by identity using two-tier discovery
+// (Option A): tier 1 reads the fast-path target rendered from the namespace's
+// pathTemplate, tier 2 walks the repository tree for a SealedSecret matching
+// the namespace and name.
+//
+// found=false with a nil error means the path is vacant — the documented
+// new-file case. The returned snapshot is meaningful on that path too: it
+// carries the branch head, which is what a BaseCommit check compares against
+// and therefore what a new file must be built on. Tier 1's snapshot is kept
+// when tier 2 also finds nothing, so the head is not lost to the fallback.
+func (h *ProtectedHandlers) lookupManifest(ctx context.Context, mapping policy.GitMapping, target gitops.Target, namespace, name string) (gitops.ManifestSnapshot, bool, error) {
+	snapshot, err := h.GitTransport.ReadManifest(ctx, target, mapping.AuthRef)
+	if err == nil {
+		return snapshot, true, nil
+	}
+	if !errors.Is(err, gitops.ErrNotFound) {
+		return snapshot, false, err
+	}
+
+	found, searchErr := h.GitTransport.SearchManifest(ctx, mapping.Repository, mapping.Branch, namespace, name, mapping.AuthRef)
+	if searchErr == nil {
+		return found, true, nil
+	}
+	if !errors.Is(searchErr, gitops.ErrNotFound) {
+		return snapshot, false, searchErr
+	}
+	return snapshot, false, nil
+}
+
 func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML, baseCommit string) (map[string]any, error) {
 	status := map[string]any{"managed": false, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 	if h.GitMappings == nil || h.GitTransport == nil {
@@ -138,22 +168,15 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 		return status, errors.New("invalid Git mapping")
 	}
 
-	// Two-tier discovery (Option A):
-	// Tier 1: fast-path check at configured pathTemplate
-	snapshot, err := h.GitTransport.ReadManifest(r.Context(), target, mapping.AuthRef)
-	if err != nil && errors.Is(err, gitops.ErrNotFound) {
-		// Tier 2: Option A repository tree walk fallback
-		snapshot, err = h.GitTransport.SearchManifest(r.Context(), mapping.Repository, mapping.Branch, namespace, name, mapping.AuthRef)
-	}
-
+	snapshot, found, err := h.lookupManifest(r.Context(), mapping, target, namespace, name)
 	if err != nil {
-		if errors.Is(err, gitops.ErrNotFound) {
-			if liveYAML != "" {
-				status["drift"] = "live_only"
-			}
-			return status, nil
-		}
 		return status, err
+	}
+	if !found {
+		if liveYAML != "" {
+			status["drift"] = "live_only"
+		}
+		return status, nil
 	}
 
 	// Discovered path
@@ -438,24 +461,42 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
-	
-	// If target_path provided and gitops configured, validate it
+
+	// Resolve the mapped target once, so the vacancy gate below and the
+	// response's base commit both use the same path. A namespace with no
+	// mapping has no mapped path to occupy, so the gate is scoped to mapped
+	// namespaces and encrypt keeps working unmapped.
+	var mapping policy.GitMapping
+	mapped := false
+	mappedPath := ""
 	if req.TargetPath != "" {
 		if h.GitMappings == nil {
 			writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
 			return
 		}
-		mapping, ok := h.GitMappings.GetGitMapping(req.Namespace)
+		m, ok := h.GitMappings.GetGitMapping(req.Namespace)
 		if !ok {
 			writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
 			return
 		}
-		if !mapping.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
+		if !m.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
 			return
 		}
+		// No transport means nothing to read, so `mapped` stays false and the
+		// vacancy gate below is skipped. Without this the gate would call into
+		// a nil transport, because `mapped` is what authorizes that call.
+		if h.GitTransport != nil {
+			mapping, mapped, mappedPath = m, true, req.TargetPath
+		}
+	} else if h.GitMappings != nil && h.GitTransport != nil {
+		if m, ok := h.GitMappings.GetGitMapping(req.Namespace); ok {
+			if rendered := m.RenderPath(req.Namespace, req.Name); rendered != "" {
+				mapping, mapped, mappedPath = m, true, rendered
+			}
+		}
 	}
-	
+
 	scope := crypto.StrictScope
 	if req.Scope != "" {
 		if err := scope.Set(req.Scope); err != nil {
@@ -470,6 +511,30 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	if scope == crypto.ClusterWideScope && !requireCapability(w, r, policy.AccessManage) {
 		return
 	}
+
+	// Documented gate: the mapped target must be vacant. Creating under a name
+	// whose manifest already exists would silently replace it, which is what
+	// the separate create and edit flows exist to prevent. Checked before
+	// encrypting so a doomed request does no crypto work.
+	baseCommit := ""
+	if mapped {
+		target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: mappedPath}
+		snapshot, found, err := h.lookupManifest(r.Context(), mapping, target, req.Namespace, req.Name)
+		if err != nil {
+			slog.Error("git lookup failed", "namespace", req.Namespace, "name", req.Name, "request_id", requestID(r), "error", err)
+			writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
+			return
+		}
+		if found {
+			writeError(w, r, http.StatusConflict, "PATH_OCCUPIED", "A manifest for this Secret already exists at the mapped path")
+			return
+		}
+		// The vacant path still reports the branch head. The client needs it
+		// to deliver: BaseCommit is compared against the branch head, and no
+		// other endpoint yields a head for a namespace that has no secrets.
+		baseCommit = snapshot.Commit
+	}
+
 	sealed, err := h.Crypto.EncryptYAML(r.Context(), req.YAML, req.Namespace, req.Name, scope)
 	if err != nil {
 		slog.Error("encrypt secret failed", "namespace", req.Namespace, "name", req.Name, "request_id", requestID(r), "error", err)
@@ -477,7 +542,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed})
+	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed, "base_commit": baseCommit})
 }
 
 func validName(value string) bool {
