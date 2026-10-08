@@ -248,13 +248,13 @@ func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch,
 		if !strings.HasSuffix(f.Name, ".yaml") && !strings.HasSuffix(f.Name, ".yml") {
 			return nil
 		}
-		r, err := f.Reader()
-		if err != nil {
+		rc, openErr := f.Reader()
+		if openErr != nil {
 			return nil
 		}
-		defer r.Close()
-		content, err := io.ReadAll(r)
-		if err != nil {
+		content, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr != nil {
 			return nil
 		}
 		if MatchesSealedSecret(content, namespace, name) {

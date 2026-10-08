@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -209,8 +210,8 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		return
 	}
 
-	driftVal, _ := gitStat["drift"].(string)
-	if driftVal == "" {
+	driftVal, ok := gitStat["drift"].(string)
+	if !ok || driftVal == "" {
 		driftVal = "unknown"
 	}
 	gitExists := driftVal != "live_only" && gitStat["managed"] == true
@@ -235,6 +236,25 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 	}
 
 	jsonResponse(w, http.StatusOK, result)
+}
+
+// resolveSyncPath resolves the target Git path for a sync using two-tier
+// Option A discovery: fast-path template check, then full tree walk fallback.
+func (h *ProtectedHandlers) resolveSyncPath(ctx context.Context, mapping policy.GitMapping, namespace, name string) string {
+	if defaultPath := mapping.RenderPath(namespace, name); defaultPath != "" {
+		_, readErr := h.GitTransport.ReadManifest(ctx, gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, mapping.AuthRef)
+		if readErr == nil {
+			return defaultPath
+		}
+		if errors.Is(readErr, gitops.ErrNotFound) {
+			snap, sErr := h.GitTransport.SearchManifest(ctx, mapping.Repository, mapping.Branch, namespace, name, mapping.AuthRef)
+			if sErr == nil && snap.Target.Path != "" {
+				return snap.Target.Path
+			}
+		}
+		return defaultPath
+	}
+	return ""
 }
 
 // GitOpsSyncHandler syncs a live SealedSecret from Kubernetes to Git.
@@ -312,21 +332,7 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		}
 		path = req.TargetPath
 	} else {
-		// Option A two-tier discovery: check fast-path, fallback to tree search, or default RenderPath
-		defaultPath := mapping.RenderPath(req.Namespace, req.Name)
-		_, err := h.GitTransport.ReadManifest(r.Context(), gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, mapping.AuthRef)
-		if err == nil {
-			path = defaultPath
-		} else if errors.Is(err, gitops.ErrNotFound) {
-			searchSnap, sErr := h.GitTransport.SearchManifest(r.Context(), mapping.Repository, mapping.Branch, req.Namespace, req.Name, mapping.AuthRef)
-			if sErr == nil && searchSnap.Target.Path != "" {
-				path = searchSnap.Target.Path
-			} else {
-				path = defaultPath
-			}
-		} else {
-			path = defaultPath
-		}
+		path = h.resolveSyncPath(r.Context(), mapping, req.Namespace, req.Name)
 	}
 	if path == "" {
 		writeError(w, r, http.StatusInternalServerError, "INVALID_MAPPING", "Git path could not be resolved")
