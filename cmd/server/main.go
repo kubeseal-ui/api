@@ -153,20 +153,47 @@ func parseMappingSpecs(raw string) []policy.GitMappingSpec {
 		if len(parts) < 6 {
 			continue
 		}
+		pathTemplate := parts[3]
+		if !strings.Contains(pathTemplate, "/") {
+			pathTemplate = strings.ReplaceAll(pathTemplate, "-", "/")
+		}
 		spec := policy.GitMappingSpec{
 			Namespace:    parts[0],
 			Repository:   parts[1],
 			Branch:       parts[2],
-			PathTemplate: strings.ReplaceAll(parts[3], "-", "/"),
+			PathTemplate: pathTemplate,
 			AuthRef:      parts[4],
 			Mode:         policy.GitDeliveryMode(parts[5]),
 		}
-		if len(parts) > 6 {
-			spec.ProposalAdapterName = parts[6]
+		if spec.Mode == policy.GitDeliveryProposal {
+			if len(parts) > 6 {
+				spec.ProposalAdapterName = parts[6]
+			}
+			if len(parts) > 7 {
+				spec.AllowedPaths = parseAllowedPaths(parts[7])
+			}
+		} else {
+			if len(parts) > 6 {
+				spec.AllowedPaths = parseAllowedPaths(parts[6])
+			}
 		}
 		specs = append(specs, spec)
 	}
 	return specs
+}
+
+func parseAllowedPaths(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var paths []string
+	for _, p := range strings.Split(raw, ";") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
 }
 
 // proposalAdapterSpec is one parsed GITOPS_PROPOSAL_ADAPTERS entry.
@@ -469,7 +496,7 @@ func printStartupBanner(version string, port int) {
 
 `
 	fmt.Print(banner)
-	fmt.Printf("\tKubeseal UI API Server  •  Version: %s  •  Port: :%d\n\n", version, port)
+	fmt.Printf("Kubeseal UI API Server  •  Version: %s  •  Port: :%d\n\n", version, port)
 }
 
 // devPrivateKey generates a deterministic RSA key for local development.

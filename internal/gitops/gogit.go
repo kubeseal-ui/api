@@ -129,7 +129,14 @@ func remoteURL(target Target) string {
 	if strings.Contains(target.Repository, "://") || strings.Contains(target.Repository, "@") {
 		return target.Repository
 	}
-	return "https://git.example.com/" + target.Repository + ".git"
+	repo := strings.TrimSuffix(target.Repository, ".git")
+	if strings.HasPrefix(repo, "github.com/") {
+		return "https://" + repo + ".git"
+	}
+	if strings.Count(repo, "/") == 1 {
+		return "https://github.com/" + repo + ".git"
+	}
+	return "https://" + repo + ".git"
 }
 
 // ReadManifest fetches the remote and reads the file content at a target.
