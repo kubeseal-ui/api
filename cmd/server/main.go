@@ -299,10 +299,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	version := loadVersion()
+	printStartupBanner(version, cfg.Port)
+
 	logger := observability.NewLogger(os.Stdout, slog.LevelInfo)
 	slog.SetDefault(logger)
 
 	// Telemetry: OTel SDK (metrics, traces, logs over OTLP).
+	if cfg.OTelServiceVersion == "" {
+		cfg.OTelServiceVersion = version
+	}
 	telemetry := setupTelemetryFromConfig(&cfg, logger)
 
 	// Phase 1: construct all providers and services but DO NOT wire
@@ -408,6 +414,7 @@ func main() {
 
 	go func() {
 		slog.Info("starting api",
+			"version", version,
 			"port", cfg.Port,
 			"enable_decrypt", cfg.EnableDecrypt,
 			"ready", cfg.Ready(),
@@ -438,6 +445,30 @@ type staticCertProvider struct{}
 
 func (s *staticCertProvider) Get(_ context.Context) (*x509.Certificate, error) {
 	return nil, fmt.Errorf("cert provider not configured: set KUBESEAL_CERT_URL")
+}
+
+// loadVersion reads version.txt from the filesystem or falls back to build info / "dev".
+func loadVersion() string {
+	if content, err := os.ReadFile("version.txt"); err == nil {
+		if v := strings.TrimSpace(string(content)); v != "" {
+			return v
+		}
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
+
+func printStartupBanner(version string, port int) {
+	banner := `
+  _  ___   _ ___ ___ ___ ___   _   _       _   ___ ___ 
+ | |/ / | | | _ ) __/ __| __| /_\ | |     /_\ | _ \_ _|
+ | ' <| |_| | _ \ _|\__ \ _| / _ \| |__  / _ \|  _/| | 
+ |_|\_\\___/|___/___|___/___/_/ \_\____|/_/ \_\_| |___|
+`
+	fmt.Print(banner)
+	fmt.Printf("   Kubeseal UI API Server  •  Version: %s  •  Port: :%d\n\n", version, port)
 }
 
 // devPrivateKey generates a deterministic RSA key for local development.
