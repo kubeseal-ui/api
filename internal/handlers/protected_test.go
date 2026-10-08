@@ -299,7 +299,7 @@ stringData:
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", YAML: live}}}, w, true)
 	status, statusErr := h.gitStatus(httptest.NewRequest(http.MethodPost, "/", nil), "ns", "name", live, "abc")
-	if statusErr != nil || status["drift"] != kubernetes.DriftSync {
+	if statusErr != nil || status["drift"] != string(kubernetes.DriftSync) {
 		t.Fatalf("git status=%v err=%v", status, statusErr)
 	}
 	rr := httptest.NewRecorder()
