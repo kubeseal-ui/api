@@ -170,7 +170,7 @@ func canonicalSealedSecret(manifest string) ([]byte, error) {
 	if err := yaml.Unmarshal([]byte(manifest), &m); err != nil {
 		return nil, err
 	}
-	// Strip volatile Kubernetes runtime fields so canonical comparison accurately
+	// Strip volatile Kubernetes runtime and GitOps tracking fields so canonical comparison accurately
 	// compares spec and stable metadata without false divergences.
 	delete(m, "status")
 	if meta, ok := m["metadata"].(map[string]any); ok {
@@ -179,14 +179,58 @@ func canonicalSealedSecret(manifest string) ([]byte, error) {
 		delete(meta, "generation")
 		delete(meta, "creationTimestamp")
 		delete(meta, "managedFields")
-		if ann, ok := meta["annotations"].(map[string]any); ok {
-			delete(ann, "kubectl.kubernetes.io/last-applied-configuration")
-			if len(ann) == 0 {
-				delete(meta, "annotations")
+		cleanAnnotations(meta)
+		cleanLabels(meta)
+	}
+	if spec, ok := m["spec"].(map[string]any); ok {
+		if tpl, ok := spec["template"].(map[string]any); ok {
+			if tplMeta, ok := tpl["metadata"].(map[string]any); ok {
+				delete(tplMeta, "creationTimestamp")
+				cleanAnnotations(tplMeta)
+				cleanLabels(tplMeta)
+				if len(tplMeta) == 0 {
+					delete(tpl, "metadata")
+				}
 			}
 		}
 	}
 	return json.Marshal(m)
+}
+
+func cleanAnnotations(meta map[string]any) {
+	ann, ok := meta["annotations"].(map[string]any)
+	if !ok {
+		return
+	}
+	for k := range ann {
+		if strings.HasPrefix(k, "kubectl.kubernetes.io/") ||
+			strings.HasPrefix(k, "argocd.argoproj.io/") ||
+			strings.HasPrefix(k, "helm.sh/") ||
+			strings.HasPrefix(k, "meta.helm.sh/") ||
+			strings.HasPrefix(k, "fluxcd.io/") ||
+			strings.HasPrefix(k, "kustomize.toolkit.fluxcd.io/") {
+			delete(ann, k)
+		}
+	}
+	if len(ann) == 0 {
+		delete(meta, "annotations")
+	}
+}
+
+func cleanLabels(meta map[string]any) {
+	labels, ok := meta["labels"].(map[string]any)
+	if !ok {
+		return
+	}
+	for k := range labels {
+		if strings.HasPrefix(k, "argocd.argoproj.io/") ||
+			strings.HasPrefix(k, "helm.sh/") {
+			delete(labels, k)
+		}
+	}
+	if len(labels) == 0 {
+		delete(meta, "labels")
+	}
 }
 
 func encryptedChecksum(value string) string {

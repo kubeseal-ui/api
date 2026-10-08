@@ -399,3 +399,60 @@ func assertErrorEnvelope(t *testing.T, rr *httptest.ResponseRecorder, code, mess
 		t.Fatalf("error = %+v, want %s/%s/%s", body.Error, code, message, requestID)
 	}
 }
+
+func TestCanonicalSealedSecretIgnoresArgoCDTrackingAndRuntimeFields(t *testing.T) {
+	gitManifest := `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: example-secret
+  namespace: example-ns
+spec:
+  encryptedData:
+    key1: dummy-encrypted-val
+  template:
+    metadata:
+      name: example-secret
+      namespace: example-ns
+    type: Opaque
+`
+
+	liveManifestWithArgoCD := `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: example-secret
+  namespace: example-ns
+  generation: 1
+  resourceVersion: "12345"
+  uid: "00000000-0000-0000-0000-000000000001"
+  creationTimestamp: "2025-01-01T00:00:00Z"
+  annotations:
+    argocd.argoproj.io/tracking-id: "example-app:bitnami.com/SealedSecret:example-ns/example-secret"
+    kubectl.kubernetes.io/last-applied-configuration: "{}"
+  labels:
+    argocd.argoproj.io/instance: "example-app"
+spec:
+  encryptedData:
+    key1: dummy-encrypted-val
+  template:
+    metadata:
+      creationTimestamp: null
+      name: example-secret
+      namespace: example-ns
+    type: Opaque
+status:
+  observedGeneration: 1
+`
+
+	gitCanon, err := canonicalSealedSecret(gitManifest)
+	if err != nil {
+		t.Fatalf("git canonical failed: %v", err)
+	}
+	liveCanon, err := canonicalSealedSecret(liveManifestWithArgoCD)
+	if err != nil {
+		t.Fatalf("live canonical failed: %v", err)
+	}
+
+	if !bytes.Equal(gitCanon, liveCanon) {
+		t.Fatalf("expected canonical forms to match, but they differed:\nGit:  %s\nLive: %s", string(gitCanon), string(liveCanon))
+	}
+}
