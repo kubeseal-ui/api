@@ -112,6 +112,10 @@ jobs:
           type=sha
           type=raw,value=latest,enable={{is_default_branch}}
 
+    - name: Set short git commit SHA
+      id: vars
+      run: echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
@@ -121,7 +125,7 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: |
-          VERSION=${{ github.ref_name }}-${{ github.sha }}
+          VERSION=${{ github.ref_name }}-${{ steps.vars.outputs.short_sha }}
         platforms: linux/amd64,linux/arm64
         cache-from: type=gha
         cache-to: type=gha,mode=max
