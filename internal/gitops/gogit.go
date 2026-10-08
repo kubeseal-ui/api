@@ -253,8 +253,7 @@ func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch,
 			return nil
 		}
 		content, readErr := io.ReadAll(rc)
-		_ = rc.Close()
-		if readErr != nil {
+		if closeErr := rc.Close(); closeErr != nil || readErr != nil {
 			return nil
 		}
 		if MatchesSealedSecret(content, namespace, name) {
