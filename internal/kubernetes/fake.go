@@ -66,6 +66,19 @@ func (f *Fake) FindActiveControllerKey(_ context.Context) (ActiveKey, error) {
 	return pickActive(valid)
 }
 
+// FindAllControllerKeys returns all valid fixture keys with tls.crt and tls.key.
+func (f *Fake) FindAllControllerKeys(_ context.Context) ([]ActiveKey, error) {
+	valid := f.validKeys()
+	if len(valid) == 0 {
+		return nil, fmt.Errorf("kubernetes: no valid active key found")
+	}
+	out := make([]ActiveKey, len(valid))
+	for i, item := range valid {
+		out[i] = ActiveKey{Name: item.Name, Key: append([]byte(nil), item.Data["tls.key"]...)}
+	}
+	return out, nil
+}
+
 // validKeys filters fixture Secrets to those with tls.crt and tls.key.
 func (f *Fake) validKeys() []Secret {
 	var out []Secret

@@ -89,6 +89,11 @@ type Client interface {
 	// key. Only used in decrypt-enabled mode. Fails closed on
 	// ambiguous or malformed state (see package doc).
 	FindActiveControllerKey(ctx context.Context) (ActiveKey, error)
+
+	// FindAllControllerKeys returns all valid controller private keys.
+	// Used during decryption so secrets encrypted with previously rotated
+	// keys can still be unsealed.
+	FindAllControllerKeys(ctx context.Context) ([]ActiveKey, error)
 }
 
 // Secret is an alias so tests can construct fake controller key

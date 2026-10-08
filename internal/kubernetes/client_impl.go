@@ -141,11 +141,11 @@ func projectSealedSecret(obj *unstructured.Unstructured) (SealedSecret, error) {
 	}, nil
 }
 
-func (c *KubeClient) FindActiveControllerKey(ctx context.Context) (ActiveKey, error) {
+func (c *KubeClient) findAllValidKeys(ctx context.Context) ([]corev1.Secret, error) {
 	label := c.options.ActiveKeyLabel
 	list, err := c.core.CoreV1().Secrets(c.options.ControllerNamespace).List(ctx, metav1.ListOptions{LabelSelector: label})
 	if err != nil {
-		return ActiveKey{}, fmt.Errorf("list controller keys: %w", err)
+		return nil, fmt.Errorf("list controller keys: %w", err)
 	}
 	valid := make([]corev1.Secret, 0, len(list.Items))
 	for _, item := range list.Items {
@@ -178,7 +178,15 @@ func (c *KubeClient) FindActiveControllerKey(ctx context.Context) (ActiveKey, er
 		valid = append(valid, item)
 	}
 	if len(valid) == 0 {
-		return ActiveKey{}, fmt.Errorf("no valid active controller key")
+		return nil, fmt.Errorf("no valid active controller key")
+	}
+	return valid, nil
+}
+
+func (c *KubeClient) FindActiveControllerKey(ctx context.Context) (ActiveKey, error) {
+	valid, err := c.findAllValidKeys(ctx)
+	if err != nil {
+		return ActiveKey{}, err
 	}
 	sort.Slice(valid, func(i, j int) bool {
 		if valid[i].CreationTimestamp.Equal(&valid[j].CreationTimestamp) {
@@ -188,4 +196,16 @@ func (c *KubeClient) FindActiveControllerKey(ctx context.Context) (ActiveKey, er
 	})
 	best := valid[0]
 	return ActiveKey{Name: best.Name, Key: append([]byte(nil), best.Data["tls.key"]...)}, nil
+}
+
+func (c *KubeClient) FindAllControllerKeys(ctx context.Context) ([]ActiveKey, error) {
+	valid, err := c.findAllValidKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ActiveKey, len(valid))
+	for i, item := range valid {
+		out[i] = ActiveKey{Name: item.Name, Key: append([]byte(nil), item.Data["tls.key"]...)}
+	}
+	return out, nil
 }
