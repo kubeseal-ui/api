@@ -74,7 +74,7 @@ type Config struct {
 	KubeSealCertURL string
 
 	// FakeK8sClient controls whether to use the fake Kubernetes client
-	// for development. Default true.
+	// for development. Default false.
 	// Sources: -fake-k8s flag, FAKE_K8S_CLIENT env.
 	FakeK8sClient       bool
 	ControllerNamespace string
