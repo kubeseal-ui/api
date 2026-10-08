@@ -463,38 +463,10 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Resolve the mapped target once, so the vacancy gate below and the
-	// response's base commit both use the same path. A namespace with no
-	// mapping has no mapped path to occupy, so the gate is scoped to mapped
-	// namespaces and encrypt keeps working unmapped.
-	var mapping policy.GitMapping
-	mapped := false
-	mappedPath := ""
-	if req.TargetPath != "" {
-		if h.GitMappings == nil {
-			writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
-			return
-		}
-		m, ok := h.GitMappings.GetGitMapping(req.Namespace)
-		if !ok {
-			writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
-			return
-		}
-		if !m.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
-			writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
-			return
-		}
-		// No transport means nothing to read, so `mapped` stays false and the
-		// vacancy gate below is skipped. Without this the gate would call into
-		// a nil transport, because `mapped` is what authorizes that call.
-		if h.GitTransport != nil {
-			mapping, mapped, mappedPath = m, true, req.TargetPath
-		}
-	} else if h.GitMappings != nil && h.GitTransport != nil {
-		if m, ok := h.GitMappings.GetGitMapping(req.Namespace); ok {
-			if rendered := m.RenderPath(req.Namespace, req.Name); rendered != "" {
-				mapping, mapped, mappedPath = m, true, rendered
-			}
-		}
+	// response's base commit both use the same path.
+	mapping, mapped, mappedPath, ok := h.resolveEncryptTarget(w, r, &req)
+	if !ok {
+		return
 	}
 
 	scope := crypto.StrictScope
@@ -512,27 +484,13 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Documented gate: the mapped target must be vacant. Creating under a name
-	// whose manifest already exists would silently replace it, which is what
-	// the separate create and edit flows exist to prevent. Checked before
-	// encrypting so a doomed request does no crypto work.
 	baseCommit := ""
 	if mapped {
-		target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: mappedPath}
-		snapshot, found, err := h.lookupManifest(r.Context(), mapping, target, req.Namespace, req.Name)
-		if err != nil {
-			slog.Error("git lookup failed", "namespace", req.Namespace, "name", req.Name, "request_id", requestID(r), "error", err)
-			writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
+		// Checked before encrypting so a doomed request does no crypto work.
+		baseCommit, ok = h.encryptTargetIsVacant(w, r, mapping, mappedPath, &req)
+		if !ok {
 			return
 		}
-		if found {
-			writeError(w, r, http.StatusConflict, "PATH_OCCUPIED", "A manifest for this Secret already exists at the mapped path")
-			return
-		}
-		// The vacant path still reports the branch head. The client needs it
-		// to deliver: BaseCommit is compared against the branch head, and no
-		// other endpoint yields a head for a namespace that has no secrets.
-		baseCommit = snapshot.Commit
 	}
 
 	sealed, err := h.Crypto.EncryptYAML(r.Context(), req.YAML, req.Namespace, req.Name, scope)
@@ -543,6 +501,76 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed, "base_commit": baseCommit})
+}
+
+// resolveEncryptTarget decides which mapped file a new Secret would occupy and
+// returns its mapping, the rendered path, and whether the path is a mapped one
+// at all.
+//
+// mapped is false when the namespace has no mapping, when the mapping renders no
+// path, or when there is no transport to read with. A namespace with no mapped
+// path has nothing to occupy, so encrypt keeps working unmapped. It writes an
+// error response and returns ok=false when the request itself cannot be
+// satisfied — an unknown namespace or a target path the mapping does not allow.
+func (h *ProtectedHandlers) resolveEncryptTarget(w http.ResponseWriter, r *http.Request, req *encryptRequest) (policy.GitMapping, bool, string, bool) {
+	if req.TargetPath == "" {
+		if h.GitMappings == nil || h.GitTransport == nil {
+			return policy.GitMapping{}, false, "", true
+		}
+		mapping, ok := h.GitMappings.GetGitMapping(req.Namespace)
+		if !ok {
+			return policy.GitMapping{}, false, "", true
+		}
+		rendered := mapping.RenderPath(req.Namespace, req.Name)
+		if rendered == "" {
+			return policy.GitMapping{}, false, "", true
+		}
+		return mapping, true, rendered, true
+	}
+
+	if h.GitMappings == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
+		return policy.GitMapping{}, false, "", false
+	}
+	mapping, ok := h.GitMappings.GetGitMapping(req.Namespace)
+	if !ok {
+		writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
+		return policy.GitMapping{}, false, "", false
+	}
+	if !mapping.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
+		return policy.GitMapping{}, false, "", false
+	}
+	// No transport means nothing to read, so the caller's vacancy gate is
+	// skipped. Without this the gate would call into a nil transport, because
+	// `mapped` is what authorizes that call.
+	if h.GitTransport == nil {
+		return policy.GitMapping{}, false, "", true
+	}
+	return mapping, true, req.TargetPath, true
+}
+
+// encryptTargetIsVacant enforces the documented gate: the mapped target must be
+// vacant. Creating under a name whose manifest already exists would silently
+// replace it, which is what the separate create and edit flows exist to prevent.
+//
+// The vacant path still reports the branch head, and that head is the return
+// value: BaseCommit is compared against the branch head, and no other endpoint
+// yields one for a namespace that has no secrets yet. It writes an error
+// response and returns ok=false on refusal.
+func (h *ProtectedHandlers) encryptTargetIsVacant(w http.ResponseWriter, r *http.Request, mapping policy.GitMapping, path string, req *encryptRequest) (string, bool) {
+	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}
+	snapshot, found, err := h.lookupManifest(r.Context(), mapping, target, req.Namespace, req.Name)
+	if err != nil {
+		slog.Error("git lookup failed", "namespace", req.Namespace, "name", req.Name, "request_id", requestID(r), "error", err)
+		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
+		return "", false
+	}
+	if found {
+		writeError(w, r, http.StatusConflict, "PATH_OCCUPIED", "A manifest for this Secret already exists at the mapped path")
+		return "", false
+	}
+	return snapshot.Commit, true
 }
 
 func validName(value string) bool {
