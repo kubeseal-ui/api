@@ -89,10 +89,14 @@ type Provider interface {
 	Get(ctx context.Context) (*x509.Certificate, error)
 }
 
-// PrivateKeyProvider returns the controller RSA private key for
-// decryption. Only available in decrypt-enabled mode.
+// PrivateKeyProvider returns the controller RSA private keys for
+// decryption. Only available in decrypt-enabled mode. Implementations
+// MUST return every key the controller still holds: the sealed-secrets
+// controller rotates its sealing key on a schedule, and a SealedSecret
+// sealed before a rotation can only be opened by the key that sealed
+// it, not by the current active key.
 type PrivateKeyProvider interface {
-	PrivateKey(ctx context.Context) (*rsa.PrivateKey, error)
+	PrivateKeys(ctx context.Context) ([]*rsa.PrivateKey, error)
 }
 
 // Wrapper provides in-process Sealed Secrets encryption, decryption,
@@ -175,21 +179,15 @@ func (w *Wrapper) DecryptYAML(ctx context.Context, sealedYAML string) (string, e
 		return "", fmt.Errorf("crypto: decrypt is disabled (ENABLE_DECRYPT=false)")
 	}
 
-	privKey, err := w.priv.PrivateKey(ctx)
+	privKeys, err := w.privateKeyMap(ctx)
 	if err != nil {
-		return "", fmt.Errorf("crypto: fetch private key: %w", err)
+		return "", err
 	}
 
 	sealed, err := parseSealedSecret(sealedYAML)
 	if err != nil {
 		return "", err
 	}
-
-	fp, err := crypto.PublicKeyFingerprint(&privKey.PublicKey)
-	if err != nil {
-		return "", fmt.Errorf("crypto: fingerprint key: %w", err)
-	}
-	privKeys := map[string]*rsa.PrivateKey{fp: privKey}
 
 	secret, err := sealed.Unseal(w.codecs, privKeys)
 	if err != nil {
@@ -209,6 +207,29 @@ func (w *Wrapper) DecryptYAML(ctx context.Context, sealedYAML string) (string, e
 		return "", fmt.Errorf("crypto: encode secret: %w", err)
 	}
 	return string(y), nil
+}
+
+// privateKeyMap indexes every controller key by its public-key
+// fingerprint. Unseal looks the sealing key up per encrypted value, so
+// secrets sealed before a controller key rotation still decrypt as long
+// as the provider still supplies the key that sealed them.
+func (w *Wrapper) privateKeyMap(ctx context.Context) (map[string]*rsa.PrivateKey, error) {
+	keys, err := w.priv.PrivateKeys(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: fetch private keys: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("crypto: no controller private keys available")
+	}
+	out := make(map[string]*rsa.PrivateKey, len(keys))
+	for _, key := range keys {
+		fp, err := crypto.PublicKeyFingerprint(&key.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("crypto: fingerprint key: %w", err)
+		}
+		out[fp] = key
+	}
+	return out, nil
 }
 
 // Reseal mutates one key in an existing SealedSecret: decrypt internally,
@@ -400,8 +421,8 @@ type staticPrivProvider struct {
 	key *rsa.PrivateKey
 }
 
-func (f *staticPrivProvider) PrivateKey(_ context.Context) (*rsa.PrivateKey, error) {
-	return f.key, nil
+func (f *staticPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, error) {
+	return []*rsa.PrivateKey{f.key}, nil
 }
 
 // Ensure kubeseal import is referenced — used for Seal/SealedSecret

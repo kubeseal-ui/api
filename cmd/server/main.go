@@ -40,8 +40,8 @@ type devPrivProvider struct {
 	key *rsa.PrivateKey
 }
 
-func (d *devPrivProvider) PrivateKey(_ context.Context) (*rsa.PrivateKey, error) {
-	return d.key, nil
+func (d *devPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, error) {
+	return []*rsa.PrivateKey{d.key}, nil
 }
 
 // discoverOIDC performs provider discovery when the OIDC environment is

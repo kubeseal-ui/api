@@ -4,6 +4,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto/rsa"
 	"strings"
 	"testing"
@@ -101,6 +102,50 @@ func TestDecryptWrongKeyFails(t *testing.T) {
 	_, err = w2.DecryptYAML(t.Context(), sealed)
 	if err == nil {
 		t.Fatal("expected decryption with wrong key to fail, got nil")
+	}
+}
+
+// multiPrivProvider is a PrivateKeyProvider that returns several keys,
+// standing in for a controller that has rotated its sealing key and
+// retained the previous ones.
+type multiPrivProvider struct {
+	keys []*rsa.PrivateKey
+}
+
+func (m *multiPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, error) {
+	return m.keys, nil
+}
+
+// TestDecryptAfterKeyRotation verifies that a SealedSecret sealed before
+// a controller key rotation still decrypts once the provider supplies
+// the retained key alongside the new active one. The sealed-secrets
+// controller rotates its sealing key on a schedule and keeps the old
+// keys; a decrypt path holding only the newest key cannot open secrets
+// sealed before the rotation.
+func TestDecryptAfterKeyRotation(t *testing.T) {
+	w1, oldKey := mustNewTestCrypto(t) // key that sealed the secret
+	w2, newKey := mustNewTestCrypto(t) // active key after rotation
+
+	secretYAML := SecretYAML("secret", "default", map[string]string{"key": "val"}, "")
+	sealedBeforeRotation, err := w1.EncryptYAML(t.Context(), secretYAML, "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	// With only the rotated-in key the secret cannot be opened...
+	activeOnly := New(w2.cert, &multiPrivProvider{keys: []*rsa.PrivateKey{newKey}})
+	if _, err := activeOnly.DecryptYAML(t.Context(), sealedBeforeRotation); err == nil {
+		t.Fatal("expected decryption with only the rotated-in key to fail, got nil")
+	}
+
+	// ...and succeeds once the retained key is supplied too.
+	rotated := New(w2.cert, &multiPrivProvider{keys: []*rsa.PrivateKey{newKey, oldKey}})
+	decrypted, err := rotated.DecryptYAML(t.Context(), sealedBeforeRotation)
+	if err != nil {
+		t.Fatalf("DecryptYAML with retained key: %v", err)
+	}
+	if !strings.Contains(decrypted, "key: val") {
+		t.Errorf("decrypted output missing value: %s", decrypted)
 	}
 }
 

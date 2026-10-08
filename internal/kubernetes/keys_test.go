@@ -100,3 +100,53 @@ func TestFakeClientFindActiveKeyAmbiguousFailsClosed(t *testing.T) {
 		t.Fatal("want error for ambiguous identical keys")
 	}
 }
+
+// TestFakeClientFindAllKeysReturnsEveryRetainedKey verifies that
+// decryption can reach every key the controller still holds, not just
+// the active one. This is the property that lets a SealedSecret sealed
+// before a key rotation still be decrypted.
+func TestFakeClientFindAllKeysReturnsEveryRetainedKey(t *testing.T) {
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	f := NewFake(nil, nil, []Secret{
+		keySecret("old-key", old, true),
+		keySecret("broken", newer, false), // tls.crt only
+		keySecret("new-key", newer, true),
+	})
+
+	got, err := f.FindAllControllerKeys(context.Background())
+	if err != nil {
+		t.Fatalf("FindAllControllerKeys: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 valid keys, got %d: %+v", len(got), got)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, k := range got {
+		seen[k.Name] = true
+		if string(k.Key) != "key-material" {
+			t.Errorf("key %q: bytes mismatch", k.Name)
+		}
+	}
+	for _, want := range []string{"old-key", "new-key"} {
+		if !seen[want] {
+			t.Errorf("missing retained key %q", want)
+		}
+	}
+}
+
+// TestFakeClientFindAllKeysFailsClosed verifies that a controller with
+// no usable key reports an error rather than handing the decrypt path
+// an empty set.
+func TestFakeClientFindAllKeysFailsClosed(t *testing.T) {
+	empty := NewFake(nil, nil, nil)
+	if _, err := empty.FindAllControllerKeys(context.Background()); err == nil {
+		t.Fatal("want error when no keys exist")
+	}
+
+	malformed := NewFake(nil, nil, []Secret{keySecret("no-key", time.Now(), false)})
+	if _, err := malformed.FindAllControllerKeys(context.Background()); err == nil {
+		t.Fatal("want error when the only candidate is malformed")
+	}
+}

@@ -48,6 +48,9 @@ func (f protectedK8s) ListSealedSecrets(context.Context, string) ([]kubernetes.S
 func (protectedK8s) FindActiveControllerKey(context.Context) (kubernetes.ActiveKey, error) {
 	return kubernetes.ActiveKey{}, nil
 }
+func (protectedK8s) FindAllControllerKeys(context.Context) ([]kubernetes.ActiveKey, error) {
+	return nil, nil
+}
 
 func protectedIdentity(caps ...policy.Capability) authmw.Identity {
 	capabilities := make([]string, 0, len(caps))

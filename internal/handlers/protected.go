@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -445,6 +446,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	}
 	sealed, err := h.Crypto.EncryptYAML(r.Context(), req.YAML, req.Namespace, req.Name, scope)
 	if err != nil {
+		slog.Error("encrypt secret failed", "namespace", req.Namespace, "name", req.Name, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "ENCRYPTION_FAILED", "Unable to encrypt request")
 		return
 	}
@@ -490,6 +492,7 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 	}
 	plain, err := h.Crypto.DecryptYAML(r.Context(), secret.YAML)
 	if err != nil {
+		slog.Error("decrypt sealed secret failed", "namespace", namespace, "name", name, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "DECRYPTION_FAILED", "Unable to decrypt secret")
 		return
 	}
@@ -547,6 +550,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	after, err := h.Crypto.Reseal(r.Context(), secret.YAML, req.Key, req.Value, op)
 	if err != nil {
+		slog.Error("reseal secret failed", "namespace", namespace, "name", name, "key", req.Key, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to reseal secret")
 		return
 	}
@@ -602,6 +606,7 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 	}
 	sealed, err := h.Crypto.Reseal(r.Context(), secret.YAML, chi.URLParam(r, "key"), req.Value, op)
 	if err != nil {
+		slog.Error("reseal secret failed", "namespace", namespace, "name", name, "key", key, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to reseal secret")
 		return
 	}
