@@ -2,10 +2,12 @@ package observability
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSetupTelemetryWithoutEndpointDisablesEverything(t *testing.T) {
@@ -39,11 +41,17 @@ func TestSetupTelemetryMountsPrometheusExposition(t *testing.T) {
 		ServiceVersion:   "test",
 		Environment:      "test",
 		TraceSampleRatio: 1,
+		ExportTimeout:    50 * time.Millisecond,
+		Logger:           slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
 		t.Fatalf("SetupTelemetry: %v", err)
 	}
-	t.Cleanup(func() { tel.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		tel.Shutdown(ctx)
+	})
 
 	if tel.TracerProvider == nil || tel.MeterProvider == nil || tel.LoggerProvider == nil {
 		t.Fatalf("not all providers mounted: %+v", tel)

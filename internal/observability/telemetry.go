@@ -58,6 +58,7 @@ type Telemetry struct {
 	// MetricsEnabled reports whether /metrics can serve the Prometheus
 	// exposition. It is false when the provider never mounted.
 	MetricsEnabled bool
+	logger         *slog.Logger
 }
 
 // TelemetryOptions configures the SDK wiring.
@@ -74,6 +75,8 @@ type TelemetryOptions struct {
 	TraceSampleRatio float64
 	// MetricInterval is the OTLP push interval; 0 means 30s.
 	MetricInterval time.Duration
+	// ExportTimeout is the timeout for exporting signals to OTLP; if 0, defaults to SDK default.
+	ExportTimeout time.Duration
 	// Logger is used for wiring diagnostics; may be nil.
 	Logger *slog.Logger
 }
@@ -109,7 +112,7 @@ func (o TelemetryOptions) resourceAttributes() (*resource.Resource, error) {
 // exporter construction failure disables that signal with a warning
 // instead of failing the boot. Call Shutdown on process exit.
 func SetupTelemetry(opts TelemetryOptions) (*Telemetry, error) {
-	tel := &Telemetry{}
+	tel := &Telemetry{logger: opts.Logger}
 	if opts.ServiceName == "" {
 		opts.ServiceName = "kubeseal-ui-api"
 	}
@@ -183,8 +186,12 @@ func SetupTelemetry(opts TelemetryOptions) (*Telemetry, error) {
 
 // setupMetrics wires the OTLP push exporter and the Prometheus reader.
 func setupMetrics(tel *Telemetry, res *resource.Resource, opts TelemetryOptions) error {
-	pushExp, err := otlpmetricgrpc.New(context.Background(),
-		otlpmetricgrpc.WithEndpoint(opts.Endpoint), otlpmetricgrpc.WithInsecure())
+	var grpcOpts []otlpmetricgrpc.Option
+	grpcOpts = append(grpcOpts, otlpmetricgrpc.WithEndpoint(opts.Endpoint), otlpmetricgrpc.WithInsecure())
+	if opts.ExportTimeout > 0 {
+		grpcOpts = append(grpcOpts, otlpmetricgrpc.WithTimeout(opts.ExportTimeout))
+	}
+	pushExp, err := otlpmetricgrpc.New(context.Background(), grpcOpts...)
 	if err != nil {
 		return err
 	}
@@ -226,19 +233,34 @@ func (t *Telemetry) Shutdown(ctx context.Context) {
 	if t == nil {
 		return
 	}
+	// Bound shutdown flush so an unreachable collector never hangs process exit or tests indefinitely.
+	shutdownCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		shutdownCtx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+	}
 	if t.TracerProvider != nil {
-		if err := t.TracerProvider.Shutdown(ctx); err != nil {
-			slog.Error("trace provider shutdown", "error", err)
+		if err := t.TracerProvider.Shutdown(shutdownCtx); err != nil {
+			t.logWarn("trace provider shutdown", err)
 		}
 	}
 	if t.MeterProvider != nil {
-		if err := t.MeterProvider.Shutdown(ctx); err != nil {
-			slog.Error("meter provider shutdown", "error", err)
+		if err := t.MeterProvider.Shutdown(shutdownCtx); err != nil {
+			t.logWarn("meter provider shutdown", err)
 		}
 	}
 	if t.LoggerProvider != nil {
-		if err := t.LoggerProvider.Shutdown(ctx); err != nil {
-			slog.Error("log provider shutdown", "error", err)
+		if err := t.LoggerProvider.Shutdown(shutdownCtx); err != nil {
+			t.logWarn("log provider shutdown", err)
 		}
 	}
+}
+
+func (t *Telemetry) logWarn(msg string, err error) {
+	if t.logger != nil {
+		t.logger.Warn(msg, "error", err)
+		return
+	}
+	slog.Warn(msg, "error", err)
 }
