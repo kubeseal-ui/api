@@ -1,15 +1,5 @@
 name: CI/CD Pipeline
 
-# Verbatim copy of pamawas-correlator ci-cd.yml with kubeseal-ui adaptations:
-#  - go-version pinned to 1.27 (kubeseal-ui/api go.mod declares go 1.27)
-#  - golangci-lint version pinned to v2.13.2 (built with Go 1.27+; v2.12.x is Go 1.26
-#    and refuses to load configs targeting Go 1.27)
-#  - binary name: kubeseal-api (matches Dockerfile)
-#  - image name: ghcr.io/<owner>/<repo> (matches pamawas convention; resolves
-#    to ghcr.io/kubeseal-ui/api since the repo IS kubeseal-ui/api)
-# Everything else (action versions, install modes, branch gates, security scan,
-# release job, codecov) is identical to pamawas-correlator.
-
 on:
   push:
     branches: [ main, dev ]
@@ -70,7 +60,7 @@ jobs:
       run: go mod download
 
     - name: Build binary
-      run: CGO_ENABLED=0 go build -o kubeseal-api ./cmd/server
+      run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o kubeseal-api ./cmd/server
 
     - name: Verify binary runs
       run: ./kubeseal-api --help || true
@@ -87,9 +77,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -127,8 +114,8 @@ jobs:
         build-args: |
           VERSION=${{ github.ref_name }}-${{ steps.vars.outputs.short_sha }}
         platforms: linux/amd64,linux/arm64
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: type=gha,scope=${{ github.workflow }}
+        cache-to: type=gha,mode=max,scope=${{ github.workflow }}
 
   security:
     name: Security Scan

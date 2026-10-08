@@ -1,17 +1,23 @@
-# Use the official Golang image to build the application
-FROM golang:1.27-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /app
 
 COPY go.mod go.sum ./
-RUN go mod download 2>/dev/null || true
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY . .
 
 ARG VERSION=""
 RUN if [ -n "$VERSION" ]; then echo "$VERSION" > /app/version.txt; elif [ ! -f /app/version.txt ]; then echo "dev-unknown" > /app/version.txt; fi
 
-RUN CGO_ENABLED=0 go build -o /kubeseal-api ./cmd/server
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /kubeseal-api ./cmd/server
 
 FROM alpine:latest
 
