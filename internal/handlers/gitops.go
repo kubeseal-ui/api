@@ -184,7 +184,7 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
 		return
 	}
-	mapping, ok := h.GitMappings.GetGitMapping(namespace)
+	_, ok := h.GitMappings.GetGitMapping(namespace)
 	if !ok {
 		writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
 		return
@@ -225,7 +225,7 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		"delivery_mode": gitStat["delivery_mode"],
 		"base_commit":   gitStat["base_commit"],
 		"drift_status":  driftVal,
-		"can_sync":      driftVal == "live_only" || driftVal == kubernetes.DriftDiverged,
+		"can_sync":      driftVal == "live_only" || driftVal == string(kubernetes.DriftDiverged),
 		"live": map[string]any{
 			"exists": liveExists,
 		},
@@ -314,7 +314,7 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 	} else {
 		// Option A two-tier discovery: check fast-path, fallback to tree search, or default RenderPath
 		defaultPath := mapping.RenderPath(req.Namespace, req.Name)
-		snapshot, err := h.GitTransport.ReadManifest(r.Context(), gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, mapping.AuthRef)
+		_, err := h.GitTransport.ReadManifest(r.Context(), gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, mapping.AuthRef)
 		if err == nil {
 			path = defaultPath
 		} else if errors.Is(err, gitops.ErrNotFound) {
