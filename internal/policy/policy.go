@@ -363,11 +363,19 @@ func (s *PolicyStore) SetGitMapping(mapping GitMapping) error {
 }
 
 // GetGitMapping returns the Git mapping for a namespace.
+// If an exact match is not found, it falls back to a wildcard "*" mapping if configured.
 func (s *PolicyStore) GetGitMapping(namespace string) (GitMapping, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	m, ok := s.GitMappings[namespace]
-	return m, ok
+	if m, ok := s.GitMappings[namespace]; ok {
+		return m, true
+	}
+	if m, ok := s.GitMappings["*"]; ok {
+		res := m
+		res.Namespace = namespace
+		return res, true
+	}
+	return GitMapping{}, false
 }
 
 // SetGroupRoles atomically replaces a group's role mapping.
@@ -560,8 +568,8 @@ func (g GitMapping) IsPathAllowed(targetPath, namespace, name string) bool {
 	
 	// Check if targetPath is under one of the allowed directory prefixes
 	for _, allowed := range g.AllowedPaths {
-		// Normalize: ensure prefix ends with /
-		prefix := allowed
+		// Normalize: support dynamic {namespace} in allowed path prefix
+		prefix := strings.ReplaceAll(allowed, "{namespace}", namespace)
 		if !strings.HasSuffix(prefix, "/") {
 			prefix += "/"
 		}

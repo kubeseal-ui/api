@@ -362,10 +362,35 @@ func TestPolicyStoreGitMappingManagement(t *testing.T) {
 		t.Errorf("repository mismatch: %q", got.Repository)
 	}
 
-	// Non-existent namespace
+	// Non-existent namespace without wildcard
 	_, ok = store.GetGitMapping("nonexistent")
 	if ok {
 		t.Error("expected non-existent namespace to return false")
+	}
+
+	// Wildcard mapping fallback
+	wildcardMapping := GitMapping{
+		Namespace:    "*",
+		Repository:   "org/wildcard-repo",
+		Branch:       "main",
+		PathTemplate: "{namespace}/{name}.yaml",
+		AuthRef:      "cred",
+		Mode:         GitDeliveryDirect,
+	}
+	if err := store.SetGitMapping(wildcardMapping); err != nil {
+		t.Fatalf("unexpected error setting wildcard mapping: %v", err)
+	}
+
+	// Exact match still takes precedence
+	gotDefault, ok := store.GetGitMapping("default")
+	if !ok || gotDefault.Repository != "org/repo" {
+		t.Errorf("expected exact match to take precedence, got %v, %v", ok, gotDefault)
+	}
+
+	// Any other namespace falls back to wildcard
+	gotOther, ok := store.GetGitMapping("monitoring")
+	if !ok || gotOther.Repository != "org/wildcard-repo" || gotOther.Namespace != "monitoring" {
+		t.Errorf("expected wildcard match for monitoring, got %v, %v", ok, gotOther)
 	}
 }
 
