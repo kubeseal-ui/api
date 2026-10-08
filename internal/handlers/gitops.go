@@ -8,6 +8,7 @@ import (
 
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
 	"github.com/kubeseal-ui/api/internal/gitops"
+	"github.com/kubeseal-ui/api/internal/kubernetes"
 	"github.com/kubeseal-ui/api/internal/metrics"
 	"github.com/kubeseal-ui/api/internal/policy"
 )
@@ -164,4 +165,230 @@ func hasGitCapability(r *http.Request, mode policy.GitDeliveryMode) bool {
 		}
 	}
 	return false
+}
+
+// GitOpsSyncStatusHandler returns the drift status between live cluster and Git.
+// It uses Option A (two-tier source discovery: fast-path pathTemplate with Git tree walk fallback)
+// to locate the manifest in Git, and evaluates drift.
+func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCapability(w, r, policy.MetadataRead) {
+		return
+	}
+	namespace := r.URL.Query().Get("namespace")
+	name := r.URL.Query().Get("name")
+	if !validName(namespace) || !validName(name) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid namespace or name")
+		return
+	}
+	if h.GitMappings == nil || h.GitTransport == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
+		return
+	}
+	mapping, ok := h.GitMappings.GetGitMapping(namespace)
+	if !ok {
+		writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
+		return
+	}
+
+	var liveExists bool
+	var liveYAML string
+	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), namespace, name)
+	if err != nil {
+		if !errors.Is(err, kubernetes.ErrNotFound) {
+			writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
+			return
+		}
+	} else {
+		liveExists = true
+		liveYAML = secret.YAML
+	}
+
+	gitStat, gitErr := h.gitStatus(r, namespace, name, liveYAML, "")
+	if gitErr != nil {
+		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
+		return
+	}
+
+	driftVal, _ := gitStat["drift"].(string)
+	if driftVal == "" {
+		driftVal = "unknown"
+	}
+	gitExists := driftVal != "live_only" && gitStat["managed"] == true
+
+	result := map[string]any{
+		"namespace":     namespace,
+		"name":          name,
+		"managed":       gitStat["managed"],
+		"file_path":     gitStat["file_path"],
+		"repository":    gitStat["repository"],
+		"branch":        gitStat["branch"],
+		"delivery_mode": gitStat["delivery_mode"],
+		"base_commit":   gitStat["base_commit"],
+		"drift_status":  driftVal,
+		"can_sync":      driftVal == "live_only" || driftVal == kubernetes.DriftDiverged,
+		"live": map[string]any{
+			"exists": liveExists,
+		},
+		"git": map[string]any{
+			"exists": gitExists,
+		},
+	}
+
+	jsonResponse(w, http.StatusOK, result)
+}
+
+// GitOpsSyncHandler syncs a live SealedSecret from Kubernetes to Git.
+// The client supplies only { namespace, name, base_commit }; the server
+// fetches the live YAML from Kubernetes and pushes it to the configured
+// or discovered Git path for that namespace. This resolves drift where the live cluster
+// state is ahead of Git (e.g. secrets applied out-of-band).
+//
+// Matching is done via Option A (Two-Tier Discovery: fast-path pathTemplate with
+// Git repository tree walk fallback).
+func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Namespace  string `json:"namespace"`
+		Name       string `json:"name"`
+		BaseCommit string `json:"base_commit"`
+		TargetPath string `json:"target_path,omitempty"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
+		h.emitSecurityEvent(r, "gitops_sync", "", "", "", "", "failed")
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
+		return
+	}
+	if !validName(req.Namespace) || !validName(req.Name) || req.BaseCommit == "" {
+		h.emitSecurityEvent(r, "gitops_sync", "", "", "", "", "failed")
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
+		return
+	}
+
+	if h.GitMappings == nil || h.GitTransport == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
+		return
+	}
+	mapping, ok := h.GitMappings.GetGitMapping(req.Namespace)
+	if !ok {
+		writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
+		return
+	}
+	if !hasGitCapability(r, mapping.Mode) {
+		h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "denied")
+		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+		return
+	}
+	if mapping.Mode == policy.GitDeliveryProposal && mapping.ProposalAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
+		return
+	}
+	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key")
+		return
+	}
+	if !h.claimIdempotency(r) {
+		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
+		return
+	}
+
+	// Fetch the live SealedSecret from Kubernetes.
+	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), req.Namespace, req.Name)
+	if err != nil {
+		if errors.Is(err, kubernetes.ErrNotFound) {
+			h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "not_found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Secret not found in cluster")
+			return
+		}
+		h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "k8s_error")
+		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
+		return
+	}
+
+	// Resolve the target path via Two-Tier Discovery.
+	var path string
+	if req.TargetPath != "" {
+		if !mapping.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
+			return
+		}
+		path = req.TargetPath
+	} else {
+		// Option A two-tier discovery: check fast-path, fallback to tree search, or default RenderPath
+		defaultPath := mapping.RenderPath(req.Namespace, req.Name)
+		snapshot, err := h.GitTransport.ReadManifest(r.Context(), gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, mapping.AuthRef)
+		if err == nil {
+			path = defaultPath
+		} else if errors.Is(err, gitops.ErrNotFound) {
+			searchSnap, sErr := h.GitTransport.SearchManifest(r.Context(), mapping.Repository, mapping.Branch, req.Namespace, req.Name, mapping.AuthRef)
+			if sErr == nil && searchSnap.Target.Path != "" {
+				path = searchSnap.Target.Path
+			} else {
+				path = defaultPath
+			}
+		} else {
+			path = defaultPath
+		}
+	}
+	if path == "" {
+		writeError(w, r, http.StatusInternalServerError, "INVALID_MAPPING", "Git path could not be resolved")
+		return
+	}
+
+	change := gitops.Change{
+		Target:     gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path},
+		BaseCommit: req.BaseCommit,
+		Content:    []byte(secret.YAML),
+	}
+
+	// Proposal mode: push to a dedicated branch, then open a PR.
+	if mapping.Mode == policy.GitDeliveryProposal {
+		change.Branch = proposalBranch(req.Namespace, req.Name)
+	}
+
+	pushed, err := h.GitTransport.PushBranch(r.Context(), change, mapping.AuthRef)
+	if err != nil {
+		var conflict *gitops.ConflictError
+		if errors.As(err, &conflict) {
+			h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "conflict")
+			metrics.RecordGitOpsDelivery(string(mapping.Mode), "conflict")
+			writeError(w, r, http.StatusConflict, "GIT_CONFLICT", "Git conflict")
+			return
+		}
+		var base *gitops.BaseCommitError
+		if errors.As(err, &base) {
+			h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "conflict")
+			metrics.RecordGitOpsDelivery(string(mapping.Mode), "conflict")
+			writeError(w, r, http.StatusConflict, "BASE_COMMIT_CONFLICT", "Base commit conflict")
+			return
+		}
+		h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "error")
+		metrics.RecordGitOpsDelivery(string(mapping.Mode), "failed")
+		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
+		return
+	}
+
+	result := map[string]any{
+		"mode":                 mapping.Mode,
+		"commit_sha":           pushed.Commit,
+		"branch":               pushed.Branch,
+		"file_path":            path,
+		"namespace":            req.Namespace,
+		"name":                 req.Name,
+		"argocd_sync_verified": false,
+	}
+
+	if mapping.Mode == policy.GitDeliveryProposal {
+		provider := mapping.ProposalAdapter
+		proposal, err := provider.OpenProposal(r.Context(), gitops.ProposalRequest{Change: change, Push: pushed})
+		if err != nil {
+			h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "proposal_failed")
+			metrics.RecordGitOpsDelivery(string(mapping.Mode), "proposal_failed")
+			writeError(w, r, http.StatusBadGateway, "PROPOSAL_FAILED", "Proposal failed")
+			return
+		}
+		result["proposal_url"] = proposal.URL
+	}
+
+	h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "success")
+	metrics.RecordGitOpsDelivery(string(mapping.Mode), "success")
+	jsonResponse(w, http.StatusOK, result)
 }

@@ -277,3 +277,34 @@ func TestUnknownCredentialReferenceFailsClosed(t *testing.T) {
 		t.Fatal("nil resolver must fail closed")
 	}
 }
+
+func TestGoGitTransportSearchManifestOptionA(t *testing.T) {
+	remote := bareRemote(t, t.TempDir()+"/remote.git", "main")
+	remoteURL := "file://" + remote
+	yamlContent := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: my-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    token: cipher123\n"
+	seedWorktree(t, t.TempDir()+"/seed", remoteURL, "main", "apps/infra/nested/my-cred.yaml", yamlContent)
+
+	transport, err := NewGoGitTransport(GoGitOptions{ScratchDir: t.TempDir(), AuthorEmail: "kubeseal-ui@test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// 1. Search for existing secret in nested subdirectory
+	snap, err := transport.SearchManifest(ctx, remoteURL, "main", "cluster", "my-cred", "")
+	if err != nil {
+		t.Fatalf("SearchManifest failed: %v", err)
+	}
+	if snap.Target.Path != "apps/infra/nested/my-cred.yaml" {
+		t.Fatalf("expected path apps/infra/nested/my-cred.yaml, got %q", snap.Target.Path)
+	}
+	if string(snap.Content) != yamlContent {
+		t.Fatalf("content mismatch: %q", string(snap.Content))
+	}
+
+	// 2. Search for non-existent secret returns ErrNotFound
+	_, err = transport.SearchManifest(ctx, remoteURL, "main", "cluster", "non-existent", "")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}

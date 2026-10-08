@@ -198,6 +198,84 @@ func readFileAtHead(repo *git.Repository, path string) ([]byte, error) {
 	return io.ReadAll(content)
 }
 
+// SearchManifest walks the repository tree at branch HEAD and finds a SealedSecret
+// matching the specified name and namespace across all .yaml and .yml files.
+func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch, namespace, name, authRef string) (ManifestSnapshot, error) {
+	target := Target{Repository: repository, Branch: branch}
+	auth, err := t.authFor(ctx, target, authRef)
+	if err != nil {
+		return ManifestSnapshot{}, err
+	}
+	repo, err := t.openOrClone(ctx, target, auth)
+	if err != nil {
+		return ManifestSnapshot{}, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return ManifestSnapshot{}, fmt.Errorf("worktree: %w", err)
+	}
+	if pullErr := worktree.PullContext(ctx, &git.PullOptions{
+		RemoteName:    "origin",
+		ReferenceName: plumbing.NewBranchReferenceName(target.Branch),
+		Force:         true,
+		Auth:          auth,
+	}); pullErr != nil && !errors.Is(pullErr, git.NoErrAlreadyUpToDate) {
+		return ManifestSnapshot{}, fmt.Errorf("fetch %s: %w", remoteURL(target), pullErr)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return ManifestSnapshot{}, fmt.Errorf("head: %w", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return ManifestSnapshot{}, fmt.Errorf("commit: %w", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return ManifestSnapshot{}, fmt.Errorf("tree: %w", err)
+	}
+
+	fileIter := tree.Files()
+	defer fileIter.Close()
+
+	var matchedSnapshot ManifestSnapshot
+	var matched bool
+
+	err = fileIter.ForEach(func(f *object.File) error {
+		if matched {
+			return nil
+		}
+		if !strings.HasSuffix(f.Name, ".yaml") && !strings.HasSuffix(f.Name, ".yml") {
+			return nil
+		}
+		r, err := f.Reader()
+		if err != nil {
+			return nil
+		}
+		defer r.Close()
+		content, err := io.ReadAll(r)
+		if err != nil {
+			return nil
+		}
+		if MatchesSealedSecret(content, namespace, name) {
+			matchedSnapshot = ManifestSnapshot{
+				Target:  Target{Repository: repository, Branch: branch, Path: f.Name},
+				Content: content,
+				Commit:  head.Hash().String(),
+			}
+			matched = true
+		}
+		return nil
+	})
+	if err != nil {
+		return ManifestSnapshot{}, err
+	}
+	if !matched {
+		return ManifestSnapshot{}, ErrNotFound
+	}
+	return matchedSnapshot, nil
+}
+
 // DryRun returns the before/after diff without remote-side effects.
 // The transport fetches the live head, rejects a stale BaseCommit, and
 // never writes.

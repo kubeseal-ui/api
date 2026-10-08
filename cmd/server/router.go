@@ -32,6 +32,8 @@ func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers
 	r.Post("/secrets/{namespace}/{name}/diff", protected.DiffHandler)
 	r.Post("/gitops/dry-run", protected.GitOpsDryRunHandler)
 	r.Post("/gitops/deliver", protected.GitOpsDeliverHandler)
+	r.Get("/gitops/sync", protected.GitOpsSyncStatusHandler)
+	r.Post("/gitops/sync", protected.GitOpsSyncHandler)
 	r.Post("/secrets/{namespace}/{name}/reveal", protected.DecryptHandler)
 	r.Patch("/secrets/{namespace}/{name}/values/{key}", protected.ResealHandler)
 	r.Post("/secrets/encrypt", protected.EncryptHandler)

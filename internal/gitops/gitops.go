@@ -2,12 +2,15 @@
 package gitops
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
+
+	"sigs.k8s.io/yaml"
 )
 
 // Target identifies a file on a repository branch.
@@ -70,6 +73,7 @@ type ProposalResult struct {
 // remotes that need no credentials.
 type GitTransport interface {
 	ReadManifest(ctx context.Context, target Target, authRef string) (ManifestSnapshot, error)
+	SearchManifest(ctx context.Context, repository, branch, namespace, name, authRef string) (ManifestSnapshot, error)
 	DryRun(ctx context.Context, change Change, authRef string) (Diff, error)
 	PushBranch(ctx context.Context, change Change, authRef string) (PushResult, error)
 }
@@ -116,6 +120,7 @@ func (t *LocalTransport) Seed(target Target, content, commit string) {
 	defer t.mu.Unlock()
 	t.entries[target] = localEntry{[]byte(content), commit}
 }
+
 func (t *LocalTransport) ReadManifest(_ context.Context, target Target, _ string) (ManifestSnapshot, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -124,6 +129,59 @@ func (t *LocalTransport) ReadManifest(_ context.Context, target Target, _ string
 		return ManifestSnapshot{}, ErrNotFound
 	}
 	return ManifestSnapshot{target, append([]byte(nil), e.content...), e.commit}, nil
+}
+
+type partialSealedSecret struct {
+	Kind     string `yaml:"kind"`
+	Metadata struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"metadata"`
+	Spec struct {
+		Template struct {
+			Metadata struct {
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
+// MatchesSealedSecret inspects raw YAML content (single or multi-doc)
+// to check if it represents a SealedSecret matching the given name and namespace.
+func MatchesSealedSecret(content []byte, namespace, name string) bool {
+	docs := bytes.Split(content, []byte("\n---"))
+	for _, docBytes := range docs {
+		var doc partialSealedSecret
+		if err := yaml.Unmarshal(docBytes, &doc); err != nil {
+			continue
+		}
+		if doc.Kind != "SealedSecret" || doc.Metadata.Name != name {
+			continue
+		}
+		manifestNs := doc.Metadata.Namespace
+		if manifestNs == "" {
+			manifestNs = doc.Spec.Template.Metadata.Namespace
+		}
+		if manifestNs != "" && manifestNs != namespace {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (t *LocalTransport) SearchManifest(_ context.Context, repository, branch, namespace, name, _ string) (ManifestSnapshot, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for target, entry := range t.entries {
+		if target.Repository != repository || target.Branch != branch {
+			continue
+		}
+		if MatchesSealedSecret(entry.content, namespace, name) {
+			return ManifestSnapshot{Target: target, Content: append([]byte(nil), entry.content...), Commit: entry.commit}, nil
+		}
+	}
+	return ManifestSnapshot{}, ErrNotFound
 }
 func (t *LocalTransport) DryRun(ctx context.Context, change Change, _ string) (Diff, error) {
 	s, err := t.ReadManifest(ctx, change.Target, "")

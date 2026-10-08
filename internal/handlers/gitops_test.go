@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kubeseal-ui/api/internal/gitops"
+	"github.com/kubeseal-ui/api/internal/kubernetes"
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
@@ -134,3 +135,121 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 		t.Fatalf("unexpected retry result: %+v", result)
 	}
 }
+
+func TestGitOpsSyncStatusOptionADiscovery(t *testing.T) {
+	// Seed a secret in Git located in an arbitrary subfolder (not at default pathTemplate)
+	gitYAML := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: secret-value\n"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{
+		Repository: "platform",
+		Branch:     "main",
+		Path:       "custom/apps/secrets/kubeseal-cred.yaml",
+	}, gitYAML, "base-123")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{
+		Namespace:    "cluster",
+		Repository:   "platform",
+		Branch:       "main",
+		PathTemplate: "cluster/sealed-secrets/{namespace}/{name}.yaml",
+		AuthRef:      "auth",
+		Mode:         policy.GitDeliveryDirect,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	liveYAML := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\n  resourceVersion: \"12345\"\n  generation: 1\nspec:\n  encryptedData:\n    key: secret-value\n"
+	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{
+		{Name: "kubeseal-cred", Namespace: "cluster", YAML: liveYAML},
+	}}
+
+	h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+	req := protectedRequest(http.MethodGet, "/api/v1/gitops/sync?namespace=cluster&name=kubeseal-cred", "", protectedIdentity(policy.MetadataRead))
+	rr := httptest.NewRecorder()
+	h.GitOpsSyncStatusHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var status map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+
+	if status["file_path"] != "custom/apps/secrets/kubeseal-cred.yaml" {
+		t.Fatalf("expected discovered path custom/apps/secrets/kubeseal-cred.yaml, got %v", status["file_path"])
+	}
+	if status["drift_status"] != "in-sync" {
+		t.Fatalf("expected in-sync (ignoring volatile metadata), got %v", status["drift_status"])
+	}
+	if status["base_commit"] != "base-123" {
+		t.Fatalf("expected base-123, got %v", status["base_commit"])
+	}
+}
+
+func TestGitOpsSyncExecuteLiveToGit(t *testing.T) {
+	// Secret exists in cluster and in Git at a discovered path with drift
+	gitYAML := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: old-cipher\n"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{
+		Repository: "platform",
+		Branch:     "main",
+		Path:       "custom/apps/secrets/kubeseal-cred.yaml",
+	}, gitYAML, "commit-old")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{
+		Namespace:    "cluster",
+		Repository:   "platform",
+		Branch:       "main",
+		PathTemplate: "cluster/sealed-secrets/{namespace}/{name}.yaml",
+		AuthRef:      "auth",
+		Mode:         policy.GitDeliveryDirect,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	liveYAML := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: new-live-cipher\n"
+	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{
+		{Name: "kubeseal-cred", Namespace: "cluster", YAML: liveYAML},
+	}}
+
+	h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+	body := `{"namespace":"cluster","name":"kubeseal-cred","base_commit":"commit-old"}`
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/sync", body, protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "sync-key-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsSyncHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var res map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verifies target path used the Option A discovered path
+	if res["file_path"] != "custom/apps/secrets/kubeseal-cred.yaml" {
+		t.Fatalf("expected sync to target discovered path, got %v", res["file_path"])
+	}
+	if res["argocd_sync_verified"] != false {
+		t.Fatalf("expected argocd_sync_verified to be false")
+	}
+
+	// Verify content pushed to Git matches the live YAML
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{
+		Repository: "platform",
+		Branch:     "main",
+		Path:       "custom/apps/secrets/kubeseal-cred.yaml",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != liveYAML {
+		t.Fatalf("Git content mismatch: expected %q, got %q", liveYAML, string(snapshot.Content))
+	}
+}
+

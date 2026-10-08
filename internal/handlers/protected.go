@@ -107,7 +107,8 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 	if !ok {
 		return status, nil
 	}
-	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: mapping.RenderPath(namespace, name)}
+	defaultPath := mapping.RenderPath(namespace, name)
+	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}
 	status = map[string]any{
 		"managed": true, "in_sync_with_live": false, "drift": kubernetes.DriftUnknown,
 		"file_path": target.Path, "repository": target.Repository, "branch": target.Branch,
@@ -116,13 +117,36 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 	if target.Path == "" {
 		return status, errors.New("invalid Git mapping")
 	}
+
+	// Two-tier discovery (Option A):
+	// Tier 1: fast-path check at configured pathTemplate
 	snapshot, err := h.GitTransport.ReadManifest(r.Context(), target, mapping.AuthRef)
+	if err != nil && errors.Is(err, gitops.ErrNotFound) {
+		// Tier 2: Option A repository tree walk fallback
+		snapshot, err = h.GitTransport.SearchManifest(r.Context(), mapping.Repository, mapping.Branch, namespace, name, mapping.AuthRef)
+	}
+
 	if err != nil {
+		if errors.Is(err, gitops.ErrNotFound) {
+			if liveYAML != "" {
+				status["drift"] = "live_only"
+			}
+			return status, nil
+		}
 		return status, err
 	}
+
+	// Discovered path
+	target.Path = snapshot.Target.Path
+	status["file_path"] = target.Path
 	status["base_commit"] = snapshot.Commit
+
 	if baseCommit != "" && snapshot.Commit != baseCommit {
 		return status, &gitops.BaseCommitError{Expected: baseCommit, Actual: snapshot.Commit}
+	}
+	if liveYAML == "" {
+		status["drift"] = "git_only"
+		return status, nil
 	}
 	liveCanonical, err := canonicalSealedSecret(liveYAML)
 	if err != nil {
@@ -142,11 +166,27 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 }
 
 func canonicalSealedSecret(manifest string) ([]byte, error) {
-	var value any
-	if err := yaml.Unmarshal([]byte(manifest), &value); err != nil {
+	var m map[string]any
+	if err := yaml.Unmarshal([]byte(manifest), &m); err != nil {
 		return nil, err
 	}
-	return json.Marshal(value)
+	// Strip volatile Kubernetes runtime fields so canonical comparison accurately
+	// compares spec and stable metadata without false divergences.
+	delete(m, "status")
+	if meta, ok := m["metadata"].(map[string]any); ok {
+		delete(meta, "resourceVersion")
+		delete(meta, "uid")
+		delete(meta, "generation")
+		delete(meta, "creationTimestamp")
+		delete(meta, "managedFields")
+		if ann, ok := meta["annotations"].(map[string]any); ok {
+			delete(ann, "kubectl.kubernetes.io/last-applied-configuration")
+			if len(ann) == 0 {
+				delete(meta, "annotations")
+			}
+		}
+	}
+	return json.Marshal(m)
 }
 
 func encryptedChecksum(value string) string {
