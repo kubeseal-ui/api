@@ -466,9 +466,10 @@ func printStartupBanner(version string, port int) {
  | |/ / | | | _ ) __/ __| __| /_\ | |     /_\ | _ \_ _|
  | ' <| |_| | _ \ _|\__ \ _| / _ \| |__  / _ \|  _/| | 
  |_|\_\\___/|___/___|___/___/_/ \_\____|/_/ \_\_| |___|
+
 `
 	fmt.Print(banner)
-	fmt.Printf("   Kubeseal UI API Server  •  Version: %s  •  Port: :%d\n\n", version, port)
+	fmt.Printf("\tKubeseal UI API Server  •  Version: %s  •  Port: :%d\n\n", version, port)
 }
 
 // devPrivateKey generates a deterministic RSA key for local development.
