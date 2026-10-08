@@ -18,6 +18,13 @@ import (
 // SecurityEvent is one bounded audit record for a sensitive operation.
 // The fields mirror the handlers.SecurityEventSink contract; key values
 // and diff bodies never appear here by construction.
+//
+// Secret is the SealedSecret *name*, not secret material. It is emitted
+// under the attribute key "resource" rather than "secret" on purpose:
+// the redacting handler's "secret" marker matches attribute keys by
+// substring, so an attribute literally named "secret" would have every
+// audit record's resource name replaced with [REDACTED] — leaving the
+// event unable to say which secret was touched.
 type SecurityEvent struct {
 	Operation string
 	Subject   string
@@ -38,7 +45,7 @@ func (e SecurityEvent) eventAttrs() []any {
 		slog.String("operation", e.Operation),
 		slog.String("subject", e.Subject),
 		slog.String("namespace", e.Namespace),
-		slog.String("secret", e.Secret),
+		slog.String("resource", e.Secret),
 		slog.String("key", e.Key),
 		slog.String("mode", e.Mode),
 		slog.String("result", e.Result),

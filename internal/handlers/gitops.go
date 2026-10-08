@@ -14,7 +14,18 @@ import (
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
-func (h *ProtectedHandlers) gitChange(r *http.Request) (gitops.Change, policy.GitMapping, error) {
+// gitChangeRequest is the validated input shared by the GitOps dry-run
+// and delivery endpoints. It carries the namespace and name alongside the
+// change because the proposal branch is derived from the *identity* of the
+// secret (namespace/name), not from the repository or file path.
+type gitChangeRequest struct {
+	Change    gitops.Change
+	Mapping   policy.GitMapping
+	Namespace string
+	Name      string
+}
+
+func (h *ProtectedHandlers) gitChange(r *http.Request) (gitChangeRequest, error) {
 	var req struct {
 		Namespace  string `json:"namespace"`
 		Name       string `json:"name"`
@@ -23,30 +34,35 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitops.Change, policy.Gi
 		TargetPath string `json:"target_path,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !validName(req.Namespace) || !validName(req.Name) || req.YAML == "" || req.BaseCommit == "" {
-		return gitops.Change{}, policy.GitMapping{}, errors.New("invalid request")
+		return gitChangeRequest{}, errors.New("invalid request")
 	}
 	if h.GitMappings == nil || h.GitTransport == nil {
-		return gitops.Change{}, policy.GitMapping{}, errors.New("gitops unavailable")
+		return gitChangeRequest{}, errors.New("gitops unavailable")
 	}
 	mapping, ok := h.GitMappings.GetGitMapping(req.Namespace)
 	if !ok {
-		return gitops.Change{}, policy.GitMapping{}, errors.New("mapping not found")
+		return gitChangeRequest{}, errors.New("mapping not found")
 	}
-	
+
 	// If targetPath provided, validate it against the mapping's allowed paths
 	var path string
 	if req.TargetPath != "" {
 		if !mapping.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
-			return gitops.Change{}, policy.GitMapping{}, errors.New("target path not allowed by namespace mapping")
+			return gitChangeRequest{}, errors.New("target path not allowed by namespace mapping")
 		}
 		path = req.TargetPath
 	} else {
 		path = mapping.RenderPath(req.Namespace, req.Name)
 	}
 	if path == "" {
-		return gitops.Change{}, policy.GitMapping{}, errors.New("invalid mapping")
+		return gitChangeRequest{}, errors.New("invalid mapping")
 	}
-	return gitops.Change{Target: gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}, BaseCommit: req.BaseCommit, Content: []byte(req.YAML)}, mapping, nil
+	return gitChangeRequest{
+		Change:    gitops.Change{Target: gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}, BaseCommit: req.BaseCommit, Content: []byte(req.YAML)},
+		Mapping:   mapping,
+		Namespace: req.Namespace,
+		Name:      req.Name,
+	}, nil
 }
 
 // proposalBranch derives the server-side proposal branch for a change.
@@ -58,12 +74,13 @@ func proposalBranch(namespace, name string) string {
 }
 
 func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.Request) {
-	change, mapping, err := h.gitChange(r)
+	cr, err := h.gitChange(r)
 	if err != nil {
 		h.emitSecurityEvent(r, "gitops_dry_run", "", "", "", "", "failed")
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
+	change, mapping := cr.Change, cr.Mapping
 	if !hasGitCapability(r, mapping.Mode) {
 		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
@@ -90,12 +107,13 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 }
 
 func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.Request) {
-	change, mapping, err := h.gitChange(r)
+	cr, err := h.gitChange(r)
 	if err != nil {
 		h.emitSecurityEvent(r, "gitops_delivery", "", "", "", "", "failed")
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
+	change, mapping := cr.Change, cr.Mapping
 	if !hasGitCapability(r, mapping.Mode) {
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "denied")
@@ -118,8 +136,11 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	}
 	// Proposal namespaces push a dedicated branch, never the mapped
 	// direct branch. Direct namespaces push the mapped branch itself.
+	// The branch is derived from the secret's identity (namespace/name) so
+	// that a retry — or the same change delivered through the sync endpoint —
+	// reconciles onto one branch instead of scattering per-path branches.
 	if mapping.Mode == policy.GitDeliveryProposal {
-		change.Branch = proposalBranch(change.Target.Repository, change.Target.Path)
+		change.Branch = proposalBranch(cr.Namespace, cr.Name)
 	}
 	pushed, err := h.GitTransport.PushBranch(r.Context(), change, mapping.AuthRef)
 	if err != nil {

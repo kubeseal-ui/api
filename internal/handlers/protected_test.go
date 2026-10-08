@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +22,15 @@ import (
 type protectedCertProvider struct{}
 
 func (protectedCertProvider) Get(context.Context) (*x509.Certificate, error) { return nil, nil }
+
+// errorCertProvider fails every encryption request. It exists so a test
+// can tell "rejected by an authorization check" (403) apart from
+// "authorized, then failed downstream" (502).
+type errorCertProvider struct{}
+
+func (errorCertProvider) Get(context.Context) (*x509.Certificate, error) {
+	return nil, errors.New("no certificate configured")
+}
 
 type protectedK8s struct {
 	namespaces []kubernetes.Namespace
@@ -384,6 +394,45 @@ func TestEncryptRejectsOversizedBody(t *testing.T) {
 	h.EncryptHandler(rr, req)
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", rr.Code)
+	}
+}
+
+// TestEncryptClusterWideRequiresAccessManage verifies that asking for a
+// cluster-wide scope needs access:manage on top of secret:seal. A
+// cluster-wide SealedSecret can be unsealed in any namespace, so
+// secret:seal alone must not be enough to produce one.
+func TestEncryptClusterWideRequiresAccessManage(t *testing.T) {
+	body := `{"namespace":"ns","name":"name","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: name\n","scope":"cluster-wide"}`
+
+	// errorCertProvider makes encryption fail *after* authorization, so a
+	// 403 below can only come from the capability check.
+	h := NewProtectedHandlers(protectedK8s{}, crypto.New(errorCertProvider{}, nil), false)
+
+	denied := httptest.NewRecorder()
+	h.EncryptHandler(denied, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", body, protectedIdentity(policy.SecretSeal)))
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 without access:manage: %s", denied.Code, denied.Body.String())
+	}
+	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied", "")
+
+	allowed := httptest.NewRecorder()
+	h.EncryptHandler(allowed, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", body, protectedIdentity(policy.SecretSeal, policy.AccessManage)))
+	if allowed.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (authorized, cert provider broken): %s", allowed.Code, allowed.Body.String())
+	}
+}
+
+// TestEncryptNamespaceScopedDoesNotRequireAccessManage is the control:
+// strict and namespace-wide scopes stay reachable with secret:seal alone.
+func TestEncryptNamespaceScopedDoesNotRequireAccessManage(t *testing.T) {
+	h := NewProtectedHandlers(protectedK8s{}, crypto.New(errorCertProvider{}, nil), false)
+	for _, scope := range []string{"strict", "namespace-wide"} {
+		rr := httptest.NewRecorder()
+		body := `{"namespace":"ns","name":"name","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: name\n","scope":"` + scope + `"}`
+		h.EncryptHandler(rr, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", body, protectedIdentity(policy.SecretSeal)))
+		if rr.Code != http.StatusBadGateway {
+			t.Fatalf("scope %s: status = %d, want 502 (authorized): %s", scope, rr.Code, rr.Body.String())
+		}
 	}
 }
 

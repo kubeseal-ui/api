@@ -113,7 +113,13 @@ func RecordHTTPRequest(handler, method string, status int, duration time.Duratio
 	))
 }
 
-// RecordSecretOperation records one seal, reveal, or patch outcome.
+// RecordSecretOperation records one seal, reveal, diff, or patch outcome.
+// operation is a fixed endpoint name (seal | reveal | diff | patch); result
+// is the bounded outcome the handler actually reached (success | denied |
+// disabled | invalid_request | not_found | conflict | failed), never a
+// constant placeholder — see the opResult* constants in the handlers
+// package. The CryptoFailures alert filters on result="failed", so a
+// caller that collapses outcomes into one value silently disables it.
 func RecordSecretOperation(operation, result string) {
 	if err := Instruments(); err != nil || secretOperations == nil {
 		return

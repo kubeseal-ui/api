@@ -52,6 +52,25 @@ func (h *ProtectedHandlers) emitSecurityEvent(r *http.Request, operation, namesp
 	metrics.RecordSecretOperation(operation, result)
 }
 
+// Bounded outcomes for sealed-secret operations. These are the only
+// values the `result` label of kubeseal_ui_sealed_secret_operations_total
+// and the security event stream may carry.
+//
+// They must reflect what actually happened. Emitting a constant value
+// (previously the literal "attempt") makes success, failure, and denial
+// indistinguishable in both the metric and the audit trail — which hides
+// failures from alerting and makes the audit record useless for proving
+// what a reveal did.
+const (
+	opResultSuccess        = "success"
+	opResultDenied         = "denied"
+	opResultDisabled       = "disabled"
+	opResultInvalidRequest = "invalid_request"
+	opResultNotFound       = "not_found"
+	opResultConflict       = "conflict"
+	opResultFailed         = "failed"
+)
+
 // NewProtectedHandlers constructs handlers for protected resources.
 func NewProtectedHandlers(k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, enableDecrypt bool) *ProtectedHandlers {
 	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, idempotencyKeys: make(map[string]struct{})}
@@ -444,6 +463,13 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+	// A cluster-wide SealedSecret can be decrypted in any namespace, so it
+	// widens the blast radius beyond the caller's namespace mappings.
+	// Crypto-wrapper contract: cluster-wide creation requires access:manage
+	// on top of secret:seal.
+	if scope == crypto.ClusterWideScope && !requireCapability(w, r, policy.AccessManage) {
+		return
+	}
 	sealed, err := h.Crypto.EncryptYAML(r.Context(), req.YAML, req.Namespace, req.Name, scope)
 	if err != nil {
 		slog.Error("encrypt secret failed", "namespace", req.Namespace, "name", req.Name, "request_id", requestID(r), "error", err)
@@ -461,11 +487,18 @@ func validName(value string) bool {
 // DecryptHandler returns one requested key only after internal decryption.
 func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Request) {
 	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
-	defer h.emitSecurityEvent(r, "reveal", namespace, name, "", "", "attempt")
+	// key is captured by the deferred emit and populated once the body is
+	// parsed, so a decoded attempt records which key was requested.
+	var key string
+	result := opResultFailed
+	defer func() { h.emitSecurityEvent(r, "reveal", namespace, name, key, "", result) }()
+
 	if !requireCapability(w, r, policy.SecretDecrypt) {
+		result = opResultDenied
 		return
 	}
 	if !h.EnableDecrypt || h.Crypto == nil {
+		result = opResultDisabled
 		writeError(w, r, http.StatusForbidden, "DECRYPT_DISABLED", "Decrypt is disabled")
 		return
 	}
@@ -477,41 +510,56 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		BaseCommit string `json:"base_commit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Key) == "" || strings.TrimSpace(req.BaseCommit) == "" {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
-	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
+	key = strings.TrimSpace(req.Key)
+	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), namespace, name)
 	if err != nil || secret.YAML == "" {
+		result = opResultNotFound
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
 	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
 	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
 	plain, err := h.Crypto.DecryptYAML(r.Context(), secret.YAML)
 	if err != nil {
-		slog.Error("decrypt sealed secret failed", "namespace", namespace, "name", name, "request_id", requestID(r), "error", err)
+		result = opResultFailed
+		slog.Error("decrypt sealed secret failed", "namespace", namespace, "name", name, "key", key, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "DECRYPTION_FAILED", "Unable to decrypt secret")
 		return
 	}
 	value, ok := extractStringDataKey(plain, req.Key)
 	if !ok {
+		result = opResultNotFound
 		writeError(w, r, http.StatusNotFound, "KEY_NOT_FOUND", "Key not found")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	jsonResponse(w, http.StatusOK, map[string]string{"key": req.Key, "value": value})
+	result = opResultSuccess
 }
 
 // DiffHandler computes an encrypted before/after diff without persisting it.
 func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) {
 	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
+	// Diff decrypts the complete Secret internally, so it is audited like
+	// reveal and patch even though it returns ciphertext only.
+	var key string
+	result := opResultFailed
+	defer func() { h.emitSecurityEvent(r, "diff", namespace, name, key, "", result) }()
+
 	if !requireCapability(w, r, policy.SecretSeal, policy.SecretDecrypt) {
+		result = opResultDenied
 		return
 	}
 	if !h.EnableDecrypt || h.Crypto == nil {
+		result = opResultDisabled
 		writeError(w, r, http.StatusForbidden, "DECRYPT_DISABLED", "Decrypt is disabled")
 		return
 	}
@@ -522,50 +570,63 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		BaseCommit string `json:"base_commit"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil || strings.TrimSpace(req.Key) == "" || strings.TrimSpace(req.BaseCommit) == "" {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
+	key = strings.TrimSpace(req.Key)
 	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key")
 		return
 	}
 	if !h.claimIdempotency(r) {
+		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
 		return
 	}
 	op := crypto.ResealOp(req.Operation)
 	if op != crypto.ResealReplace && op != crypto.ResealAdd && op != crypto.ResealDelete {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_OPERATION", "Invalid operation")
 		return
 	}
 	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), namespace, name)
 	if err != nil || secret.YAML == "" {
+		result = opResultNotFound
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
 	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
 	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
 	after, err := h.Crypto.Reseal(r.Context(), secret.YAML, req.Key, req.Value, op)
 	if err != nil {
+		result = opResultFailed
 		slog.Error("reseal secret failed", "namespace", namespace, "name", name, "key", req.Key, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to reseal secret")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	jsonResponse(w, http.StatusOK, map[string]string{"before": secret.YAML, "after": after, "key": req.Key, "base_commit": req.BaseCommit, "checksum": encryptedChecksum(after)})
+	result = opResultSuccess
 }
 
 // ResealHandler mutates exactly one encrypted key.
 func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request) {
 	namespace, name, key := chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), chi.URLParam(r, "key")
-	defer h.emitSecurityEvent(r, "patch", namespace, name, key, "", "attempt")
+	result := opResultFailed
+	defer func() { h.emitSecurityEvent(r, "patch", namespace, name, key, "", result) }()
+
 	if !requireCapability(w, r, policy.SecretSeal, policy.SecretDecrypt) {
+		result = opResultDenied
 		return
 	}
 	if !h.EnableDecrypt || h.Crypto == nil {
+		result = opResultDisabled
 		writeError(w, r, http.StatusForbidden, "DECRYPT_DISABLED", "Decrypt is disabled")
 		return
 	}
@@ -578,40 +639,48 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		BaseCommit string `json:"base_commit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BaseCommit) == "" {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
 	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key")
 		return
 	}
 	if !h.claimIdempotency(r) {
+		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
 		return
 	}
 	op := crypto.ResealOp(req.Operation)
 	if op != crypto.ResealReplace && op != crypto.ResealAdd && op != crypto.ResealDelete {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_OPERATION", "Invalid operation")
 		return
 	}
-	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
+	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), namespace, name)
 	if err != nil || secret.YAML == "" {
+		result = opResultNotFound
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
 	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
 	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
-	sealed, err := h.Crypto.Reseal(r.Context(), secret.YAML, chi.URLParam(r, "key"), req.Value, op)
+	sealed, err := h.Crypto.Reseal(r.Context(), secret.YAML, key, req.Value, op)
 	if err != nil {
+		result = opResultFailed
 		slog.Error("reseal secret failed", "namespace", namespace, "name", name, "key", key, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to reseal secret")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed, "checksum": encryptedChecksum(sealed), "diff_before": secret.YAML, "diff_after": sealed})
+	result = opResultSuccess
 }
 
 func extractStringDataKey(yamlText, key string) (string, bool) {

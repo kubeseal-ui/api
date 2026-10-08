@@ -134,6 +134,13 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 	if result.ProposalURL != "https://review.test/1" || result.ArgoVerified {
 		t.Fatalf("unexpected retry result: %+v", result)
 	}
+	// The proposal branch names the secret's identity, not the repository or
+	// the file path, so both proposal endpoints and every retry land on one
+	// branch. Deriving it from the path instead produced a different branch
+	// per rendered path and broke retry reconciliation.
+	if result.Branch != "kubeseal-ui/payments-api" {
+		t.Fatalf("branch = %q, want kubeseal-ui/payments-api", result.Branch)
+	}
 }
 
 func TestGitOpsSyncStatusOptionADiscovery(t *testing.T) {
