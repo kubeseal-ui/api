@@ -99,7 +99,7 @@ func requireCapability(w http.ResponseWriter, r *http.Request, required ...polic
 }
 
 func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML, baseCommit string) (map[string]any, error) {
-	status := map[string]any{"managed": false, "in_sync_with_live": false, "drift": kubernetes.DriftUnknown}
+	status := map[string]any{"managed": false, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 	if h.GitMappings == nil || h.GitTransport == nil {
 		return status, nil
 	}
@@ -110,7 +110,7 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 	defaultPath := mapping.RenderPath(namespace, name)
 	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}
 	status = map[string]any{
-		"managed": true, "in_sync_with_live": false, "drift": kubernetes.DriftUnknown,
+		"managed": true, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown),
 		"file_path": target.Path, "repository": target.Repository, "branch": target.Branch,
 		"delivery_mode": string(mapping.Mode),
 	}
@@ -157,11 +157,11 @@ func (h *ProtectedHandlers) gitStatus(r *http.Request, namespace, name, liveYAML
 		return status, err
 	}
 	if bytes.Equal(liveCanonical, gitCanonical) {
-		status["drift"] = kubernetes.DriftSync
+		status["drift"] = string(kubernetes.DriftSync)
 		status["in_sync_with_live"] = true
 		return status, nil
 	}
-	status["drift"] = kubernetes.DriftDiverged
+	status["drift"] = string(kubernetes.DriftDiverged)
 	return status, nil
 }
 
@@ -325,7 +325,7 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 	for i := range secrets {
 		git, gitErr := h.gitStatus(r, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "")
 		if gitErr != nil {
-			git = map[string]any{"managed": true, "in_sync_with_live": false, "drift": kubernetes.DriftUnknown}
+			git = map[string]any{"managed": true, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 		}
 		items = append(items, map[string]any{
 			"name": secrets[i].Name, "namespace": secrets[i].Namespace,
@@ -440,7 +440,7 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
-	if gitErr != nil || git["drift"] != kubernetes.DriftSync {
+	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
@@ -497,7 +497,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
-	if gitErr != nil || git["drift"] != kubernetes.DriftSync {
+	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
@@ -552,7 +552,7 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	git, gitErr := h.gitStatus(r, namespace, name, secret.YAML, req.BaseCommit)
-	if gitErr != nil || git["drift"] != kubernetes.DriftSync {
+	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
