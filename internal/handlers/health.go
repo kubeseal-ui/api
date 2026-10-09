@@ -4,6 +4,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/kubeseal-ui/api/internal/config"
@@ -14,9 +15,11 @@ import (
 func jsonResponse(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	// Encoding into a ResponseWriter whose status is already written can only fail on a broken
-	// connection, where the request is half-served and there is nothing to recover.
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// The status line is already committed, so a broken connection has no response left to turn
+		// this into; only the transport error is logged.
+		slog.Error("failed to encode response body", "error", err)
+	}
 }
 
 // Healthz is the kubelet liveness probe: 200 as long as the process serves HTTP. It deliberately
