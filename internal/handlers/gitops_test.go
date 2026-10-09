@@ -346,3 +346,327 @@ func TestGitOpsSyncExecuteLiveToGit(t *testing.T) {
 	}
 }
 
+// TestGitOpsSyncRefusesALiveObjectThatIsNotASealedSecret covers the sync write
+// path's share of the manifest guard.
+//
+// Sync reads its payload from Kubernetes rather than from the request, so the
+// payload is a SealedSecret for this identity by construction and the guard
+// cannot fire today. It is pinned anyway because the guard is what makes
+// "nothing but a manifest this mapping owns is committed" a property of the
+// product rather than of two of its three write paths — and a write path that
+// is exempt only because it currently cannot be reached is a hole waiting for
+// the next call site.
+func TestGitOpsSyncRefusesALiveObjectThatIsNotASealedSecret(t *testing.T) {
+	const existing = "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: old-cipher\n"
+	const path = "custom/apps/secrets/kubeseal-cred.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, existing, "commit-old")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{
+		Namespace: "cluster", Repository: "platform", Branch: "main",
+		PathTemplate: "cluster/sealed-secrets/{namespace}/{name}.yaml",
+		AuthRef:      "auth", Mode: policy.GitDeliveryDirect,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A live object that is not a SealedSecret: the identity it is stored under
+	// says nothing about the manifest inside it, which is exactly the gap the
+	// guard closes.
+	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{
+		{Name: "kubeseal-cred", Namespace: "cluster", YAML: "apiVersion: v1\nkind: Secret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nstringData:\n  password: plaintext\n"},
+	}}
+
+	h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+	body := `{"namespace":"cluster","name":"kubeseal-cred","base_commit":"commit-old"}`
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/sync", body, protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "sync-refused-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsSyncHandler(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "INVALID_MANIFEST", "Live object is not a SealedSecret for this name and namespace", "")
+
+	// The refusal is only worth anything if the repository is untouched.
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: path}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != existing {
+		t.Fatalf("Git content changed despite the refusal: %q", string(snapshot.Content))
+	}
+}
+
+// deliveryManifest is a SealedSecret for one identity with a distinguishable
+// ciphertext, so a test can tell which content a repository file holds.
+func deliveryManifest(namespace, name, ciphertext string) string {
+	return strings.Replace(sealedManifest(namespace, name), "ciphertext", ciphertext, 1)
+}
+
+// TestGitOpsDeliverResolvesTheDiscoveredPathWithoutBeingTold covers the write
+// side of source discovery.
+//
+// The mapping's template is the *default* file, not necessarily the one the
+// manifest lives in: when a Secret is kept in an application subdirectory the
+// templated path is vacant, and a delivery that assumed the template would
+// create a second file claiming an identity that already has one — leaving the
+// application to read the stale ciphertext from the file nothing updated.
+//
+// The mapping here has no AllowedPaths on purpose: that is the configuration
+// in which the mapping's own rule admits nothing but the template, so a client
+// cannot name the discovered file and only the server's own discovery can put
+// the change where it belongs.
+func TestGitOpsDeliverResolvesTheDiscoveredPathWithoutBeingTold(t *testing.T) {
+	const discovered = "custom/apps/secrets/api.yaml"
+	const templated = "clusters/payments/api.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: discovered}, deliveryManifest("payments", "api", "old-cipher"), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	updated := deliveryManifest("payments", "api", "new-cipher")
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", gitChangeBody(t, "payments", "api", updated, "abc"), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "deliver-discovered-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res["file_path"] != discovered {
+		t.Fatalf("file_path = %v, want %s", res["file_path"], discovered)
+	}
+
+	// The file that was found is the file that was written...
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: discovered}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != updated {
+		t.Fatalf("reviewed file not updated: %q", string(snapshot.Content))
+	}
+	// ...and the template is still vacant, which is what says no second file
+	// was created for this identity.
+	if _, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: templated}, ""); !errors.Is(err, gitops.ErrNotFound) {
+		t.Fatalf("a second file was created at the templated path %s (err=%v)", templated, err)
+	}
+}
+
+// TestGitOpsDeliverRefusesAPathThatIsNotThisSecrets is the other half of that
+// rule: the client may choose among files that already belong to this
+// SealedSecret, and refusing is what it gets for choosing any other.
+//
+// The mapping admits only its template, and the manifest is there — so a client
+// naming a different file is asking to write somewhere this identity has no
+// manifest, which is a bad request rather than a silent redirect to a file the
+// operator never reviewed.
+func TestGitOpsDeliverRefusesAPathThatIsNotThisSecrets(t *testing.T) {
+	const templated = "clusters/payments/api.yaml"
+	const elsewhere = "clusters/payments/other.yaml"
+	existing := deliveryManifest("payments", "api", "old-cipher")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: templated}, existing, "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	body, err := json.Marshal(map[string]string{
+		"namespace": "payments", "name": "api", "base_commit": "abc",
+		"yaml": deliveryManifest("payments", "api", "new-cipher"), "target_path": elsewhere,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "deliver-refused-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping", "")
+
+	// Nothing was written anywhere: not the path that was asked for, and not
+	// the template it was refused in favour of.
+	if _, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: elsewhere}, ""); !errors.Is(err, gitops.ErrNotFound) {
+		t.Fatalf("refused delivery wrote %s (err=%v)", elsewhere, err)
+	}
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: templated}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != existing {
+		t.Fatalf("refused delivery wrote the template: %q", string(snapshot.Content))
+	}
+}
+
+// TestGitOpsDeliverRefusesADifferentAllowedPathWhenTheFileExists is the case
+// the allowlist alone would let through: the client names a path the mapping
+// permits, but this identity's manifest is somewhere else.
+//
+// Honouring the name would write the reviewed ciphertext to a second file and
+// leave the application reading the first, which is the duplicate this whole
+// rule exists to prevent — and it would do it under a grant, so no policy check
+// would ever flag it. The allowlist decides where a *new* manifest may go; it
+// does not let a caller move one that already exists.
+func TestGitOpsDeliverRefusesADifferentAllowedPathWhenTheFileExists(t *testing.T) {
+	const templated = "clusters/payments/api.yaml"
+	const allowed = "custom/apps/api.yaml"
+	existing := deliveryManifest("payments", "api", "old-cipher")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: templated}, existing, "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	body, err := json.Marshal(map[string]string{
+		"namespace": "payments", "name": "api", "base_commit": "abc",
+		"yaml": deliveryManifest("payments", "api", "new-cipher"), "target_path": allowed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "deliver-allowed-elsewhere-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping", "")
+
+	if _, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: allowed}, ""); !errors.Is(err, gitops.ErrNotFound) {
+		t.Fatalf("refused delivery wrote the allowed path %s (err=%v)", allowed, err)
+	}
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: templated}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != existing {
+		t.Fatalf("refused delivery wrote the file it lives in: %q", string(snapshot.Content))
+	}
+}
+
+// TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet pins the
+// default destination against the allowlist.
+//
+// An allowlist that does not cover the template — allowed directories elsewhere
+// in the repository, which is the common shape — would otherwise make the
+// mapping's own default an invalid destination. That is the path
+// /secrets/encrypt echoes back for a create the operator chose no path for, so
+// the create would be handed a target_path the delivery endpoints then refuse,
+// and the failure would land on the last step of a flow that had already
+// sealed the Secret.
+func TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet(t *testing.T) {
+	const templated = "clusters/payments/api.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/other.yaml"}, "other", "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	created := deliveryManifest("payments", "new", "fresh-cipher")
+	body, err := json.Marshal(map[string]string{
+		"namespace": "payments", "name": "new", "base_commit": "abc",
+		"yaml": created, "target_path": templated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "deliver-template-with-allowlist-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res["file_path"] != templated {
+		t.Fatalf("file_path = %v, want the mapping's template %s", res["file_path"], templated)
+	}
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: templated}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != created {
+		t.Fatalf("template holds %q, want the created manifest", string(snapshot.Content))
+	}
+}
+//
+// Without this the duplicate fix could pass by refusing every named path, which
+// would take the create flow's target-directory selection away with it.
+// TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew is the
+// control for the refusals above: a manifest with no file yet is exactly the
+// case the allowlist is for, so the named path is honoured here.
+//
+// Without this the duplicate fix could pass by refusing every named path, which
+// would take the create flow's target-directory selection away with it.
+func TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew(t *testing.T) {
+	const templated = "clusters/payments/api.yaml"
+	const chosen = "custom/apps/new.yaml"
+	// Another file on the same branch, so the vacant target is built on a head.
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/other.yaml"}, "other", "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	created := deliveryManifest("payments", "new", "fresh-cipher")
+	body, err := json.Marshal(map[string]string{
+		"namespace": "payments", "name": "new", "base_commit": "abc",
+		"yaml": created, "target_path": chosen,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "deliver-new-allowed-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res["file_path"] != chosen {
+		t.Fatalf("file_path = %v, want %s", res["file_path"], chosen)
+	}
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: chosen}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != created {
+		t.Fatalf("chosen path holds %q, want the created manifest", string(snapshot.Content))
+	}
+	if _, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: templated}, ""); !errors.Is(err, gitops.ErrNotFound) {
+		t.Fatalf("the create also wrote the template %s (err=%v)", templated, err)
+	}
+}
+

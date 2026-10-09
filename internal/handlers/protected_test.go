@@ -243,6 +243,11 @@ type resealResponse struct {
 	DiffBefore string `json:"diff_before"`
 	DiffAfter  string `json:"diff_after"`
 	BaseCommit string `json:"base_commit"`
+	// TargetPath is carried by the diff response only: it names the file the
+	// manifest was found in, which is not always the path the mapping's
+	// template renders. The patch response has no use for it, because nothing
+	// downstream of the patch reads a path.
+	TargetPath string `json:"target_path"`
 	Mutations  []struct {
 		Key       string `json:"key"`
 		Operation string `json:"operation"`
@@ -485,6 +490,57 @@ stringData:
 	}
 }
 
+// TestDiffHandlerReportsTheDiscoveredTargetPath pins the path contract of an
+// edit: the diff names the file the manifest was actually found in, not the
+// path the mapping's template renders.
+//
+// The client hands that name back to the delivery endpoints. Without it they
+// fall back to the template, and a Secret kept in an application subdirectory —
+// found here by the tree walk, because the templated path is vacant — would be
+// written a second time at the templated path instead of updated where it
+// lives. Two files would then claim the same SealedSecret identity.
+func TestDiffHandlerReportsTheDiscoveredTargetPath(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := w.EncryptYAML(t.Context(), `apiVersion: v1
+kind: Secret
+metadata:
+  name: name
+  namespace: ns
+stringData:
+  password: old
+`, "ns", "name", crypto.StrictScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The mapping renders clusters/ns/name.yaml. The manifest lives somewhere
+	// else entirely, so tier 1 is vacant and only the tree walk finds it.
+	const discovered = "custom/apps/secrets/name.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: discovered}, live, "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", YAML: live}}}, w, true)
+	rr := httptest.NewRecorder()
+	req := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", batchRequest(t, "abc", mutation("password", "replace", "new")), protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
+	req.Header.Set("Idempotency-Key", "diff-discovered")
+	h.DiffHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var resp resealResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.TargetPath != discovered {
+		t.Fatalf("target_path = %q, want %q: %s", resp.TargetPath, discovered, rr.Body.String())
+	}
+}
+
 func TestDiffHandlerRequiresIdempotencyKey(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
 	rr := httptest.NewRecorder()
@@ -641,6 +697,63 @@ func TestEncryptReturnsTheBranchHeadForAVacantMappedPath(t *testing.T) {
 	}
 	if response.YAML == "" || strings.Contains(response.YAML, "plaintext-marker") {
 		t.Fatalf("unexpected ciphertext: %s", response.YAML)
+	}
+}
+
+// TestEncryptEchoesThePathTheVacancyGateRead covers a create whose operator
+// picked a path other than the mapping's default: the response names the file
+// the gate actually checked, so the client delivers to that file rather than
+// back to the rendered path, whose occupancy was never read.
+//
+// AllowedPaths is what lets a path other than the template be requested at all,
+// and the echo is unconditional — an unmapped namespace answers with an empty
+// string rather than a path nobody checked.
+func TestEncryptEchoesThePathTheVacancyGateRead(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := gitops.NewLocalTransport()
+	// A different file on the same branch: this is what gives the mock
+	// transport a head for the vacant target to be built on.
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/other.yaml"}, "other", "head-1")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{
+		Namespace: "ns", Repository: "platform", Branch: "main",
+		PathTemplate: "clusters/{namespace}/{name}.yaml",
+		AllowedPaths: []string{"custom/apps"},
+		AuthRef:      "auth", Mode: policy.GitDeliveryDirect,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{}, w, false)
+
+	const chosen = "custom/apps/name.yaml"
+	body, err := json.Marshal(map[string]string{
+		"namespace": "ns", "name": "name", "target_path": chosen,
+		"yaml": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: name\n  namespace: ns\nstringData:\n  password: plaintext-marker\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	h.EncryptHandler(rr, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", string(body), protectedIdentity(policy.SecretSeal)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		YAML       string `json:"yaml"`
+		BaseCommit string `json:"base_commit"`
+		TargetPath string `json:"target_path"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("invalid JSON response: %v (%s)", err, rr.Body.String())
+	}
+	if response.TargetPath != chosen {
+		t.Fatalf("target_path = %q, want %q", response.TargetPath, chosen)
+	}
+	if response.BaseCommit != "head-1" {
+		t.Fatalf("base_commit = %q, want head-1", response.BaseCommit)
 	}
 }
 

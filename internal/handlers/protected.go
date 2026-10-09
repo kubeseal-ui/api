@@ -731,7 +731,12 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed, "base_commit": baseCommit})
+	// target_path is the path the vacancy gate above actually read, so it is the
+	// path the client names back to /gitops/dry-run and /gitops/deliver. Echoing
+	// it is what keeps a create whose operator picked a path other than the
+	// mapping's default from being delivered to the default instead — a path
+	// whose occupancy was never checked.
+	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed, "base_commit": baseCommit, "target_path": mappedPath})
 	result = opResultSuccess
 }
 
@@ -1012,6 +1017,17 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
+	// The file the manifest was actually found in, which is reported back so the
+	// client can name it to the delivery endpoints.
+	//
+	// It is not always the path the mapping's template renders: gitStatus
+	// resolves an identity through two-tier discovery, and a Secret kept in an
+	// application subdirectory is found by the tree walk rather than at the
+	// templated path. A client that does not name the reviewed file leaves the
+	// delivery endpoints to render the template, which creates a second file for
+	// the same SealedSecret identity instead of updating the one that was
+	// reviewed.
+	targetPath, _ := git["file_path"].(string)
 	after, err := h.Crypto.ResealMany(r.Context(), secret.YAML, mutations)
 	if err != nil {
 		if errors.Is(err, crypto.ErrInvalidMutation) {
@@ -1025,7 +1041,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	jsonResponse(w, http.StatusOK, map[string]any{"before": secret.YAML, "after": after, "mutations": mutationSummary(req.Mutations), "base_commit": req.BaseCommit, "checksum": encryptedChecksum(after)})
+	jsonResponse(w, http.StatusOK, map[string]any{"before": secret.YAML, "after": after, "mutations": mutationSummary(req.Mutations), "base_commit": req.BaseCommit, "checksum": encryptedChecksum(after), "target_path": targetPath})
 	result = opResultSuccess
 }
 
@@ -1033,6 +1049,15 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 // returns the resealed manifest. It is the confirmed half of the flow whose
 // diff half is DiffHandler: the caller reviews the ciphertext diff, then sends
 // the same batch here to have it sealed.
+//
+// It writes nothing — neither the cluster nor Git. The reseal is the server
+// re-deriving and re-validating the batch against the live Secret at the moment
+// the operator confirms it, which is what makes the confirmation mean something
+// after a review that may have been on screen for a while; the ciphertext that
+// reaches the repository is the one the caller reviewed from the diff, a
+// separate encryption of the same values. Nothing here needs a Kubernetes write
+// permission, and no state is left behind that a reader could mistake for the
+// change having landed.
 //
 // The key is named in the body rather than the URL, because a batch has no
 // single key to put in a path. The previous one-key-per-request shape needed

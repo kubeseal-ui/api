@@ -50,14 +50,6 @@ jobs:
         go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
         echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-    # The banner names the Go that built the binary. If a future run reports
-    # export-data skew again, compare it against the `go version` line printed
-    # just before it.
-    - name: Print toolchain and linter versions
-      run: |
-        go version
-        golangci-lint version
-
     - name: Run linter
       run: golangci-lint run ./...
 
