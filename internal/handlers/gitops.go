@@ -401,7 +401,7 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		liveYAML = secret.YAML
 	}
 
-	gitStat, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, liveYAML, "")
+	gitStat, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, liveYAML, "", true)
 	if gitErr != nil {
 		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
 		return
@@ -424,6 +424,9 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		"base_commit":   gitStat["base_commit"],
 		"drift_status":  driftVal,
 		"can_sync":      driftVal == "live_only" || driftVal == string(kubernetes.DriftDiverged),
+		// Report-only: can_sync stays true, because the sync is refused by nothing on the server —
+		// the client withholds it and offers an override. See gitStatus.
+		"git_moved_ahead": gitStat["git_moved_ahead"] == true,
 		"live": map[string]any{
 			"exists": liveExists,
 		},

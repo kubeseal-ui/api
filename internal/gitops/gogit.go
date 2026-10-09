@@ -94,10 +94,9 @@ func (t *GoGitTransport) authFor(ctx context.Context, target Target, authRef str
 	return credential.transportAuth()
 }
 
-// openOrClone returns the repository worktree for a target, cloning when the scratch directory
-// has no checkout yet.
-func (t *GoGitTransport) openOrClone(ctx context.Context, target Target, auth transport.AuthMethod) (*git.Repository, error) {
-	path := t.worktreePath(target)
+// openOrClone returns the repository worktree at path, cloning when there is no checkout yet.
+// depth limits a fresh clone; 0 clones the full history.
+func (t *GoGitTransport) openOrClone(ctx context.Context, path string, target Target, auth transport.AuthMethod, depth int) (*git.Repository, error) {
 	if _, statErr := os.Stat(path); statErr == nil {
 		if repo, openErr := git.PlainOpen(path); openErr == nil {
 			return repo, nil
@@ -112,9 +111,15 @@ func (t *GoGitTransport) openOrClone(ctx context.Context, target Target, auth tr
 		URL:           remoteURL(target),
 		ReferenceName: plumbing.NewBranchReferenceName(target.Branch),
 		SingleBranch:  true,
-		Depth:         1,
+		Depth:         depth,
 		Auth:          auth,
 	})
+}
+
+// historyPath is a second checkout of the same repository+branch for PreviousManifest, which needs
+// the commits behind the head that the read worktree does not carry two of.
+func (t *GoGitTransport) historyPath(target Target) string {
+	return t.worktreePath(target) + "-history"
 }
 
 func remoteURL(target Target) string {
@@ -142,7 +147,7 @@ func (t *GoGitTransport) ReadManifest(ctx context.Context, target Target, authRe
 	if err != nil {
 		return ManifestSnapshot{}, err
 	}
-	repo, err := t.openOrClone(ctx, target, auth)
+	repo, err := t.openOrClone(ctx, t.worktreePath(target), target, auth, 1)
 	if err != nil {
 		return ManifestSnapshot{}, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
 	}
@@ -185,24 +190,89 @@ func readFileAtHead(repo *git.Repository, path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	tree, err := commit.Tree()
+	return fileAtCommit(commit, path)
+}
+
+// fileAtCommit reads one path out of one commit's tree. A path the commit does not hold is
+// ErrNotFound, which the read paths call the new-file vacancy and the history read calls the
+// absence of an earlier version.
+func fileAtCommit(commit *object.Commit, path string) ([]byte, error) {
+	file, err := commit.File(path)
 	if err != nil {
+		if errors.Is(err, object.ErrFileNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("tree: %w", err)
 	}
-	file, err := tree.File(path)
+	return readBlob(file)
+}
+
+// A silent drift in this method's signature would not break anything visibly: the detail page
+// would simply stop recognizing the transport, stop answering whether Git moved ahead, and go back
+// to offering a sync that overwrites the change. The assertion makes that a compile error instead.
+var _ ManifestHistory = (*GoGitTransport)(nil)
+
+// PreviousManifest reads the version the mapped file held before the most recent commit that
+// changed it — the content a later push replaced.
+//
+// It reads from its own checkout: the read worktree is a depth-1 clone, and go-git cannot deepen a
+// shallow one, so the commits behind the head are simply not there. ErrNoHistory when nothing
+// precedes the current version, which is also every answer a caller can act on without this
+// capability.
+func (t *GoGitTransport) PreviousManifest(ctx context.Context, target Target, authRef string) ([]byte, error) {
+	auth, err := t.authFor(ctx, target, authRef)
 	if err != nil {
-		return nil, ErrNotFound
+		return nil, err
 	}
-	content, err := file.Reader()
+	repo, err := t.openOrClone(ctx, t.historyPath(target), target, auth, 0)
 	if err != nil {
-		return nil, fmt.Errorf("file reader: %w", err)
+		return nil, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
 	}
-	defer func() {
-		if closeErr := content.Close(); closeErr != nil {
-			err = fmt.Errorf("close file reader: %w", closeErr)
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("worktree: %w", err)
+	}
+	if pullErr := worktree.PullContext(ctx, &git.PullOptions{
+		RemoteName:    "origin",
+		ReferenceName: plumbing.NewBranchReferenceName(target.Branch),
+		Force:         true,
+		Auth:          auth,
+	}); pullErr != nil && !errors.Is(pullErr, git.NoErrAlreadyUpToDate) {
+		return nil, fmt.Errorf("fetch %s: %w", remoteURL(target), pullErr)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("head: %w", err)
+	}
+	// The newest commit whose diff against its parent touches the path; the version before it is
+	// the one sitting in that parent's tree.
+	iter, err := repo.Log(&git.LogOptions{
+		From:     head.Hash(),
+		Order:    git.LogOrderCommitterTime,
+		FileName: &target.Path,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("log %s: %w", target.Path, err)
+	}
+	defer iter.Close()
+	changed, err := iter.Next()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, ErrNoHistory
 		}
-	}()
-	return io.ReadAll(content)
+		return nil, fmt.Errorf("log %s: %w", target.Path, err)
+	}
+	parent, err := changed.Parent(0)
+	if err != nil {
+		// The commit that changed the path is the root: nothing precedes it.
+		return nil, ErrNoHistory
+	}
+	previous, err := fileAtCommit(parent, target.Path)
+	if errors.Is(err, ErrNotFound) {
+		// That commit created the file, so no version precedes this one.
+		return nil, ErrNoHistory
+	}
+	return previous, err
 }
 
 // A silent drift in this method's signature would not break anything visibly: SnapshotTransport
@@ -224,7 +294,7 @@ func (t *GoGitTransport) ReadBranch(ctx context.Context, repository, branch, aut
 	if err != nil {
 		return BranchSnapshot{}, err
 	}
-	repo, err := t.openOrClone(ctx, target, auth)
+	repo, err := t.openOrClone(ctx, t.worktreePath(target), target, auth, 1)
 	if err != nil {
 		return BranchSnapshot{}, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
 	}
@@ -291,7 +361,7 @@ func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch,
 	if err != nil {
 		return ManifestSnapshot{}, err
 	}
-	repo, err := t.openOrClone(ctx, target, auth)
+	repo, err := t.openOrClone(ctx, t.worktreePath(target), target, auth, 1)
 	if err != nil {
 		return ManifestSnapshot{}, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
 	}
@@ -367,7 +437,7 @@ func (t *GoGitTransport) DryRun(ctx context.Context, change Change, authRef stri
 	if err != nil {
 		return Diff{}, err
 	}
-	repo, err := t.openOrClone(ctx, change.Target, auth)
+	repo, err := t.openOrClone(ctx, t.worktreePath(change.Target), change.Target, auth, 1)
 	if err != nil {
 		return Diff{}, fmt.Errorf("open or clone %s: %w", remoteURL(change.Target), err)
 	}
@@ -405,7 +475,7 @@ func (t *GoGitTransport) PushBranch(ctx context.Context, change Change, authRef 
 	if err != nil {
 		return PushResult{}, err
 	}
-	repo, err := t.openOrClone(ctx, change.Target, auth)
+	repo, err := t.openOrClone(ctx, t.worktreePath(change.Target), change.Target, auth, 1)
 	if err != nil {
 		return PushResult{}, fmt.Errorf("open or clone %s: %w", remoteURL(change.Target), err)
 	}

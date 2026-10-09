@@ -73,6 +73,14 @@ type GitTransport interface {
 	PushBranch(ctx context.Context, change Change, authRef string) (PushResult, error)
 }
 
+// ManifestHistory is the optional capability answering what a mapped file held before its most
+// recent change. Drift reports only that the live Secret and the file differ; comparing the live
+// Secret with this version is what tells the two apart — a match means Git moved and the cluster
+// did not, so overwriting the file would discard the change that moved it.
+type ManifestHistory interface {
+	PreviousManifest(ctx context.Context, target Target, authRef string) ([]byte, error)
+}
+
 // ProposalProvider creates a host-specific review object for an already pushed branch.
 type ProposalProvider interface {
 	OpenProposal(context.Context, ProposalRequest) (ProposalResult, error)
@@ -92,9 +100,15 @@ func (e *ConflictError) Error() string {
 
 var ErrNotFound = errors.New("git target not found")
 
+// ErrNoHistory means nothing precedes the current version of the target: the file has no earlier
+// content, or the transport cannot read history at all.
+var ErrNoHistory = errors.New("git target has no previous version")
+
 type localEntry struct {
 	content []byte
 	commit  string
+	// previous is what content replaced, which is what PreviousManifest answers with.
+	previous []byte
 }
 
 // branchKey identifies a branch head independently of any file.
@@ -117,12 +131,41 @@ func NewLocalTransport() *LocalTransport {
 }
 
 // Seed initializes a target; seeding a file also moves its branch head to that commit,
-// standing in for the real remote's head.
+// standing in for the real remote's head. A re-seed keeps the superseded content as the
+// previous version.
 func (t *LocalTransport) Seed(target Target, content, commit string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.entries[target] = localEntry{[]byte(content), commit}
+	t.put(target, []byte(content), commit)
 	t.heads[branchKey(target.Repository, target.Branch)] = commit
+}
+
+// put records content at target, holding on to what the path held as its previous version.
+// Callers hold the lock.
+func (t *LocalTransport) put(target Target, content []byte, commit string) {
+	entry := localEntry{content: append([]byte(nil), content...), commit: commit}
+	if prior, ok := t.entries[target]; ok {
+		if bytes.Equal(prior.content, content) {
+			// Rewriting the same content is not a new version.
+			entry.previous = prior.previous
+		} else {
+			entry.previous = prior.content
+		}
+	}
+	t.entries[target] = entry
+}
+
+var _ ManifestHistory = (*LocalTransport)(nil)
+
+// PreviousManifest returns the content the target held before its most recent change.
+func (t *LocalTransport) PreviousManifest(_ context.Context, target Target, _ string) ([]byte, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	entry, ok := t.entries[target]
+	if !ok || entry.previous == nil {
+		return nil, ErrNoHistory
+	}
+	return append([]byte(nil), entry.previous...), nil
 }
 
 // ReadManifest returns the entry at target. A vacant path is ErrNotFound.
@@ -225,7 +268,7 @@ func (t *LocalTransport) PushBranch(_ context.Context, change Change, _ string) 
 	}
 	commitHash := sha256.Sum256(append([]byte(change.BaseCommit+"\x00"), change.Content...))
 	commit := hex.EncodeToString(commitHash[:])
-	t.entries[target] = localEntry{append([]byte(nil), change.Content...), commit}
+	t.put(target, change.Content, commit)
 	t.heads[branchKey(target.Repository, branch)] = commit
 	return PushResult{change.Target.Repository, branch, commit}, nil
 }

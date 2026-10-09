@@ -158,6 +158,18 @@ func (t *SnapshotTransport) SearchManifest(ctx context.Context, repository, bran
 	return ManifestSnapshot{}, ErrNotFound
 }
 
+// PreviousManifest delegates to the wrapped transport when it can read history, and reports
+// ErrNoHistory when it cannot. Nothing here is memoized or invalidated: the snapshot is the branch
+// head's file map, which says nothing about earlier versions, and the answer is read once — for the
+// one Secret whose divergence is being explained.
+func (t *SnapshotTransport) PreviousManifest(ctx context.Context, target Target, authRef string) ([]byte, error) {
+	history, ok := t.inner.(ManifestHistory)
+	if !ok {
+		return nil, ErrNoHistory
+	}
+	return history.PreviousManifest(ctx, target, authRef)
+}
+
 // DryRun passes through: it must compare the caller's base against the live head, and answering
 // that from a memo would defeat the check the write path depends on.
 func (t *SnapshotTransport) DryRun(ctx context.Context, change Change, authRef string) (Diff, error) {

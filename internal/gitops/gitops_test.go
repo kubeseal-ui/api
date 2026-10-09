@@ -70,6 +70,38 @@ func TestLocalTransportCreatesANewFileOnTheBranchHead(t *testing.T) {
 	}
 }
 
+// The mock's history is one version deep by construction, which is what a caller comparing a live
+// Secret against the superseded content needs: a version nothing replaced yet has none.
+func TestLocalTransportPreviousManifest(t *testing.T) {
+	transport := NewLocalTransport()
+	target := Target{Repository: "platform", Branch: "main", Path: "clusters/app.yaml"}
+
+	if _, err := transport.PreviousManifest(context.Background(), target, ""); !errors.Is(err, ErrNoHistory) {
+		t.Fatalf("unknown path error = %v, want ErrNoHistory", err)
+	}
+
+	transport.Seed(target, "first", "abc")
+	if _, err := transport.PreviousManifest(context.Background(), target, ""); !errors.Is(err, ErrNoHistory) {
+		t.Fatalf("first version error = %v, want ErrNoHistory", err)
+	}
+
+	transport.Seed(target, "second", "def")
+	previous, err := transport.PreviousManifest(context.Background(), target, "")
+	if err != nil || string(previous) != "first" {
+		t.Fatalf("previous = %q, %v; want %q", previous, err, "first")
+	}
+
+	// A delivery replaces the file too, so what it replaced is the version a stale page's live
+	// Secret would still match.
+	if _, err := transport.PushBranch(context.Background(), Change{Target: target, BaseCommit: "def", Content: []byte("delivered")}, ""); err != nil {
+		t.Fatal(err)
+	}
+	previous, err = transport.PreviousManifest(context.Background(), target, "")
+	if err != nil || string(previous) != "second" {
+		t.Fatalf("previous after push = %q, %v; want %q", previous, err, "second")
+	}
+}
+
 func TestLocalTransportPushAndProposal(t *testing.T) {
 	transport := NewLocalTransport()
 	target := Target{Repository: "platform", Branch: "main", Path: "clusters/app.yaml"}

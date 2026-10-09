@@ -277,6 +277,61 @@ func TestGitOpsSyncStatusOptionADiscovery(t *testing.T) {
 	}
 }
 
+// Drift says the live Secret and the file differ, never which of them moved. These two cases pin
+// the distinction the sync control turns on: a live Secret matching the version the file held
+// before its last change means Git moved, so a sync would discard the change that moved it; a live
+// Secret matching nothing in that history was edited in the cluster, which a sync is the fix for.
+func TestGitOpsSyncStatusTellsWhichSideMoved(t *testing.T) {
+	const path = "cluster/sealed-secrets/cluster/kubeseal-cred.yaml"
+	previous := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: previous\n"
+	current := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: current\n"
+	handEdit := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: hand-edit\n"
+
+	statusFor := func(live string) map[string]any {
+		t.Helper()
+		transport := gitops.NewLocalTransport()
+		transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, previous, "commit-1")
+		transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, current, "commit-2")
+
+		store := policy.NewPolicyStore()
+		if err := store.SetGitMapping(policy.GitMapping{
+			Namespace:    "cluster",
+			Repository:   "platform",
+			Branch:       "main",
+			PathTemplate: "cluster/sealed-secrets/{namespace}/{name}.yaml",
+			AuthRef:      "auth",
+			Mode:         policy.GitDeliveryDirect,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		k8s := protectedK8s{secrets: []kubernetes.SealedSecret{
+			{Name: "kubeseal-cred", Namespace: "cluster", YAML: live},
+		}}
+
+		h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+		req := protectedRequest(http.MethodGet, "/api/v1/gitops/sync?namespace=cluster&name=kubeseal-cred", "", protectedIdentity(policy.MetadataRead))
+		rr := httptest.NewRecorder()
+		h.GitOpsSyncStatusHandler(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+		}
+		var status map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+
+	if moved := statusFor(previous); moved["drift_status"] != "diverged" || moved["git_moved_ahead"] != true {
+		t.Fatalf("live still at the superseded version: %v", moved)
+	}
+	// Report-only: the server still accepts the sync, so a client that ignores the flag is not
+	// left without a way to ask for it.
+	if edited := statusFor(handEdit); edited["drift_status"] != "diverged" || edited["git_moved_ahead"] != false || edited["can_sync"] != true {
+		t.Fatalf("hand-edited live Secret: %v", edited)
+	}
+}
+
 func TestGitOpsSyncExecuteLiveToGit(t *testing.T) {
 	// Secret exists in cluster and in Git at a discovered path with drift
 	gitYAML := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: old-cipher\n"

@@ -181,8 +181,9 @@ func (h *ProtectedHandlers) lookupManifest(ctx context.Context, transport gitops
 
 // gitStatus resolves a Secret's Git state through the request's transport, so that resolving it for
 // thirty Secrets in one listing costs one fetch per branch rather than one per Secret. See
-// requestTransport.
-func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitTransport, namespace, name, liveYAML, baseCommit string) (map[string]any, error) {
+// requestTransport. withHistory additionally asks which side moved when the two differ, at the cost
+// of a Git history read — worth it for one Secret, not for a listing.
+func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitTransport, namespace, name, liveYAML, baseCommit string, withHistory bool) (map[string]any, error) {
 	status := map[string]any{"managed": false, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 	if h.GitMappings == nil || transport == nil {
 		return status, nil
@@ -246,7 +247,32 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 		return status, nil
 	}
 	status["drift"] = string(kubernetes.DriftDiverged)
+	if withHistory && h.gitMovedPastLive(ctx, transport, mapping, target, liveCanonical) {
+		status["git_moved_ahead"] = true
+	}
 	return status, nil
+}
+
+// gitMovedPastLive reports whether the live manifest is the version the mapped file held before its
+// most recent change — Git moved on and the cluster did not, so overwriting the file would discard
+// the change that moved it. A Secret edited in place matches nothing in that history, so it is never
+// mistaken for one. Every uncertainty — no earlier version, an unreadable history, a capability the
+// transport does not have — answers false, because withholding the only recovery control on a guess
+// is worse than offering a sync the operator can see is a real change.
+func (h *ProtectedHandlers) gitMovedPastLive(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, target gitops.Target, liveCanonical []byte) bool {
+	history, ok := transport.(gitops.ManifestHistory)
+	if !ok {
+		return false
+	}
+	previous, err := history.PreviousManifest(ctx, target, mapping.AuthRef)
+	if err != nil {
+		return false
+	}
+	previousCanonical, err := canonicalSealedSecret(string(previous))
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(liveCanonical, previousCanonical)
 }
 
 func canonicalSealedSecret(manifest string) ([]byte, error) {
@@ -419,7 +445,7 @@ func (h *ProtectedHandlers) SecretHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, "")
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, "", true)
 	if gitErr != nil {
 		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
 		return
@@ -544,7 +570,7 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 	// into one Git fetch per Secret.
 	transport := h.requestTransport()
 	for i := range secrets {
-		git, gitErr := h.gitStatus(r.Context(), transport, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "")
+		git, gitErr := h.gitStatus(r.Context(), transport, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "", false)
 		if gitErr != nil {
 			git = map[string]any{"managed": true, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 		}
@@ -792,7 +818,7 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit)
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
 	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
@@ -926,7 +952,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit)
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
 	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
@@ -1021,7 +1047,7 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit)
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
 	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
