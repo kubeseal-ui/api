@@ -215,6 +215,47 @@ func TestGitPathsHandlerKeepsTheWildcardMapping(t *testing.T) {
 	}
 }
 
+// The listing carries the mapping's template raw and its allowed paths as directories. A
+// per-namespace response has no Secret name to render `{name}` with, so a rendered path here could
+// only ever be empty; the client substitutes the name it has and joins it to a directory, which is
+// why the entry is a directory prefix rather than a destination.
+func TestGitPathsHandlerCarriesTheRawTemplateAndDirectories(t *testing.T) {
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{
+		Namespace: "payments", Repository: "platform/config", Branch: "main",
+		PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "git-auth",
+		Mode: policy.GitDeliveryDirect, AllowedPaths: []string{"custom/apps", "apps/{namespace}"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, gitops.NewLocalTransport(), nil, nil, false)
+	identity := scopedIdentity(nil, map[string][]policy.Capability{"payments": {policy.MetadataRead}})
+
+	rr := httptest.NewRecorder()
+	h.GitPathsHandler(rr, protectedRequest(http.MethodGet, "/api/v1/gitops/paths", "", identity))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Namespaces []struct {
+			PathTemplate string   `json:"path_template"`
+			AllowedPaths []string `json:"allowed_paths"`
+		} `json:"namespaces"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Namespaces) != 1 {
+		t.Fatalf("paths = %+v, want one entry", body.Namespaces)
+	}
+	if got := body.Namespaces[0].PathTemplate; got != "clusters/{namespace}/{name}.yaml" {
+		t.Fatalf("path_template = %q, want the mapping's own template", got)
+	}
+	if got := body.Namespaces[0].AllowedPaths; len(got) != 2 || got[0] != "custom/apps" || got[1] != "apps/{namespace}" {
+		t.Fatalf("allowed_paths = %+v, want the mapping's directories", got)
+	}
+}
+
 // The seal gate fires before the body is read, so a caller who holds secret:seal nowhere is refused
 // without their manifest being parsed. A body that is not even valid JSON is the proof: 403 means the
 // decode never ran, 400 would mean it did.

@@ -493,6 +493,11 @@ func (h *ProtectedHandlers) NamespacesHandler(w http.ResponseWriter, r *http.Req
 // GitPathsHandler returns the allowed target paths for the namespaces the caller can read, for the
 // frontend's folder picker. The destinations are the namespaces the caller holds metadata:read in
 // rather than gitops:push in: the capability authorizing a seal is checked on the encrypt request.
+//
+// The path template travels raw rather than rendered: a per-namespace listing has no Secret name to
+// fill `{name}` with, so a rendered path here could only ever be empty. The client substitutes the
+// name it has and joins the file to one of AllowedPaths, which are directories — a bare directory
+// is not a destination any write endpoint accepts.
 func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Request) {
 	if !hasCapabilityAnywhere(w, r, policy.MetadataRead) {
 		return
@@ -509,7 +514,7 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 
 	type nsPaths struct {
 		Namespace    string   `json:"namespace"`
-		DefaultPath  string   `json:"default_path"`
+		PathTemplate string   `json:"path_template"`
 		AllowedPaths []string `json:"allowed_paths"`
 		Repository   string   `json:"repository"`
 		Branch       string   `json:"branch"`
@@ -526,7 +531,7 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 		}
 		result = append(result, nsPaths{
 			Namespace:    ns,
-			DefaultPath:  mapping.RenderPath(ns, ""),
+			PathTemplate: mapping.PathTemplate,
 			AllowedPaths: mapping.AllowedPaths,
 			Repository:   mapping.Repository,
 			Branch:       mapping.Branch,

@@ -133,8 +133,9 @@ func parseCredentialRefs(raw string) []gitops.FileCredential {
 }
 
 // parseMappingSpecs parses the comma-separated namespace mapping list, each entry being
-// namespace:repo:branch:path_template:auth_ref:mode with an optional :adapter_name suffix for
-// proposal mode; path templates use '-' in place of '/'.
+// namespace:repo:branch:path_template:auth_ref:mode with an optional :adapter_name for proposal
+// mode followed by a `;`-separated allowed-directory list (proposal mode's adapter occupies the
+// slot before it); path templates use '-' in place of '/'.
 func parseMappingSpecs(raw string) []policy.GitMappingSpec {
 	if strings.TrimSpace(raw) == "" {
 		return nil
