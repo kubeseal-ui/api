@@ -11,12 +11,15 @@ import (
 	"strings"
 	"testing"
 
+	ssv1alpha1 "github.com/bitnami/sealed-secrets/pkg/apis/sealedsecrets/v1alpha1"
 	"github.com/go-chi/chi/v5"
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
 	"github.com/kubeseal-ui/api/internal/crypto"
 	"github.com/kubeseal-ui/api/internal/gitops"
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 	"github.com/kubeseal-ui/api/internal/policy"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
 )
 
 type protectedCertProvider struct{}
@@ -865,12 +868,31 @@ func TestEncryptSealsAnAdoptedManifest(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
+
+	// The manifest is decoded, not substring-matched: it is encoded by the
+	// Kubernetes legacy codec, which emits JSON — so a YAML-shaped assertion
+	// like "app: payments-api" would fail against a payload that carries the
+	// label perfectly well as "app":"payments-api". Asserting on the decoded
+	// object also survives the encoder changing its serialization.
+	var sealed ssv1alpha1.SealedSecret
+	if err := yaml.Unmarshal([]byte(response.YAML), &sealed); err != nil {
+		t.Fatalf("sealed manifest is not a SealedSecret: %v\n%s", err, response.YAML)
+	}
 	// The type, labels, and the Secret's own annotation survive into the
-	// manifest; the encrypted values are ciphertext, so the base64 above is
-	// nowhere in the output.
-	for _, want := range []string{"kubernetes.io/tls", "app: payments-api", "owner: platform-team"} {
-		if !strings.Contains(response.YAML, want) {
-			t.Errorf("sealed manifest dropped %q:\n%s", want, response.YAML)
+	// manifest's template.
+	if sealed.Spec.Template.Type != corev1.SecretTypeTLS {
+		t.Errorf("template type = %q, want %q", sealed.Spec.Template.Type, corev1.SecretTypeTLS)
+	}
+	if got := sealed.Spec.Template.Labels["app"]; got != "payments-api" {
+		t.Errorf("template label app = %q, want %q", got, "payments-api")
+	}
+	if got := sealed.Spec.Template.Annotations["owner"]; got != "platform-team" {
+		t.Errorf("template annotation owner = %q, want %q", got, "platform-team")
+	}
+	// Both values were sealed, and only as ciphertext.
+	for _, key := range []string{"tls.crt", "tls.key"} {
+		if sealed.Spec.EncryptedData[key] == "" {
+			t.Errorf("sealed manifest has no encrypted %q:\n%s", key, response.YAML)
 		}
 	}
 	if strings.Contains(response.YAML, "Y2VydA==") || strings.Contains(response.YAML, "a2V5") {
