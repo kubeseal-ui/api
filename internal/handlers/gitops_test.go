@@ -406,6 +406,28 @@ func deliveryManifest(namespace, name, ciphertext string) string {
 	return strings.Replace(sealedManifest(namespace, name), "ciphertext", ciphertext, 1)
 }
 
+// renderedPath returns the destination the store's mapping renders for one
+// identity, which is where a delivery resolves when the client names no path.
+//
+// A test that names a path back to the endpoints derives it here rather than
+// writing out a literal: the literal is what the mapping renders for *some*
+// identity, and one that has drifted from the identity under test is a path
+// this mapping does not render here at all. The endpoint then refuses it — a
+// 400 that is correct for the request and reads as a failure of the rule the
+// test meant to pin.
+func renderedPath(t *testing.T, store *policy.PolicyStore, namespace, name string) string {
+	t.Helper()
+	mapping, ok := store.GetGitMapping(namespace)
+	if !ok {
+		t.Fatalf("no Git mapping for namespace %s", namespace)
+	}
+	path := mapping.RenderPath(namespace, name)
+	if path == "" {
+		t.Fatalf("the mapping for %s renders no path for %s/%s", namespace, namespace, name)
+	}
+	return path
+}
+
 // TestGitOpsDeliverResolvesTheDiscoveredPathWithoutBeingTold covers the write
 // side of source discovery.
 //
@@ -574,19 +596,27 @@ func TestGitOpsDeliverRefusesADifferentAllowedPathWhenTheFileExists(t *testing.T
 // and the failure would land on the last step of a flow that had already
 // sealed the Secret.
 func TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet(t *testing.T) {
-	const templated = "clusters/payments/api.yaml"
+	const namespace = "payments"
+	// No file for this name anywhere on the branch, which is what makes this
+	// the create flow: with no target directory chosen, the destination is the
+	// mapping's own default.
+	const name = "new"
+
+	// Another file on the same branch, so the vacant destination is built on a
+	// head.
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/other.yaml"}, "other", "abc")
 
 	store := policy.NewPolicyStore()
-	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: namespace, Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
 
-	created := deliveryManifest("payments", "new", "fresh-cipher")
+	templated := renderedPath(t, store, namespace, name)
+	created := deliveryManifest(namespace, name, "fresh-cipher")
 	body, err := json.Marshal(map[string]string{
-		"namespace": "payments", "name": "new", "base_commit": "abc",
+		"namespace": namespace, "name": name, "base_commit": "abc",
 		"yaml": created, "target_path": templated,
 	})
 	if err != nil {
@@ -614,9 +644,7 @@ func TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet(t *testing.
 		t.Fatalf("template holds %q, want the created manifest", string(snapshot.Content))
 	}
 }
-//
-// Without this the duplicate fix could pass by refusing every named path, which
-// would take the create flow's target-directory selection away with it.
+
 // TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew is the
 // control for the refusals above: a manifest with no file yet is exactly the
 // case the allowlist is for, so the named path is honoured here.
@@ -624,21 +652,23 @@ func TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet(t *testing.
 // Without this the duplicate fix could pass by refusing every named path, which
 // would take the create flow's target-directory selection away with it.
 func TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew(t *testing.T) {
-	const templated = "clusters/payments/api.yaml"
+	const namespace = "payments"
+	const name = "new"
 	const chosen = "custom/apps/new.yaml"
 	// Another file on the same branch, so the vacant target is built on a head.
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/other.yaml"}, "other", "abc")
 
 	store := policy.NewPolicyStore()
-	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: namespace, Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
 
-	created := deliveryManifest("payments", "new", "fresh-cipher")
+	templated := renderedPath(t, store, namespace, name)
+	created := deliveryManifest(namespace, name, "fresh-cipher")
 	body, err := json.Marshal(map[string]string{
-		"namespace": "payments", "name": "new", "base_commit": "abc",
+		"namespace": namespace, "name": name, "base_commit": "abc",
 		"yaml": created, "target_path": chosen,
 	})
 	if err != nil {
