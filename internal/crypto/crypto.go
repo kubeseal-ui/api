@@ -169,8 +169,22 @@ func (w *Wrapper) EncryptYAML(ctx context.Context, secretYAML string, namespace,
 	if err := encoder.Encode(sealed, &buf); err != nil {
 		return "", fmt.Errorf("crypto: encode sealed secret: %w", err)
 	}
-
-	return buf.String(), nil
+	// The codec is the API server's serializer, and it writes JSON. What the
+	// repository stores — and what the operator reviews in the diff — is YAML, so
+	// the JSON is converted rather than returned as it stands. JSONToYAML is the
+	// same step the API server's own YAML serializer performs, and the rendering
+	// the kubeseal CLI writes, so the committed file is the document `kubeseal`
+	// would have produced for the same Secret.
+	//
+	// Returning the JSON directly is not a failure anything catches: JSON is a
+	// subset of YAML, so it parses, seals, and reconciles. It is one line, though,
+	// which makes every edit to the file a diff of the whole document and makes
+	// the file unreadable to anyone who opens it.
+	y, err := sigsyaml.JSONToYAML(buf.Bytes())
+	if err != nil {
+		return "", fmt.Errorf("crypto: encode sealed secret: %w", err)
+	}
+	return string(y), nil
 }
 
 // DecryptYAML takes a SealedSecret YAML document and returns the

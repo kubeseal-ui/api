@@ -41,6 +41,43 @@ func TestEncryptDecryptRoundTripStrict(t *testing.T) {
 	}
 }
 
+// TestEncryptYAMLWritesYAML pins the format of the manifest the API hands out.
+//
+// Every manifest a client sees comes from EncryptYAML — the create path
+// directly, and the diff and patch paths through ResealMany — and it is posted
+// straight back to the delivery endpoints, which commit it verbatim. The codec
+// underneath serializes to JSON, and JSON is a subset of YAML: the file parsed,
+// sealed, and reconciled, so nothing anywhere failed. What shipped was a single
+// line of JSON in a directory of YAML, which no assertion here was watching.
+func TestEncryptYAMLWritesYAML(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := SecretYAML("tet", "immich", map[string]string{"password": "hunter2"}, "")
+
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "immich", "tet", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	// The indentation and the per-key lines are the point: the same document
+	// rendered as JSON is one line, so a first-line check is what distinguishes
+	// them rather than a substring that both forms contain.
+	if !strings.HasPrefix(sealed, "apiVersion:") {
+		t.Fatalf("sealed manifest does not begin with a YAML key:\n%s", sealed)
+	}
+	if lines := strings.Split(strings.TrimSpace(sealed), "\n"); len(lines) < 5 {
+		t.Fatalf("sealed manifest is %d line(s), want a multi-line YAML document:\n%s", len(lines), sealed)
+	}
+	if !strings.Contains(sealed, "\nkind: SealedSecret\n") {
+		t.Fatalf("sealed manifest does not carry kind on its own line:\n%s", sealed)
+	}
+	// Format is not the whole contract: the rendering has to be the document the
+	// controller reads back.
+	if _, err := parseSealedSecret(sealed); err != nil {
+		t.Fatalf("the YAML rendering does not parse as a SealedSecret: %v", err)
+	}
+}
+
 // TestEncryptDecryptRoundTripNamespaceWide verifies namespace-wide scope.
 func TestEncryptDecryptRoundTripNamespaceWide(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
