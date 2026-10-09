@@ -263,7 +263,7 @@ func TestGitOpsDeliverRequiresCapabilityInTheMappedNamespace(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.GitOpsDeliverHandler(rr, protectedRequest(http.MethodPost, "/api/v1/gitops/deliver",
-		`{"namespace":"payments","name":"api","yaml":"new","base_commit":"abc"}`, identity))
+		gitChangeBody(t, "payments", "api", sealedManifest("payments", "api"), "abc"), identity))
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403: %s", rr.Code, rr.Body.String())
 	}

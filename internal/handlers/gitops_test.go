@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,6 +15,25 @@ import (
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
+// gitChangeBody builds a GitOps request body carrying a manifest as the client
+// sends it. Both endpoints verify that the payload is the SealedSecret the
+// request names, so a placeholder word is not a valid request.
+func gitChangeBody(t *testing.T, namespace, name, manifest, baseCommit string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"namespace": namespace, "name": name, "yaml": manifest, "base_commit": baseCommit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// sealedManifest is a minimal SealedSecret manifest for one identity, which is
+// the only shape either GitOps endpoint accepts.
+func sealedManifest(namespace, name string) string {
+	return "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: " + name +
+		"\n  namespace: " + namespace + "\nspec:\n  encryptedData:\n    key: ciphertext\n"
+}
+
 func TestGitOpsDryRunHandlerRequiresModeCapability(t *testing.T) {
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryProposal, ProposalAdapter: localProposalAdapter{}}); err != nil {
@@ -21,7 +41,7 @@ func TestGitOpsDryRunHandlerRequiresModeCapability(t *testing.T) {
 	}
 	h := NewProtectedHandlersWithGitOps(store, gitops.NewLocalTransport(), nil, nil, false)
 	rr := httptest.NewRecorder()
-	req := protectedRequest(http.MethodPost, "/api/v1/gitops/dry-run", `{"namespace":"payments","name":"api","yaml":"new","base_commit":"abc"}`, protectedIdentity())
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/dry-run", gitChangeBody(t, "payments", "api", sealedManifest("payments", "api"), "abc"), protectedIdentity())
 	h.GitOpsDryRunHandler(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rr.Code)
@@ -38,7 +58,7 @@ func TestGitOpsDryRunResolvesMappingAndReturnsEncryptedDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
-	req := protectedRequest(http.MethodPost, "/api/v1/gitops/dry-run", `{"namespace":"payments","name":"api","yaml":"new-ciphertext","base_commit":"abc"}`, protectedIdentity(policy.GitOpsPush))
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/dry-run", gitChangeBody(t, "payments", "api", sealedManifest("payments", "api"), "abc"), protectedIdentity(policy.GitOpsPush))
 	rr := httptest.NewRecorder()
 	h.GitOpsDryRunHandler(rr, req)
 	if rr.Code != http.StatusOK {
@@ -46,6 +66,72 @@ func TestGitOpsDryRunResolvesMappingAndReturnsEncryptedDiff(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"path":"clusters/payments/api.yaml"`) || !strings.Contains(rr.Body.String(), `"mode":"direct"`) {
 		t.Fatalf("unexpected response: %s", rr.Body.String())
+	}
+}
+
+// The dry run echoes the reviewed ciphertext back as manifest text. The client
+// stores `after` and posts it straight back to /gitops/deliver, so an encoded
+// echo — base64 is what encoding/json does to a []byte — would be committed to
+// the repository instead of the manifest, and the file would be unreadable to
+// the sealed-secrets controller.
+func TestGitOpsDryRunReturnsManifestTextNotBase64(t *testing.T) {
+	manifest := sealedManifest("payments", "api")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old-ciphertext", "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+	rr := httptest.NewRecorder()
+	h.GitOpsDryRunHandler(rr, protectedRequest(http.MethodPost, "/api/v1/gitops/dry-run", gitChangeBody(t, "payments", "api", manifest, "abc"), protectedIdentity(policy.GitOpsPush)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result struct {
+		Before string `json:"before"`
+		After  string `json:"after"`
+		Diff   string `json:"diff"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.After != manifest || result.Diff != manifest {
+		t.Fatalf("after = %q, want the manifest text %q", result.After, manifest)
+	}
+	if result.Before != "old-ciphertext" {
+		t.Fatalf("before = %q, want the existing file text", result.Before)
+	}
+}
+
+// An encoded payload is refused before anything is written. Accepting it is how
+// a repository ends up holding a file that is valid base64 of a SealedSecret and
+// nothing any consumer can read.
+func TestGitOpsDeliveryRejectsAnEncodedManifest(t *testing.T) {
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old-ciphertext", "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+	encoded := base64.StdEncoding.EncodeToString([]byte(sealedManifest("payments", "api")))
+	rr := httptest.NewRecorder()
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", gitChangeBody(t, "payments", "api", encoded, "abc"), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "encoded-1")
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "INVALID_MANIFEST", "Manifest is not a SealedSecret for this name and namespace", "")
+
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != "old-ciphertext" {
+		t.Fatalf("repository content changed by a refused delivery: %q", string(snapshot.Content))
 	}
 }
 
@@ -57,7 +143,7 @@ func TestGitOpsDeliverDirectUsesTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
-	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", `{"namespace":"payments","name":"api","yaml":"new","base_commit":"abc"}`, protectedIdentity(policy.GitOpsPush))
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", gitChangeBody(t, "payments", "api", sealedManifest("payments", "api"), "abc"), protectedIdentity(policy.GitOpsPush))
 	req.Header.Set("Idempotency-Key", "direct-1")
 	rr := httptest.NewRecorder()
 	h.GitOpsDeliverHandler(rr, req)
@@ -89,7 +175,7 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
-	body := `{"namespace":"payments","name":"api","yaml":"new","base_commit":"abc"}`
+	body := gitChangeBody(t, "payments", "api", sealedManifest("payments", "api"), "abc")
 
 	// The adapter fails after the branch push: 502, but the branch exists.
 	failedReq := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", body, protectedIdentity(policy.GitOpsPropose))

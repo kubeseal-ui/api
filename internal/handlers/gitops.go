@@ -24,6 +24,32 @@ type gitChangeRequest struct {
 	Name      string
 }
 
+// errManifestNotSealedSecret marks a payload that is not the SealedSecret the
+// request names. It is separate from the generic invalid-request error so both
+// GitOps handlers can say what was wrong with the manifest rather than only that
+// something was.
+var errManifestNotSealedSecret = errors.New("manifest is not a SealedSecret for this name and namespace")
+
+// validateManifest reports whether the reviewed ciphertext is a SealedSecret
+// for the name and namespace this request names.
+//
+// The payload is committed to the repository exactly as it arrives, and nothing
+// earlier in the request establishes that it is a manifest: a client that sends
+// back an encoded form of the ciphertext — base64, say — satisfies every other
+// check and commits a file the sealed-secrets controller cannot read, a failure
+// that surfaces only later as an app that will not reconcile. The shape is
+// therefore checked here, before either the dry run or the push.
+//
+// It is called after the capability check, not inside gitChange, so an
+// unauthorized caller is refused for that reason and learns nothing about the
+// payload.
+func (cr gitChangeRequest) validateManifest() error {
+	if !gitops.MatchesSealedSecret(cr.Change.Content, cr.Namespace, cr.Name) {
+		return errManifestNotSealedSecret
+	}
+	return nil
+}
+
 func (h *ProtectedHandlers) gitChange(r *http.Request) (gitChangeRequest, error) {
 	var req struct {
 		Namespace  string `json:"namespace"`
@@ -85,6 +111,11 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
+	if err := cr.validateManifest(); err != nil {
+		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_manifest")
+		writeError(w, r, http.StatusBadRequest, "INVALID_MANIFEST", "Manifest is not a SealedSecret for this name and namespace")
+		return
+	}
 	diff, err := h.GitTransport.DryRun(r.Context(), change, mapping.AuthRef)
 	if err != nil {
 		var base *gitops.BaseCommitError
@@ -102,7 +133,33 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 	// commit, and fixed delivery mode". The after ciphertext flows under
 	// "after" (the key the client reads) and "diff" stays for compatibility
 	// with the original handler response.
-	jsonResponse(w, http.StatusOK, map[string]any{"after": diff.After, "diff": diff.After, "before": diff.Before, "path": change.Target.Path, "base_commit": change.BaseCommit, "mode": mapping.Mode})
+	jsonResponse(w, http.StatusOK, gitOpsDryRunResponse{
+		Before:     string(diff.Before),
+		After:      string(diff.After),
+		Diff:       string(diff.After),
+		Path:       change.Target.Path,
+		BaseCommit: change.BaseCommit,
+		Mode:       mapping.Mode,
+	})
+}
+
+// gitOpsDryRunResponse is the dry-run wire contract.
+//
+// The manifest fields are strings and the conversion from gitops.Diff is
+// explicit for a reason: encoding/json renders a []byte as base64, and the
+// client keeps `after` and posts it straight back to /gitops/deliver. Returning
+// the byte slice directly therefore handed the client base64, which the delivery
+// endpoint wrote to the repository verbatim — a committed file that parses as
+// neither YAML nor JSON, produced by two endpoints that each look correct alone.
+// Declaring the fields as text here is what keeps that round trip to manifest
+// text; the "diff" key is the same value under the name the first handler used.
+type gitOpsDryRunResponse struct {
+	Before     string                 `json:"before"`
+	After      string                 `json:"after"`
+	Diff       string                 `json:"diff"`
+	Path       string                 `json:"path"`
+	BaseCommit string                 `json:"base_commit"`
+	Mode       policy.GitDeliveryMode `json:"mode"`
 }
 
 func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +174,14 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+		return
+	}
+	// Checked before the idempotency store is consulted: a payload that cannot
+	// be delivered is not an attempt whose result is worth recording.
+	if err := cr.validateManifest(); err != nil {
+		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_manifest")
+		metrics.RecordGitOpsDelivery(string(mapping.Mode), "invalid_manifest")
+		writeError(w, r, http.StatusBadRequest, "INVALID_MANIFEST", "Manifest is not a SealedSecret for this name and namespace")
 		return
 	}
 	if mapping.Mode == policy.GitDeliveryProposal && mapping.ProposalAdapter == nil {

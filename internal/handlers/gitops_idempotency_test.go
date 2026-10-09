@@ -23,7 +23,7 @@ func TestGitOpsDeliverReplaysARepeatInsteadOfReExecutingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
-	body := `{"namespace":"payments","name":"api","yaml":"new","base_commit":"abc"}`
+	body := gitChangeBody(t, "payments", "api", sealedManifest("payments", "api"), "abc")
 
 	missing := httptest.NewRecorder()
 	h.GitOpsDeliverHandler(missing, protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", body, protectedIdentity(policy.GitOpsPush)))
@@ -67,7 +67,7 @@ func TestGitOpsDeliverRetryAfterFailureIsNotRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
-	body := `{"namespace":"payments","name":"api","yaml":"new","base_commit":"abc"}`
+	body := gitChangeBody(t, "payments", "api", sealedManifest("payments", "api"), "abc")
 
 	failedReq := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", body, protectedIdentity(policy.GitOpsPropose))
 	failedReq.Header.Set("Idempotency-Key", "attempt-1")
