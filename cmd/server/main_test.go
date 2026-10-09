@@ -76,19 +76,19 @@ func TestRegisterProtectedRoutesMountsPhase3Routes(t *testing.T) {
 	r := chi.NewRouter()
 	protected := handlers.NewProtectedHandlers(testK8s(), testCrypto(), false)
 	registerProtectedRoutes(r, protected)
-	for _, path := range []string{
-		"/secrets/ns/name/diff",
-		"/secrets/ns/name/reveal",
-		"/secrets/ns/name/values/password",
+	// The patch route names the values collection, not one key: a batch has no
+	// single key to put in the path. Diff, reveal, and patch are listed
+	// together because a stale path for any of them shows up here as a 404 —
+	// which is the failure this test exists to catch.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/secrets/ns/name/diff"},
+		{http.MethodPost, "/secrets/ns/name/reveal"},
+		{http.MethodPatch, "/secrets/ns/name/values"},
 	} {
 		rr := httptest.NewRecorder()
-		method := http.MethodPost
-		if strings.Contains(path, "/values/") {
-			method = http.MethodPatch
-		}
-		r.ServeHTTP(rr, httptest.NewRequest(method, path, strings.NewReader(`{}`)))
+		r.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`)))
 		if rr.Code != http.StatusUnauthorized {
-			t.Fatalf("%s %s: status = %d, want 401", method, path, rr.Code)
+			t.Fatalf("%s %s: status = %d, want 401", tc.method, tc.path, rr.Code)
 		}
 	}
 }
@@ -121,7 +121,7 @@ func TestRouterProtectedPhase3RoutesRequireAuthentication(t *testing.T) {
 		{http.MethodGet, "/api/v1/secrets"},
 		{http.MethodPost, "/api/v1/secrets/ns/name/diff"},
 		{http.MethodPost, "/api/v1/secrets/ns/name/reveal"},
-		{http.MethodPatch, "/api/v1/secrets/ns/name/values/password"},
+		{http.MethodPatch, "/api/v1/secrets/ns/name/values"},
 	} {
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`)))

@@ -24,14 +24,16 @@ Go backend for kubeseal-ui
 - `/api/v1/auth/*` - Authentication endpoints (OIDC)
 - `/api/v1/config` - Configuration endpoint
 - `/api/v1/namespaces` - List namespaces
-- `/api/v1/secrets` - List secrets
-- `/api/v1/secrets/{namespace}/{name}` - Get individual secret
-- `/api/v1/secrets/{namespace}/{name}/yaml` - Get secret YAML (encrypted)
-- `/api/v1/secrets/encrypt` - Create new sealed secret
+- `/api/v1/secrets` - List secrets, each with its drift status
+- `/api/v1/secrets/{namespace}/{name}` - Secret detail, including its encrypted manifest and Git status
+- `/api/v1/secrets/encrypt` - Create a new SealedSecret, from a typed manifest or a pasted live one
 - `/api/v1/secrets/{namespace}/{name}/reveal` - Reveal one key
-- `/api/v1/secrets/{namespace}/{name}/values/{key}` - Patch one key value
+- `/api/v1/secrets/{namespace}/{name}/diff` - Review a batch of key changes as an encrypted before/after pair
+- `/api/v1/secrets/{namespace}/{name}/values` - Apply a reviewed batch of key changes (`PATCH`)
+- `/api/v1/gitops/paths` - List the Git paths mapped for the caller's namespaces
 - `/api/v1/gitops/dry-run` - Dry run for GitOps delivery
 - `/api/v1/gitops/deliver` - Deliver encrypted secret to Git
+- `/api/v1/gitops/sync` - Read drift status (`GET`) and reconcile live into Git (`POST`)
 
 ### Authentication
 
