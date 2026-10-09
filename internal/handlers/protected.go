@@ -363,7 +363,7 @@ func normalizeSecretYAML(secretYAML, namespace, name string) (string, error) {
 	if len(manifest) == 0 {
 		return "", errors.New("empty manifest")
 	}
-	if kind, _ := manifest["kind"].(string); kind != "Secret" {
+	if kind, isString := manifest["kind"].(string); !isString || kind != "Secret" {
 		return "", fmt.Errorf("expected a Secret, got kind %q", kind)
 	}
 
@@ -383,10 +383,10 @@ func normalizeSecretYAML(secretYAML, namespace, name string) (string, error) {
 	cleanAnnotations(meta)
 	cleanLabels(meta)
 
-	if declared, _ := meta["name"].(string); declared != "" && declared != name {
+	if declared, isString := meta["name"].(string); isString && declared != "" && declared != name {
 		return "", fmt.Errorf("manifest names %q, but this request names %q", declared, name)
 	}
-	if declared, _ := meta["namespace"].(string); declared != "" && declared != namespace {
+	if declared, isString := meta["namespace"].(string); isString && declared != "" && declared != namespace {
 		return "", fmt.Errorf("manifest is for namespace %q, but this request is for %q", declared, namespace)
 	}
 
@@ -630,7 +630,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 
 	scope := crypto.StrictScope
 	if req.Scope != "" {
-		if err := scope.Set(req.Scope); err != nil {
+		if err = scope.Set(req.Scope); err != nil {
 			result = opResultInvalidRequest
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", "Invalid scope")
 			return

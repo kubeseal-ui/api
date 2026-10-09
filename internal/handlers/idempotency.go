@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -223,7 +224,13 @@ func writeRecorded(w http.ResponseWriter, record idempotencyRecord) {
 		header[name] = values
 	}
 	w.WriteHeader(status)
-	_, _ = w.Write(record.body)
+	if _, err := w.Write(record.body); err != nil {
+		// The status line is already committed, so there is no response left to
+		// turn this into: the client sees a truncated replay and retries. The
+		// failing write is a transport error, and only it is logged — never the
+		// recorded body, which is a ciphertext response.
+		slog.Error("replaying a recorded idempotent response failed", "error", err)
+	}
 }
 
 // beginDelivery claims the Idempotency-Key for a delivery request and reports

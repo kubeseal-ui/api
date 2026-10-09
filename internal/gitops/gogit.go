@@ -292,10 +292,14 @@ func (t *GoGitTransport) ReadBranch(ctx context.Context, repository, branch, aut
 func readBlob(file *object.File) ([]byte, error) {
 	reader, err := file.Reader()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("blob reader: %w", err)
 	}
-	defer func() { _ = reader.Close() }()
-	return io.ReadAll(reader)
+	content, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	return content, nil
 }
 
 // SearchManifest walks the repository tree at branch HEAD and finds a SealedSecret
