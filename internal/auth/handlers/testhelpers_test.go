@@ -4,6 +4,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -276,4 +277,50 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestMeHandlerCarriesGlobalAndScopedGrants: /auth/me returns the flat grant
+// list under "capabilities" and the per-namespace grants under "namespaces",
+// which is the shape internal-docs/architecture/api.md documents and the two
+// halves the UI unions.
+func TestMeHandlerCarriesGlobalAndScopedGrants(t *testing.T) {
+	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
+	rr := httptest.NewRecorder()
+	req := middleware.WithIdentity(httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil),
+		middleware.Identity{
+			Subject:               "u1",
+			Email:                 "u@x",
+			Capabilities:          []string{"metadata:read"},
+			NamespaceCapabilities: map[string][]string{"payments": {"metadata:read", "secret:seal"}},
+		})
+	auth.MeHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Capabilities []string            `json:"capabilities"`
+		Namespaces   map[string][]string `json:"namespaces"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Capabilities) != 1 || body.Capabilities[0] != "metadata:read" {
+		t.Errorf("capabilities = %v", body.Capabilities)
+	}
+	if got := body.Namespaces["payments"]; len(got) != 2 {
+		t.Errorf("namespaces = %v", body.Namespaces)
+	}
+}
+
+// TestMeHandlerAlwaysSendsTheNamespaceMap: the key is present even when there
+// is nothing scoped, so a client reads it without a presence check.
+func TestMeHandlerAlwaysSendsTheNamespaceMap(t *testing.T) {
+	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
+	rr := httptest.NewRecorder()
+	req := middleware.WithIdentity(httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil),
+		middleware.Identity{Subject: "u1", Capabilities: []string{"metadata:read"}})
+	auth.MeHandler(rr, req)
+	if !strings.Contains(rr.Body.String(), `"namespaces":{}`) {
+		t.Fatalf("body = %s, want an empty namespaces object", rr.Body.String())
+	}
 }

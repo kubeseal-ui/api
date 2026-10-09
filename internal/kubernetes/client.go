@@ -31,6 +31,12 @@ type Namespace struct {
 	GitManaged    bool   `json:"git_managed"`
 	DeliveryMode  string `json:"delivery_mode,omitempty"`
 	GitRepository string `json:"git_mapping,omitempty"`
+	// Capabilities is the caller's effective capability set in this
+	// namespace, filled in by the handler from the authenticated
+	// identity — never by the Kubernetes client, which knows nothing
+	// about callers. It is what lets the UI decide which actions to
+	// offer without probing each endpoint for a 403.
+	Capabilities []string `json:"capabilities"`
 }
 
 // DriftStatus describes the relationship between the live SealedSecret

@@ -20,6 +20,14 @@
 //   - platform-admin   — metadata:read, secret:seal, access:manage (NO implicit decrypt or gitops)
 //
 // Custom roles are validated against known capabilities.
+//
+// Grants are namespace-scoped. A group rule names a role and the namespaces it
+// applies in; an identity's capabilities in a namespace are the union of its
+// rules scoped to that namespace and its rules scoped to "*". With no policy
+// document loaded — see document.go — the store falls back to the older
+// behaviour where an OIDC group named exactly after a role granted that role
+// everywhere.
+//
 // Git mapping is per-namespace: namespace → {repo, branch, path template, auth ref, delivery mode}
 package policy
 
@@ -303,8 +311,19 @@ type PolicyStore struct {
 	mu            sync.RWMutex
 	CustomRoles   map[string]Role
 	GitMappings   map[string]GitMapping // namespace -> GitMapping
-	GroupRoles    map[string][]string
 	EnableDecrypt bool
+
+	// groupRules are the group-to-role grants, each scoped to the namespaces it
+	// names. Ordered as the document listed them; the union does not depend on
+	// order, but keeping it makes a store's state readable in a debugger.
+	groupRules []GroupRule
+	// explicit records whether a policy document is in force. It is what turns
+	// off the legacy fallback, where an OIDC group named exactly after a role
+	// granted that role everywhere: a deployment with no policy file relies on
+	// that, and a deployment with one must be able to revoke a grant by leaving
+	// it out. Apply sets it; SetGroupRoles, which exists for programmatic setup
+	// and tests, does not.
+	explicit bool
 }
 
 // NewPolicyStore creates a new policy store.
@@ -312,36 +331,95 @@ func NewPolicyStore() *PolicyStore {
 	return &PolicyStore{
 		CustomRoles: make(map[string]Role),
 		GitMappings: make(map[string]GitMapping),
-		GroupRoles:  make(map[string][]string),
 	}
 }
 
-// CapabilitiesForGroups returns the additive capability union for group
-// memberships. Unknown groups and roles contribute nothing, preserving deny-by-default.
-func (s *PolicyStore) CapabilitiesForGroups(groups []string) []Capability {
+// NamespaceGrants returns the capabilities an identity's groups grant in every
+// namespace, and the ones they grant only in the namespaces they name.
+//
+// The two are deliberately separate rather than pre-merged: a caller listing
+// namespaces needs to ask "in this one?" for namespaces it has not enumerated
+// yet, and the wildcard is what makes that answer yes without a rule per
+// namespace. A namespace absent from the scoped map has no grants of its own —
+// which is a different thing from a namespace that is denied, since the global
+// set still applies there.
+func (s *PolicyStore) NamespaceGrants(groups []string) ([]Capability, map[string][]Capability) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	seen := make(map[Capability]bool)
+
+	members := make(map[string]bool, len(groups))
 	for _, group := range groups {
-		if role, ok := s.getRole(group); ok {
-			for _, cap := range role.Capabilities {
-				seen[cap] = true
-			}
-		}
-		for _, roleName := range s.GroupRoles[group] {
-			role, ok := s.getRole(roleName)
-			if !ok {
-				continue
-			}
-			for _, cap := range role.Capabilities {
-				seen[cap] = true
+		members[group] = true
+	}
+
+	global := make(map[Capability]bool)
+	scoped := make(map[string]map[Capability]bool)
+
+	if !s.explicit {
+		for _, group := range groups {
+			if role, ok := s.getRole(group); ok {
+				addCapabilities(global, role.Capabilities)
 			}
 		}
 	}
+	for _, rule := range s.groupRules {
+		if !members[rule.Name] {
+			continue
+		}
+		role, ok := s.getRole(rule.Role)
+		if !ok {
+			continue // a rule left pointing at a role the document no longer declares
+		}
+		for _, namespace := range rule.Namespaces {
+			if namespace == AnyNamespace {
+				addCapabilities(global, role.Capabilities)
+				continue
+			}
+			if scoped[namespace] == nil {
+				scoped[namespace] = make(map[Capability]bool)
+			}
+			addCapabilities(scoped[namespace], role.Capabilities)
+		}
+	}
+
+	result := make(map[string][]Capability, len(scoped))
+	for namespace, caps := range scoped {
+		result[namespace] = orderedCapabilities(caps)
+	}
+	return orderedCapabilities(global), result
+}
+
+// CapabilitiesForGroups returns every capability the identity holds somewhere,
+// whichever namespace grants it. It answers "may this caller do X at all" —
+// the pre-filter for a request whose namespace is not known yet — and must not
+// be used to authorize a specific namespace, which is what NamespaceGrants and
+// Identity.CapabilitiesFor are for.
+//
+// Unknown groups and roles contribute nothing, preserving deny-by-default.
+func (s *PolicyStore) CapabilitiesForGroups(groups []string) []Capability {
+	global, scoped := s.NamespaceGrants(groups)
+	seen := make(map[Capability]bool, len(global))
+	addCapabilities(seen, global)
+	for _, caps := range scoped {
+		addCapabilities(seen, caps)
+	}
+	return orderedCapabilities(seen)
+}
+
+// addCapabilities unions caps into seen.
+func addCapabilities(seen map[Capability]bool, caps []Capability) {
+	for _, capability := range caps {
+		seen[capability] = true
+	}
+}
+
+// orderedCapabilities renders a capability set in the canonical order of All,
+// so two resolutions of the same grants produce the same list.
+func orderedCapabilities(seen map[Capability]bool) []Capability {
 	result := make([]Capability, 0, len(seen))
-	for _, cap := range All {
-		if seen[cap] {
-			result = append(result, cap)
+	for _, capability := range All {
+		if seen[capability] {
+			result = append(result, capability)
 		}
 	}
 	return result
@@ -404,6 +482,10 @@ func (s *PolicyStore) GetGitMapping(namespace string) (GitMapping, bool) {
 }
 
 // SetGroupRoles atomically replaces a group's role mapping.
+//
+// The rules it writes apply in every namespace, which is the only thing an
+// unnamespaced group-to-role mapping can mean. A namespaced grant comes from a
+// policy document through Apply.
 func (s *PolicyStore) SetGroupRoles(group string, roles []string) error {
 	if strings.TrimSpace(group) == "" {
 		return errors.New("group is required")
@@ -422,9 +504,24 @@ func (s *PolicyStore) SetGroupRoles(group string, roles []string) error {
 		}
 	}
 	s.mu.RUnlock()
+
+	replacement := make([]GroupRule, 0, len(roles))
+	for _, role := range roles {
+		replacement = append(replacement, GroupRule{Name: group, Namespaces: []string{AnyNamespace}, Role: role})
+	}
+
 	s.mu.Lock()
-	s.GroupRoles[group] = append([]string(nil), roles...)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	// A fresh slice rather than a compaction in place: a reader that took the
+	// slice under RLock must never observe this write through the array it is
+	// still walking.
+	next := make([]GroupRule, 0, len(s.groupRules)+len(replacement))
+	for _, existing := range s.groupRules {
+		if existing.Name != group {
+			next = append(next, existing)
+		}
+	}
+	s.groupRules = append(next, replacement...)
 	return nil
 }
 

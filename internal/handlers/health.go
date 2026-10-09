@@ -47,21 +47,44 @@ func Healthz(w http.ResponseWriter, _ *http.Request) {
 // one place. Adding a new readiness requirement (e.g. "cert provider
 // reachable") means updating config.Ready() — every caller
 // (this handler, integration tests, health checks) picks it up.
-func Readyz(w http.ResponseWriter, _ *http.Request) {
-	cfg, err := config.Load()
-	if err != nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
-			"status": "not_ready",
-			"reason": "config load failed: " + err.Error(),
-		})
-		return
+func Readyz(w http.ResponseWriter, r *http.Request) {
+	ReadyzWithCheck(nil)(w, r)
+}
+
+// ReadyzWithCheck is Readyz plus a caller-supplied check for state that
+// config.Load() cannot see.
+//
+// The api holds such state: a policy document that failed to reload keeps the
+// last valid generation in force, which is the right thing to serve but not a
+// thing to serve silently. Readiness is where that becomes visible to a
+// rollout rather than only to whoever reads the logs. A nil check keeps the
+// pre-existing behaviour exactly.
+func ReadyzWithCheck(check func() error) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		cfg, err := config.Load()
+		if err != nil {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not_ready",
+				"reason": "config load failed: " + err.Error(),
+			})
+			return
+		}
+		if !cfg.Ready() {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not_ready",
+				"reason": "OIDC issuer or client id not configured",
+			})
+			return
+		}
+		if check != nil {
+			if checkErr := check(); checkErr != nil {
+				jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+					"status": "not_ready",
+					"reason": "configuration reload failed: " + checkErr.Error(),
+				})
+				return
+			}
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "ready"})
 	}
-	if !cfg.Ready() {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
-			"status": "not_ready",
-			"reason": "OIDC issuer or client id not configured",
-		})
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]string{"status": "ready"})
 }

@@ -46,14 +46,22 @@ func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers
 // mapping specs are values-driven: non-nil transport enables Git-backed
 // editing, and specs seed the policy store's namespace mappings.
 type routerOptions struct {
-	logger         *slog.Logger
-	cfg            *config.Config
-	crypto         *crypto.Wrapper
-	k8s            kubernetes.Client
-	transport      gitops.GitTransport
-	oidcProvider   oidc.AuthProvider
-	mappingSpecs   []policy.GitMappingSpec
-	adapters       map[string]gitops.ProposalProvider
+	logger       *slog.Logger
+	cfg          *config.Config
+	crypto       *crypto.Wrapper
+	k8s          kubernetes.Client
+	transport    gitops.GitTransport
+	oidcProvider oidc.AuthProvider
+	mappingSpecs []policy.GitMappingSpec
+	adapters     map[string]gitops.ProposalProvider
+	// policyStore carries the roles, group grants, and Git mappings. It is
+	// built by main rather than here so the policy loader — which main owns,
+	// and which reloads on SIGHUP — mutates the store the router serves from.
+	// A nil store gets a fresh one, which is what the router tests want.
+	policyStore *policy.PolicyStore
+	// readyCheck adds a readiness condition from state config.Load cannot see,
+	// such as a policy document that failed to reload.
+	readyCheck     func() error
 	securityEvents handlers.SecurityEventSink
 	metricsHandler http.Handler
 }
@@ -76,7 +84,11 @@ func newRouter(options routerOptions) (http.Handler, error) {
 	r.Use(chimw.Timeout(30 * time.Second))
 	r.Use(middleware.RequestLogger(options.logger))
 	r.Get("/healthz", handlers.Healthz)
-	r.Get("/readyz", handlers.Readyz)
+	if options.readyCheck != nil {
+		r.Get("/readyz", handlers.ReadyzWithCheck(options.readyCheck))
+	} else {
+		r.Get("/readyz", handlers.Readyz)
+	}
 	// /metrics serves the Prometheus exposition. The handler comes from
 	// the telemetry wiring and returns 503 when metrics are disabled, so
 	// ServiceMonitor marks the target down instead of scraping an empty
@@ -100,7 +112,10 @@ func newRouter(options routerOptions) (http.Handler, error) {
 		logger.Error("SESSION_SIGNING_KEY is missing but OIDC provider is configured; /api/v1 routes will not be mounted")
 	}
 
-	policyStore := policy.NewPolicyStore()
+	policyStore := options.policyStore
+	if policyStore == nil {
+		policyStore = policy.NewPolicyStore()
+	}
 	var protected *handlers.ProtectedHandlers
 	if options.transport != nil {
 		protected = handlers.NewProtectedHandlersWithGitOps(policyStore, options.transport, options.k8s, options.crypto, options.cfg != nil && options.cfg.EnableDecrypt)
@@ -135,20 +150,19 @@ func newRouter(options routerOptions) (http.Handler, error) {
 		if origins := strings.Fields(options.cfg.CSRFTrustedOrigins); len(origins) > 0 {
 			authCfg.CSRFTrustedOrigins = origins
 		}
-		authCfg.ResolveCapabilities = func(groups []string) []string {
-			caps := policyStore.CapabilitiesForGroups(groups)
+		authCfg.ResolveCapabilities = func(groups []string) authmw.CapabilityGrants {
+			global, scoped := policyStore.NamespaceGrants(groups)
 			// The authorization check outcome lands as a metric with the
 			// bounded result label only; groups never become labels.
-			if len(caps) > 0 {
+			if len(global) > 0 || len(scoped) > 0 {
 				metrics.RecordOpenFGACheck("allow")
 			} else {
 				metrics.RecordOpenFGACheck("deny")
 			}
-			result := make([]string, 0, len(caps))
-			for _, cap := range caps {
-				result = append(result, string(cap))
+			return authmw.CapabilityGrants{
+				Global: capabilityStrings(global),
+				Scoped: namespaceCapabilityStrings(scoped),
 			}
-			return result
 		}
 		auth := authhandlers.NewAuthHandlers(provider, authCfg, authCfg.SigningKey)
 		r.Route("/api/v1", func(api chi.Router) {
@@ -166,4 +180,28 @@ func newRouter(options routerOptions) (http.Handler, error) {
 		)
 	}
 	return r, nil
+}
+
+// capabilityStrings renders policy capabilities in the vocabulary the session
+// identity carries.
+func capabilityStrings(capabilities []policy.Capability) []string {
+	result := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		result = append(result, string(capability))
+	}
+	return result
+}
+
+// namespaceCapabilityStrings renders the per-namespace grants, and returns nil
+// rather than an empty map when there are none: an identity with only global
+// grants should not carry an allocated map through every request.
+func namespaceCapabilityStrings(scoped map[string][]policy.Capability) map[string][]string {
+	if len(scoped) == 0 {
+		return nil
+	}
+	result := make(map[string][]string, len(scoped))
+	for namespace, capabilities := range scoped {
+		result[namespace] = capabilityStrings(capabilities)
+	}
+	return result
 }

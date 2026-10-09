@@ -367,10 +367,17 @@ func (h *AuthHandlers) MeHandler(w http.ResponseWriter, r *http.Request) {
 		"name":     identity.Name,
 		"username": identity.Username,
 	}
-	// The identity resolver maps groups to a flat capability list; the
-	// doc contract's per-namespace scoping is the remaining auth work.
-	// Until then, capabilities flow under "capabilities".
+	// "capabilities" is what the caller holds everywhere — its '*' grants —
+	// and "namespaces" is what it holds in named namespaces specifically. The
+	// two are additive: an effective grant in ns is the union. The map is
+	// always present (empty rather than absent) so a client can read it
+	// without a presence check.
 	response["capabilities"] = identity.Capabilities
+	namespaces := identity.NamespaceCapabilities
+	if namespaces == nil {
+		namespaces = map[string][]string{}
+	}
+	response["namespaces"] = namespaces
 
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, response)

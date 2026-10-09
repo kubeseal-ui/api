@@ -404,6 +404,29 @@ func main() {
 		slog.Error("proposal adapter construction failed", "error", adaptersErr)
 		os.Exit(1)
 	}
+
+	// The policy store is built here rather than inside newRouter so that the
+	// loader below, which re-reads the document on SIGHUP, mutates the store the
+	// serving path reads from.
+	policyStore := policy.NewPolicyStore()
+	var policyLoader *policy.Loader
+	if cfg.ConfigPath != "" {
+		policyLoader, err = policy.NewLoader(cfg.ConfigPath, policyStore)
+		if err != nil {
+			// No previous generation exists at boot, so there is nothing valid
+			// to fall back to: refuse to start rather than serve a policy the
+			// operator did not write.
+			slog.Error("authorization policy load failed", "path", cfg.ConfigPath, "error", err)
+			os.Exit(1)
+		}
+	} else {
+		slog.Warn("CONFIG_PATH is not set; capabilities come from OIDC groups named after built-in roles, and group-to-role grants cannot be configured")
+	}
+	var readyCheck func() error
+	if policyLoader != nil {
+		readyCheck = policyLoader.Err
+	}
+
 	router, routerErr := newRouter(routerOptions{
 		logger:         logger,
 		cfg:            &cfg,
@@ -413,6 +436,8 @@ func main() {
 		oidcProvider:   oidcProvider,
 		mappingSpecs:   parseMappingSpecs(cfg.GitMappingSpecs),
 		adapters:       adapters,
+		policyStore:    policyStore,
+		readyCheck:     readyCheck,
 		securityEvents: observability.NewStdoutSecurityEventSink(),
 		metricsHandler: telemetry.MetricsHandler(),
 	})
@@ -432,6 +457,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if policyLoader != nil {
+		go watchPolicyReloads(ctx, policyLoader)
+	}
+
 	go func() {
 		slog.Info("starting api",
 			"version", version,
@@ -439,6 +468,7 @@ func main() {
 			"enable_decrypt", cfg.EnableDecrypt,
 			"ready", cfg.Ready(),
 			"cert_provider_configured", cfg.KubeSealCertURL != "",
+			"config_path", cfg.ConfigPath,
 		)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "error", err)
@@ -457,6 +487,31 @@ func main() {
 	// Flush metrics, traces, and buffered logs before exit so a
 	// rolling restart loses no in-flight signal.
 	telemetry.Shutdown(shutdownCtx)
+}
+
+// watchPolicyReloads re-reads the policy document on SIGHUP until ctx ends.
+//
+// A failed reload is logged and the previous generation stays in force — the
+// alternative, falling back to no policy, would turn a file being edited into a
+// lockout. The failure also reaches /readyz through the loader, which is what
+// makes a bad ConfigMap rollout visible rather than merely logged.
+func watchPolicyReloads(ctx context.Context, loader *policy.Loader) {
+	reloads := make(chan os.Signal, 1)
+	signal.Notify(reloads, syscall.SIGHUP)
+	defer signal.Stop(reloads)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-reloads:
+			if err := loader.Reload(); err != nil {
+				slog.Error("policy reload failed; keeping the last valid generation",
+					"path", loader.Path(), "error", err)
+				continue
+			}
+			slog.Info("policy reloaded", "path", loader.Path())
+		}
+	}
 }
 
 // staticCertProvider is a placeholder that returns an error.

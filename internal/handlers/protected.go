@@ -105,26 +105,58 @@ func (h *ProtectedHandlers) claimIdempotency(r *http.Request) bool {
 	return h.idempotency.claim(key)
 }
 
-func requireCapability(w http.ResponseWriter, r *http.Request, required ...policy.Capability) bool {
+// requireCapability authorizes a request against the capabilities the identity
+// holds in one namespace.
+//
+// namespace is the namespace the request acts on. policy.AnyNamespace is for
+// checks that are platform-level rather than namespace-scoped, such as
+// cluster-wide creation: a namespace-scoped grant deliberately does not satisfy
+// them, because "may edit values in payments" is not an answer to "may create
+// cluster-wide". A request that cannot name its namespace at all uses
+// hasCapabilityAnywhere instead.
+func requireCapability(w http.ResponseWriter, r *http.Request, namespace string, required ...policy.Capability) bool {
 	identity, ok := authmw.GetIdentity(r.Context())
 	if !ok {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "Unauthenticated")
 		return false
 	}
 	for _, want := range required {
-		found := false
-		for _, got := range identity.Capabilities {
-			if got == string(want) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !identity.HasCapabilityIn(namespace, string(want)) {
 			writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 			return false
 		}
 	}
 	return true
+}
+
+// hasCapabilityAnywhere authorizes a request that spans namespaces and cannot
+// name one — a listing, or a body that has not been parsed yet. It writes the
+// same refusals requireCapability does.
+//
+// It is a gate, not a grant: what the caller may actually see or do is decided
+// per namespace afterwards.
+func hasCapabilityAnywhere(w http.ResponseWriter, r *http.Request, required ...policy.Capability) bool {
+	identity, ok := authmw.GetIdentity(r.Context())
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "Unauthenticated")
+		return false
+	}
+	for _, want := range required {
+		if !identity.HasCapabilityAnywhere(string(want)) {
+			writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // requestTransport is the Git transport for one request: the configured one,
@@ -404,10 +436,10 @@ func encryptedChecksum(value string) string {
 
 // SecretHandler returns encrypted metadata for one SealedSecret.
 func (h *ProtectedHandlers) SecretHandler(w http.ResponseWriter, r *http.Request) {
-	if !requireCapability(w, r, policy.MetadataRead) {
+	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
+	if !requireCapability(w, r, namespace, policy.MetadataRead) {
 		return
 	}
-	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
 	if !validName(namespace) || !validName(name) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_RESOURCE_NAME", "Invalid namespace or name")
 		return
@@ -433,12 +465,15 @@ func (h *ProtectedHandlers) SecretHandler(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// NamespacesHandler lists namespaces visible to the API service account.
+// NamespacesHandler lists the namespaces this caller may read.
 // When a PolicyStore is configured, each namespace includes its Git
 // delivery mode and target repository so the UI can show managed vs
 // unmanaged namespaces and adapt the editor workflow accordingly.
 func (h *ProtectedHandlers) NamespacesHandler(w http.ResponseWriter, r *http.Request) {
-	if !requireCapability(w, r, policy.MetadataRead) {
+	// The gate is "may read somewhere", not "may read everywhere": a grant
+	// scoped to one namespace is a reason to list, and the filter below is what
+	// decides which namespaces it covers.
+	if !hasCapabilityAnywhere(w, r, policy.MetadataRead) {
 		return
 	}
 	nsList, err := h.Kubernetes.ListNamespaces(r.Context())
@@ -446,54 +481,49 @@ func (h *ProtectedHandlers) NamespacesHandler(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
 	}
-	// Enrich with Git mapping info if available.
-	if h.GitMappings != nil {
-		for i, ns := range nsList {
-			mapping, ok := h.GitMappings.GetGitMapping(ns.Name)
-			if ok {
-				nsList[i].GitManaged = true
-				nsList[i].DeliveryMode = string(mapping.Mode)
-				nsList[i].GitRepository = mapping.Repository
+	identity, _ := authmw.GetIdentity(r.Context())
+	visible := nsList[:0]
+	for _, ns := range nsList {
+		caps := identity.CapabilitiesFor(ns.Name)
+		if !containsString(caps, string(policy.MetadataRead)) {
+			continue
+		}
+		ns.Capabilities = caps
+		// Enrich with Git mapping info if available.
+		if h.GitMappings != nil {
+			if mapping, ok := h.GitMappings.GetGitMapping(ns.Name); ok {
+				ns.GitManaged = true
+				ns.DeliveryMode = string(mapping.Mode)
+				ns.GitRepository = mapping.Repository
 			}
 		}
+		visible = append(visible, ns)
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"namespaces": nsList})
+	jsonResponse(w, http.StatusOK, map[string]any{"namespaces": visible})
 }
 
-// GitPathsHandler returns the allowed target paths for namespaces the user has gitops:push access to.
-// This enables the frontend to show a folder picker for seal operations.
+// GitPathsHandler returns the allowed target paths for namespaces the caller can
+// read. This enables the frontend to show a folder picker for seal operations.
+//
+// The destinations offered are the namespaces the caller holds metadata:read in,
+// matching the namespace listing, rather than the namespaces they hold
+// gitops:push in: this is a browse-and-name picker, and the capability that
+// actually authorizes a seal is checked on the encrypt request itself.
 func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Request) {
-	if !requireCapability(w, r, policy.MetadataRead) {
+	if !hasCapabilityAnywhere(w, r, policy.MetadataRead) {
 		return
 	}
 	if h.GitMappings == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
 		return
 	}
-	
-	// Get user's groups to determine which namespaces they have gitops:push access to
+
+	// The identity already resolved its own grants when the session was read
+	// for this request. Asking the store again here would be a second
+	// resolution path, free to disagree with the one authorizing every other
+	// endpoint.
 	identity, _ := authmw.GetIdentity(r.Context())
-	userGroups := identity.Groups
-	
-	// Build capability set from user's groups
-	var userCapabilities []policy.Capability
-	if len(userGroups) > 0 {
-		userCapabilities = h.GitMappings.CapabilitiesForGroups(userGroups)
-	}
-	
-	// Check which namespaces user has gitops:push access to
-	hasPush := make(map[string]bool)
-	for _, cap := range userCapabilities {
-		if cap == policy.GitOpsPush || cap == policy.GitOpsPropose {
-			// User has push/propose capability - they can access all mapped namespaces
-			// Per-namespace RBAC is enforced at seal time via IsPathAllowed
-			hasPush["*"] = true
-			break
-		}
-	}
-	
-	// For now, return all namespaces' allowedPaths (user's namespace access is controlled by RBAC on the secret itself)
-	// The actual write is validated by IsPathAllowed against the specific namespace's mapping
+
 	type nsPaths struct {
 		Namespace    string   `json:"namespace"`
 		DefaultPath  string   `json:"default_path"`
@@ -502,32 +532,56 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 		Branch       string   `json:"branch"`
 		Mode         string   `json:"mode"`
 	}
-	
-	var result []nsPaths
-		for ns, mapping := range h.GitMappings.GetAllMappings() {
-			result = append(result, nsPaths{
-				Namespace:    ns,
-				DefaultPath:  mapping.RenderPath(ns, ""),
-				AllowedPaths: mapping.AllowedPaths,
-				Repository:   mapping.Repository,
-				Branch:       mapping.Branch,
-				Mode:         string(mapping.Mode),
-			})
+
+	// A namespace the caller cannot read is not a namespace to offer as a
+	// destination, whatever the Git mapping says about it.
+	result := make([]nsPaths, 0)
+	for ns, mapping := range h.GitMappings.GetAllMappings() {
+		if !containsString(identity.CapabilitiesFor(ns), string(policy.MetadataRead)) {
+			continue
 		}
-	
-		jsonResponse(w, http.StatusOK, map[string]any{"namespaces": result})
+		result = append(result, nsPaths{
+			Namespace:    ns,
+			DefaultPath:  mapping.RenderPath(ns, ""),
+			AllowedPaths: mapping.AllowedPaths,
+			Repository:   mapping.Repository,
+			Branch:       mapping.Branch,
+			Mode:         string(mapping.Mode),
+		})
 	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{"namespaces": result})
+}
 
 // SecretsHandler lists SealedSecrets in a namespace.
 func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Request) {
-	if !requireCapability(w, r, policy.MetadataRead) {
+	namespace := r.URL.Query().Get("namespace")
+	if namespace == "" {
+		// No namespace named: the caller is asking across all of them, which is
+		// a question about where they hold metadata:read rather than about any
+		// one namespace. The listing below is filtered to those.
+		if !hasCapabilityAnywhere(w, r, policy.MetadataRead) {
+			return
+		}
+	} else if !requireCapability(w, r, namespace, policy.MetadataRead) {
 		return
 	}
-	namespace := r.URL.Query().Get("namespace")
 	secrets, err := h.Kubernetes.ListSealedSecrets(r.Context(), namespace)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
+	}
+	// Filter before the drift loop, not after: resolving drift reads Git, and a
+	// namespace this caller cannot see is not one worth a fetch.
+	if namespace == "" {
+		identity, _ := authmw.GetIdentity(r.Context())
+		visible := secrets[:0]
+		for _, secret := range secrets {
+			if containsString(identity.CapabilitiesFor(secret.Namespace), string(policy.MetadataRead)) {
+				visible = append(visible, secret)
+			}
+		}
+		secrets = visible
 	}
 	items := make([]map[string]any, 0, len(secrets))
 	// One transport for the whole listing: every Secret here is resolved
@@ -569,7 +623,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "seal", namespace, name, "", "", result) }()
 
-	if !requireCapability(w, r, policy.SecretSeal) {
+	if !hasCapabilityAnywhere(w, r, policy.SecretSeal) {
 		result = opResultDenied
 		return
 	}
@@ -606,6 +660,15 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	// Past validation the request names a resource, so the audit record can too.
 	namespace, name = req.Namespace, req.Name
 
+	// The early gate above could only ask whether the caller holds secret:seal
+	// somewhere; the body had not been read yet. Now that the target namespace is
+	// known and validated, the real question can be asked: a grant scoped to
+	// another namespace does not authorize this one.
+	if !requireCapability(w, r, req.Namespace, policy.SecretSeal) {
+		result = opResultDenied
+		return
+	}
+
 	// The submitted manifest is reduced to desired state before anything reads
 	// it: this is the shape a live Secret arrives in when it is adopted by
 	// pasting `kubectl get secret -o yaml`, and applying it to typed manifests
@@ -640,7 +703,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	// widens the blast radius beyond the caller's namespace mappings.
 	// Crypto-wrapper contract: cluster-wide creation requires access:manage
 	// on top of secret:seal.
-	if scope == crypto.ClusterWideScope && !requireCapability(w, r, policy.AccessManage) {
+	if scope == crypto.ClusterWideScope && !requireCapability(w, r, policy.AnyNamespace, policy.AccessManage) {
 		result = opResultDenied
 		return
 	}
@@ -762,7 +825,7 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "reveal", namespace, name, key, "", result) }()
 
-	if !requireCapability(w, r, policy.SecretDecrypt) {
+	if !requireCapability(w, r, namespace, policy.SecretDecrypt) {
 		result = opResultDenied
 		return
 	}
@@ -893,7 +956,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "diff", namespace, name, changedKeys, "", result) }()
 
-	if !requireCapability(w, r, policy.SecretSeal, policy.SecretDecrypt) {
+	if !requireCapability(w, r, namespace, policy.SecretSeal, policy.SecretDecrypt) {
 		result = opResultDenied
 		return
 	}
@@ -977,7 +1040,7 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "patch", namespace, name, changedKeys, "", result) }()
 
-	if !requireCapability(w, r, policy.SecretSeal, policy.SecretDecrypt) {
+	if !requireCapability(w, r, namespace, policy.SecretSeal, policy.SecretDecrypt) {
 		result = opResultDenied
 		return
 	}

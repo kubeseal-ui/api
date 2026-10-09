@@ -122,6 +122,14 @@ type Config struct {
 	// Sources: GITOPS_PROPOSAL_ADAPTERS env.
 	GitOpsProposalAdapters string
 
+	// ConfigPath is the Git-managed policy document holding role definitions
+	// and group-to-role grants (internal-docs/architecture/policy-git-schema.md).
+	// Empty leaves the authorization fallback in place, where an OIDC group
+	// named exactly after a built-in role grants that role everywhere; set, the
+	// document is the policy and that fallback is off. SIGHUP re-reads it.
+	// Sources: CONFIG_PATH env (the Helm value api.env.configPath).
+	ConfigPath string
+
 	// OTelEndpoint is the OTLP gRPC host:port (no scheme) receiving
 	// metrics, traces, and logs. Empty disables the SDK: /metrics serves
 	// 503, logging stays plain slog, and no network calls are made.
@@ -182,6 +190,7 @@ func Load() (Config, error) {
 		GitCredentialRefs:         os.Getenv("GITOPS_CREDENTIAL_REFS"),
 		GitMappingSpecs:           os.Getenv("GITOPS_NAMESPACES"),
 		GitOpsProposalAdapters:    os.Getenv("GITOPS_PROPOSAL_ADAPTERS"),
+		ConfigPath:                os.Getenv("CONFIG_PATH"),
 		OTelEndpoint:              os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		OTelServiceName:           os.Getenv("OTEL_SERVICE_NAME"),
 		OTelServiceVersion:        os.Getenv("OTEL_SERVICE_VERSION"),

@@ -80,7 +80,7 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 	change, mapping := cr.Change, cr.Mapping
-	if !hasGitCapability(r, mapping.Mode) {
+	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
 		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
@@ -113,7 +113,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	change, mapping := cr.Change, cr.Mapping
-	if !hasGitCapability(r, mapping.Mode) {
+	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
@@ -176,26 +176,25 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	jsonResponse(w, http.StatusOK, result)
 }
 
-func hasGitCapability(r *http.Request, mode policy.GitDeliveryMode) bool {
+// hasGitCapability reports whether the caller may deliver into the namespace the
+// mapping resolved to. Delivering into a namespace is an act in that namespace,
+// so a grant scoped elsewhere does not carry the capability here.
+func hasGitCapability(r *http.Request, namespace string, mode policy.GitDeliveryMode) bool {
 	id, _ := authmw.GetIdentity(r.Context())
-	want := policy.GitOpsCapabilityRequired(mode)
-	for _, cap := range id.Capabilities {
-		if cap == string(want) {
-			return true
-		}
-	}
-	return false
+	return id.HasCapabilityIn(namespace, string(policy.GitOpsCapabilityRequired(mode)))
 }
 
 // GitOpsSyncStatusHandler returns the drift status between live cluster and Git.
 // It uses Option A (two-tier source discovery: fast-path pathTemplate with Git tree walk fallback)
 // to locate the manifest in Git, and evaluates drift.
 func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *http.Request) {
-	if !requireCapability(w, r, policy.MetadataRead) {
-		return
-	}
+	// The namespace is a query parameter here, so it is read before the check
+	// rather than after: the check is about this namespace.
 	namespace := r.URL.Query().Get("namespace")
 	name := r.URL.Query().Get("name")
+	if !requireCapability(w, r, namespace, policy.MetadataRead) {
+		return
+	}
 	if !validName(namespace) || !validName(name) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid namespace or name")
 		return
@@ -314,7 +313,7 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
 		return
 	}
-	if !hasGitCapability(r, mapping.Mode) {
+	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
 		h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return

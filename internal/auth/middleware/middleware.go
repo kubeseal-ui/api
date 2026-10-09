@@ -28,6 +28,15 @@ const (
 	identityKey ctxKey = iota
 )
 
+// CapabilityGrants is an identity's resolved capabilities: Global applies in
+// every namespace, Scoped only in the namespaces it names. A namespace absent
+// from Scoped has no grants of its own — which is not the same as being denied,
+// because the global set still applies there.
+type CapabilityGrants struct {
+	Global []string
+	Scoped map[string][]string
+}
+
 // Identity represents the authenticated user identity.
 type Identity struct {
 	Subject      string
@@ -38,6 +47,68 @@ type Identity struct {
 	Expiry       time.Time
 	CSRF         string
 	Capabilities []string
+	// NamespaceCapabilities are the grants scoped to a namespace, keyed by
+	// namespace. Read them through CapabilitiesFor rather than directly: the
+	// effective set in a namespace is the scoped one unioned with the global.
+	NamespaceCapabilities map[string][]string
+}
+
+// CapabilitiesFor returns the capabilities the identity holds in one namespace:
+// its global grants plus the ones scoped to that namespace.
+func (i Identity) CapabilitiesFor(namespace string) []string {
+	return unionCapabilities(i.Capabilities, i.NamespaceCapabilities[namespace])
+}
+
+// HasCapabilityIn reports whether the identity holds a capability in a
+// namespace.
+func (i Identity) HasCapabilityIn(namespace, capability string) bool {
+	return containsCapability(i.CapabilitiesFor(namespace), capability)
+}
+
+// HasCapabilityAnywhere reports whether the identity holds a capability
+// somewhere, in any namespace.
+//
+// It is the pre-filter for a request whose namespace is not known yet — a body
+// that has not been parsed, or a listing spanning every namespace — and it must
+// never authorize a specific namespace: "holds secret:seal in payments" is not
+// an answer to "may this caller seal in development".
+func (i Identity) HasCapabilityAnywhere(capability string) bool {
+	if containsCapability(i.Capabilities, capability) {
+		return true
+	}
+	for _, scoped := range i.NamespaceCapabilities {
+		if containsCapability(scoped, capability) {
+			return true
+		}
+	}
+	return false
+}
+
+// unionCapabilities returns the union of two capability lists, preserving order
+// and dropping duplicates. Nil in, nil out: an identity with no grants at all
+// should not carry an allocated empty slice through every request.
+func unionCapabilities(lists ...[]string) []string {
+	var result []string
+	seen := map[string]bool{}
+	for _, list := range lists {
+		for _, capability := range list {
+			if seen[capability] {
+				continue
+			}
+			seen[capability] = true
+			result = append(result, capability)
+		}
+	}
+	return result
+}
+
+func containsCapability(capabilities []string, capability string) bool {
+	for _, candidate := range capabilities {
+		if candidate == capability {
+			return true
+		}
+	}
+	return false
 }
 
 // WithIdentity adds an authenticated identity to a request context.
@@ -74,7 +145,7 @@ type AuthConfig struct {
 	// SigningKey is the HMAC key used to sign/verify session cookies.
 	SigningKey []byte
 	// ResolveCapabilities maps normalized OIDC groups to effective capabilities.
-	ResolveCapabilities func([]string) []string
+	ResolveCapabilities func([]string) CapabilityGrants
 }
 
 // DefaultAuthConfig returns a default auth config for testing.
@@ -325,16 +396,16 @@ func scheduleAsyncRefresh(r *http.Request, expiry int64, cfg AuthConfig, signing
 }
 
 // buildIdentity creates an Identity from session cookie data.
-func buildIdentity(cookieData sessionCookieData, resolve ...func([]string) []string) Identity {
-	caps := []string(nil)
+func buildIdentity(cookieData sessionCookieData, resolve ...func([]string) CapabilityGrants) Identity {
+	var grants CapabilityGrants
 	if len(resolve) > 0 && resolve[0] != nil {
-		caps = resolve[0](cookieData.Groups)
+		grants = resolve[0](cookieData.Groups)
 	}
 	return Identity{
 		Subject: cookieData.Subject, Email: cookieData.Email, Name: cookieData.Name,
 		Username: cookieData.Username, Groups: cookieData.Groups,
 		Expiry: time.Unix(cookieData.Expiry, 0), CSRF: cookieData.CSRF,
-		Capabilities: caps,
+		Capabilities: grants.Global, NamespaceCapabilities: grants.Scoped,
 	}
 }
 
