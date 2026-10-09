@@ -169,6 +169,55 @@ func TestGitPathsHandlerOffersOnlyGrantedNamespaces(t *testing.T) {
 	}
 }
 
+// The wildcard mapping is not a namespace, so the namespace filter does not
+// apply to it: it is the mapping every unmapped namespace falls back to (see
+// PolicyStore.GetGitMapping), and the client resolves it by the same fallback.
+// A deployment configured with a single wildcard mapping — the common shape —
+// therefore must still see it, or the delivery panel has no mode to name, while
+// a real namespace the caller cannot read stays hidden.
+func TestGitPathsHandlerKeepsTheWildcardMapping(t *testing.T) {
+	store := policy.NewPolicyStore()
+	for _, namespace := range []string{policy.AnyNamespace, "payments", "development"} {
+		if err := store.SetGitMapping(policy.GitMapping{
+			Namespace: namespace, Repository: "YogaNovvaindra/kube", Branch: "main",
+			PathTemplate: "{namespace}/{name}-cred.yml", AuthRef: "git-auth",
+			Mode: policy.GitDeliveryDirect,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewProtectedHandlersWithGitOps(store, gitops.NewLocalTransport(), nil, nil, false)
+	identity := scopedIdentity(nil, map[string][]policy.Capability{"payments": {policy.MetadataRead}})
+
+	rr := httptest.NewRecorder()
+	h.GitPathsHandler(rr, protectedRequest(http.MethodGet, "/api/v1/gitops/paths", "", identity))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Namespaces []struct {
+			Namespace string `json:"namespace"`
+			Mode      string `json:"mode"`
+		} `json:"namespaces"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	modes := make(map[string]string, len(body.Namespaces))
+	for _, entry := range body.Namespaces {
+		modes[entry.Namespace] = entry.Mode
+	}
+	if modes[policy.AnyNamespace] != string(policy.GitDeliveryDirect) {
+		t.Fatalf("wildcard entry = %q, want a direct mapping: %+v", modes[policy.AnyNamespace], body.Namespaces)
+	}
+	if _, ok := modes["payments"]; !ok {
+		t.Fatalf("payments holds metadata:read and is missing: %+v", body.Namespaces)
+	}
+	if _, ok := modes["development"]; ok {
+		t.Fatalf("development is readable nowhere and must not be offered: %+v", body.Namespaces)
+	}
+}
+
 // The seal gate fires before the body is read, so a caller who holds secret:seal
 // nowhere is refused without their manifest being parsed. A body that is not
 // even valid JSON is the proof: 403 means the decode never ran, 400 would mean

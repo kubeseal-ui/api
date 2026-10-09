@@ -534,10 +534,16 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 	}
 
 	// A namespace the caller cannot read is not a namespace to offer as a
-	// destination, whatever the Git mapping says about it.
+	// destination, whatever the Git mapping says about it. The wildcard entry is
+	// the exception, because it is not a namespace: it is the mapping every
+	// unmapped namespace falls back to, and the client resolves it exactly as the
+	// server does — a listing that dropped it would leave a deployment whose
+	// mappings are all wildcards with no delivery mode to show at all. Asking
+	// whether the caller holds a grant in a namespace named "*" would answer a
+	// question this file never asks.
 	result := make([]nsPaths, 0)
 	for ns, mapping := range h.GitMappings.GetAllMappings() {
-		if !containsString(identity.CapabilitiesFor(ns), string(policy.MetadataRead)) {
+		if ns != policy.AnyNamespace && !containsString(identity.CapabilitiesFor(ns), string(policy.MetadataRead)) {
 			continue
 		}
 		result = append(result, nsPaths{
