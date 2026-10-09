@@ -35,12 +35,31 @@ jobs:
         fail_ci_if_error: false
         token: ${{ secrets.CODECOV_TOKEN }}
 
+    # Build golangci-lint from source with this job's Go toolchain rather than
+    # letting golangci-lint-action install a binary. A linter built by an older
+    # Go cannot decode the export data that Go 1.27's standard library emits,
+    # and typecheck fails on fmt/os/strings/flag before any project package is
+    # read:
+    #   cannot decode "internal/goarch", export data version 5 is greater
+    #   than maximum supported version 4
+    # GOTOOLCHAIN=local pins the build to the Go that setup-go installed above.
+    - name: Install golangci-lint
+      env:
+        GOTOOLCHAIN: local
+      run: |
+        go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+    # The banner names the Go that built the binary. If a future run reports
+    # export-data skew again, compare it against the `go version` line printed
+    # just before it.
+    - name: Print toolchain and linter versions
+      run: |
+        go version
+        golangci-lint version
+
     - name: Run linter
-      uses: golangci/golangci-lint-action@v7
-      with:
-        install-mode: 'goinstall'
-        version: v2.13.2
-        args: ./...
+      run: golangci-lint run ./...
 
   build:
     name: Build & Test Build
