@@ -433,10 +433,23 @@ type encryptRequest struct {
 
 // EncryptHandler encrypts a Secret manifest without persisting it.
 func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Request) {
+	// The resource is named in the body rather than the URL, so these can only
+	// be populated after the decode below. Every path that refuses before then
+	// — an unauthenticated caller, or one without secret:seal — therefore
+	// records an event with no namespace and no name. That is the honest
+	// record: at the point of refusal nothing had been named yet, and parsing
+	// untrusted input for a caller who cannot act on it would be the worse
+	// trade.
+	var namespace, name string
+	result := opResultFailed
+	defer func() { h.emitSecurityEvent(r, "seal", namespace, name, "", "", result) }()
+
 	if !requireCapability(w, r, policy.SecretSeal) {
+		result = opResultDenied
 		return
 	}
 	if h.Crypto == nil {
+		result = opResultDisabled
 		writeError(w, r, http.StatusServiceUnavailable, "CRYPTO_UNAVAILABLE", "Crypto unavailable")
 		return
 	}
@@ -444,6 +457,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	}
 	if r.ContentLength > maxRequestBody {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "Request body too large")
 		return
 	}
@@ -451,20 +465,26 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
+			result = opResultInvalidRequest
 			writeError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "Request body too large")
 			return
 		}
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
 	if req.Namespace == "" || req.Name == "" || req.YAML == "" || !validName(req.Namespace) || !validName(req.Name) {
+		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
+	// Past validation the request names a resource, so the audit record can too.
+	namespace, name = req.Namespace, req.Name
 
 	// Resolve the mapped target once, so the vacancy gate below and the
-	// response's base commit both use the same path.
-	mapping, mapped, mappedPath, ok := h.resolveEncryptTarget(w, r, &req)
+	// response's base commit both use the same path. The helper writes its own
+	// error response, so it reports the bounded outcome back through result.
+	mapping, mapped, mappedPath, ok := h.resolveEncryptTarget(w, r, &req, &result)
 	if !ok {
 		return
 	}
@@ -472,6 +492,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	scope := crypto.StrictScope
 	if req.Scope != "" {
 		if err := scope.Set(req.Scope); err != nil {
+			result = opResultInvalidRequest
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", "Invalid scope")
 			return
 		}
@@ -481,13 +502,14 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	// Crypto-wrapper contract: cluster-wide creation requires access:manage
 	// on top of secret:seal.
 	if scope == crypto.ClusterWideScope && !requireCapability(w, r, policy.AccessManage) {
+		result = opResultDenied
 		return
 	}
 
 	baseCommit := ""
 	if mapped {
 		// Checked before encrypting so a doomed request does no crypto work.
-		baseCommit, ok = h.encryptTargetIsVacant(w, r, mapping, mappedPath, &req)
+		baseCommit, ok = h.encryptTargetIsVacant(w, r, mapping, mappedPath, &req, &result)
 		if !ok {
 			return
 		}
@@ -495,12 +517,14 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 
 	sealed, err := h.Crypto.EncryptYAML(r.Context(), req.YAML, req.Namespace, req.Name, scope)
 	if err != nil {
+		result = opResultFailed
 		slog.Error("encrypt secret failed", "namespace", req.Namespace, "name", req.Name, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "ENCRYPTION_FAILED", "Unable to encrypt request")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed, "base_commit": baseCommit})
+	result = opResultSuccess
 }
 
 // resolveEncryptTarget decides which mapped file a new Secret would occupy and
@@ -511,8 +535,10 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 // path, or when there is no transport to read with. A namespace with no mapped
 // path has nothing to occupy, so encrypt keeps working unmapped. It writes an
 // error response and returns ok=false when the request itself cannot be
-// satisfied — an unknown namespace or a target path the mapping does not allow.
-func (h *ProtectedHandlers) resolveEncryptTarget(w http.ResponseWriter, r *http.Request, req *encryptRequest) (policy.GitMapping, bool, string, bool) {
+// satisfied — an unknown namespace or a target path the mapping does not allow —
+// and reports that refusal's bounded outcome through result, because the caller
+// has no other way to see which of the two it was.
+func (h *ProtectedHandlers) resolveEncryptTarget(w http.ResponseWriter, r *http.Request, req *encryptRequest, result *string) (policy.GitMapping, bool, string, bool) {
 	if req.TargetPath == "" {
 		if h.GitMappings == nil || h.GitTransport == nil {
 			return policy.GitMapping{}, false, "", true
@@ -529,15 +555,23 @@ func (h *ProtectedHandlers) resolveEncryptTarget(w http.ResponseWriter, r *http.
 	}
 
 	if h.GitMappings == nil {
+		*result = opResultDisabled
 		writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
 		return policy.GitMapping{}, false, "", false
 	}
 	mapping, ok := h.GitMappings.GetGitMapping(req.Namespace)
 	if !ok {
+		*result = opResultNotFound
 		writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
 		return policy.GitMapping{}, false, "", false
 	}
 	if !mapping.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
+		// The response is a 400 because the client asked for the wrong thing,
+		// but the refusal itself is the mapping's policy, so the outcome is
+		// recorded as a denial: an audit that could not separate "tried to
+		// write outside the granted paths" from "sent malformed JSON" would
+		// not be worth keeping.
+		*result = opResultDenied
 		writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
 		return policy.GitMapping{}, false, "", false
 	}
@@ -557,16 +591,19 @@ func (h *ProtectedHandlers) resolveEncryptTarget(w http.ResponseWriter, r *http.
 // The vacant path still reports the branch head, and that head is the return
 // value: BaseCommit is compared against the branch head, and no other endpoint
 // yields one for a namespace that has no secrets yet. It writes an error
-// response and returns ok=false on refusal.
-func (h *ProtectedHandlers) encryptTargetIsVacant(w http.ResponseWriter, r *http.Request, mapping policy.GitMapping, path string, req *encryptRequest) (string, bool) {
+// response and returns ok=false on refusal, and reports that refusal's bounded
+// outcome through result for the same reason resolveEncryptTarget does.
+func (h *ProtectedHandlers) encryptTargetIsVacant(w http.ResponseWriter, r *http.Request, mapping policy.GitMapping, path string, req *encryptRequest, result *string) (string, bool) {
 	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}
 	snapshot, found, err := h.lookupManifest(r.Context(), mapping, target, req.Namespace, req.Name)
 	if err != nil {
+		*result = opResultFailed
 		slog.Error("git lookup failed", "namespace", req.Namespace, "name", req.Name, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return "", false
 	}
 	if found {
+		*result = opResultConflict
 		writeError(w, r, http.StatusConflict, "PATH_OCCUPIED", "A manifest for this Secret already exists at the mapped path")
 		return "", false
 	}
