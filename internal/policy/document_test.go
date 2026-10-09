@@ -118,9 +118,12 @@ func TestParseDocumentRejections(t *testing.T) {
 			wantSub: "version",
 		},
 		{
+			// A singular slip on a plural field is the realistic case this
+			// guards: it is unknown, so the document is refused rather than
+			// read as a section that grants nothing.
 			name:    "unknown field",
-			doc:     "version: 1\nauthz:\n  capabilites:\n    - metadata:read\n",
-			wantSub: "capabilites",
+			doc:     "version: 1\nauthz:\n  capability:\n    - metadata:read\n",
+			wantSub: "capability",
 		},
 		{
 			name:    "unknown capability",

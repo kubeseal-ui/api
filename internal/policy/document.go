@@ -98,7 +98,7 @@ func ParseDocument(data []byte) (Document, error) {
 	var doc Document
 	decoder := json.NewDecoder(bytes.NewReader(jsonBytes))
 	// Strict: the schema's contract is that unknown fields fail validation, and
-	// without this a typo like "capabilites" would parse as a role that grants
+	// without this a misspelled key would parse as a section that grants
 	// nothing — a rule that silently does not apply.
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&doc); err != nil {
