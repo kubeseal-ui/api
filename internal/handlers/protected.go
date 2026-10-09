@@ -236,6 +236,21 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 		return status, err
 	}
 	if !found {
+		// The snapshot still carries the branch head, and here that head is the
+		// whole point of the sync endpoint: a live Secret with no manifest in Git
+		// is `live_only`, and syncing it means creating that file — built on the
+		// head and checked against it. encryptTargetIsVacant reports the same
+		// value for the same vacancy on the create path, and a branch nothing has
+		// been seeded on has no head to report, so the guard is on the value
+		// rather than on the case.
+		//
+		// Dropping it left the client in a contradiction: the sync status
+		// endpoint calls this drift `can_sync`, and the sync endpoint refuses an
+		// empty base commit, so the one drift the control exists for was the one
+		// it could not perform.
+		if snapshot.Commit != "" {
+			status["base_commit"] = snapshot.Commit
+		}
 		if liveYAML != "" {
 			status["drift"] = "live_only"
 		}

@@ -700,3 +700,89 @@ func TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew(t *testing.
 	}
 }
 
+// TestGitOpsSyncStatusReportsTheHeadForALiveOnlySecret covers the drift the sync
+// control exists for: a Secret that is live in the cluster and has no manifest
+// in Git at all.
+//
+// The head is what the client has to send back with the sync, and the sync
+// endpoint refuses an empty base commit. A git state that reports this drift
+// without one tells the client it can sync while handing it nothing to sync
+// with, so the status is read here for the head and the sync is then performed
+// with what the status reported rather than with a value the test already knew.
+func TestGitOpsSyncStatusReportsTheHeadForALiveOnlySecret(t *testing.T) {
+	const head = "head-live-only"
+	// Git holds a different SealedSecret, so the branch has a head and the tree
+	// walk has something to search — this identity is genuinely absent from the
+	// repository rather than absent because the repository could not be read.
+	transport := gitops.NewLocalTransport()
+	transport.Seed(
+		gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/secrets/other.yaml"},
+		"apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: other\n  namespace: cluster\nspec:\n  encryptedData:\n    key: other-cipher\n",
+		head,
+	)
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{
+		Namespace:    "cluster",
+		Repository:   "platform",
+		Branch:       "main",
+		PathTemplate: "cluster/sealed-secrets/{namespace}/{name}.yaml",
+		AuthRef:      "auth",
+		Mode:         policy.GitDeliveryDirect,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	liveYAML := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: live-cipher\n"
+	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{
+		{Name: "kubeseal-cred", Namespace: "cluster", YAML: liveYAML},
+	}}
+
+	h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+	rr := httptest.NewRecorder()
+	h.GitOpsSyncStatusHandler(rr, protectedRequest(http.MethodGet, "/api/v1/gitops/sync?namespace=cluster&name=kubeseal-cred", "", protectedIdentity(policy.MetadataRead)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var status map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["drift_status"] != "live_only" {
+		t.Fatalf("drift_status = %v, want live_only", status["drift_status"])
+	}
+	// The two fields have to agree: can_sync is only an offer the client can
+	// take up if a base commit came with it.
+	if status["can_sync"] != true {
+		t.Fatalf("can_sync = %v, want true", status["can_sync"])
+	}
+	base, _ := status["base_commit"].(string)
+	if base != head {
+		t.Fatalf("base_commit = %v, want %q", status["base_commit"], head)
+	}
+
+	body, err := json.Marshal(map[string]string{"namespace": "cluster", "name": "kubeseal-cred", "base_commit": base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/sync", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "sync-live-only-1")
+	rr = httptest.NewRecorder()
+	h.GitOpsSyncHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("sync status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	// The live Secret is in Git now, at the mapping's rendered path: there was no
+	// file for this identity to be discovered at.
+	const path = "cluster/sealed-secrets/cluster/kubeseal-cred.yaml"
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: path}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != liveYAML {
+		t.Fatalf("Git content mismatch: expected %q, got %q", liveYAML, string(snapshot.Content))
+	}
+}
+
