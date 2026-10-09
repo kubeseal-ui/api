@@ -232,29 +232,14 @@ func (w *Wrapper) privateKeyMap(ctx context.Context) (map[string]*rsa.PrivateKey
 	return out, nil
 }
 
-// Reseal mutates one key in an existing SealedSecret: decrypt internally,
-// apply the mutation (replace/add/delete), re-encrypt, and return the
-// new SealedSecret YAML. Only the requested key's new value is accepted
-// from the caller; unrelated values are never exposed.
-func (w *Wrapper) Reseal(ctx context.Context, sealedYAML, key, newValue string, op ResealOp) (string, error) {
-	if w.priv == nil {
-		return "", fmt.Errorf("crypto: decrypt is disabled (ENABLE_DECRYPT=false)")
-	}
-
-	secretYAML, err := w.DecryptYAML(ctx, sealedYAML)
-	if err != nil {
-		return "", fmt.Errorf("crypto: decrypt for reseal: %w", err)
-	}
-
-	updated, err := mutateSecretYAML(secretYAML, key, newValue, op, w.codecs)
-	if err != nil {
-		return "", err
-	}
-
-	return w.EncryptYAML(ctx, updated, "", "", StrictScope)
+// Mutation is one entry change in a reseal batch.
+type Mutation struct {
+	Key   string
+	Value string
+	Op    ResealOp
 }
 
-// ResealOp is the mutation operation for Reseal.
+// ResealOp is the mutation operation for Reseal and ResealMany.
 type ResealOp string
 
 const (
@@ -262,6 +247,47 @@ const (
 	ResealAdd     ResealOp = "add"
 	ResealDelete  ResealOp = "delete"
 )
+
+// ResealMany mutates any number of keys in an existing SealedSecret in one
+// pass: decrypt internally, apply every mutation, re-encrypt once, and return
+// the new SealedSecret YAML. Only the values the caller supplies are accepted;
+// unrelated values are never exposed.
+//
+// A batch is one reviewed change and one commit, so it is validated before
+// anything is applied and either lands whole or not at all. See
+// mutateSecretYAML for the validation rules.
+func (w *Wrapper) ResealMany(ctx context.Context, sealedYAML string, mutations []Mutation) (string, error) {
+	if w.priv == nil {
+		return "", fmt.Errorf("crypto: decrypt is disabled (ENABLE_DECRYPT=false)")
+	}
+	if len(mutations) == 0 {
+		return "", fmt.Errorf("crypto: no mutations given")
+	}
+
+	secretYAML, err := w.DecryptYAML(ctx, sealedYAML)
+	if err != nil {
+		return "", fmt.Errorf("crypto: decrypt for reseal: %w", err)
+	}
+
+	updated, scope, err := mutateSecretYAML(secretYAML, mutations, w.codecs)
+	if err != nil {
+		return "", err
+	}
+
+	// The scope is the one the Secret already carried, not a default. Re-sealing
+	// at the wrong scope is not cosmetic: a namespace-wide Secret re-sealed as
+	// strict stops decrypting outside its own namespace, and a cluster-wide one
+	// stops decrypting anywhere else.
+	return w.EncryptYAML(ctx, updated, "", "", scope)
+}
+
+// Reseal mutates one key in an existing SealedSecret. It is the single-mutation
+// case of ResealMany — kept as its own entry point because most callers change
+// one key, and routed through ResealMany so there is one implementation and one
+// set of rules rather than two that can drift apart.
+func (w *Wrapper) Reseal(ctx context.Context, sealedYAML, key, newValue string, op ResealOp) (string, error) {
+	return w.ResealMany(ctx, sealedYAML, []Mutation{{Key: key, Value: newValue, Op: op}})
+}
 
 // ExtractKeys returns the key names from a SealedSecret's encrypted data
 // without decrypting. This lets the UI show which keys exist in the secret

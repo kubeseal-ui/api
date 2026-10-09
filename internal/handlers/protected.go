@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/go-chi/chi/v5"
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
@@ -34,8 +33,7 @@ type ProtectedHandlers struct {
 	GitMappings     *policy.PolicyStore
 	GitTransport    gitops.GitTransport
 	SecurityEvents  SecurityEventSink
-	idempotencyMu   sync.Mutex
-	idempotencyKeys map[string]struct{}
+	idempotency     *idempotencyStore
 }
 
 // SecurityEventSink receives bounded audit records for sensitive operations.
@@ -74,27 +72,35 @@ const (
 
 // NewProtectedHandlers constructs handlers for protected resources.
 func NewProtectedHandlers(k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, enableDecrypt bool) *ProtectedHandlers {
-	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, idempotencyKeys: make(map[string]struct{})}
+	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, idempotency: newIdempotencyStore()}
 }
 
 func NewProtectedHandlersWithGitOps(store *policy.PolicyStore, transport gitops.GitTransport, k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, enableDecrypt bool) *ProtectedHandlers {
-	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, GitMappings: store, GitTransport: transport, idempotencyKeys: make(map[string]struct{})}
+	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, GitMappings: store, GitTransport: transport, idempotency: newIdempotencyStore()}
 }
 
-func (h *ProtectedHandlers) claimIdempotency(r *http.Request) bool {
+// idempotencyKey is the Idempotency-Key namespaced by the subject that sent it,
+// so one caller cannot spend or block another's key. Empty when the header is
+// absent.
+func (h *ProtectedHandlers) idempotencyKey(r *http.Request) string {
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		return ""
+	}
+	id, _ := authmw.GetIdentity(r.Context())
+	return id.Subject + "\x00" + key
+}
+
+// claimIdempotency reports whether this request may proceed, or whether it
+// repeats one already claimed by the same subject. It is for endpoints that
+// only need to refuse a duplicate; delivery endpoints use beginDelivery so a
+// retry is answered with the original outcome instead.
+func (h *ProtectedHandlers) claimIdempotency(r *http.Request) bool {
+	key := h.idempotencyKey(r)
 	if key == "" {
 		return false
 	}
-	id, _ := authmw.GetIdentity(r.Context())
-	compound := id.Subject + "\x00" + key
-	h.idempotencyMu.Lock()
-	defer h.idempotencyMu.Unlock()
-	if _, exists := h.idempotencyKeys[compound]; exists {
-		return false
-	}
-	h.idempotencyKeys[compound] = struct{}{}
-	return true
+	return h.idempotency.claim(key)
 }
 
 func requireCapability(w http.ResponseWriter, r *http.Request, required ...policy.Capability) bool {

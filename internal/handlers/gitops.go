@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
 	"github.com/kubeseal-ui/api/internal/gitops"
@@ -126,14 +125,13 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 		return
 	}
-	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
-		writeError(w, r, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key")
+	// A retry of a delivery that already succeeded is answered with its
+	// original response rather than refused — see beginDelivery.
+	w, finishDelivery, proceed := h.beginDelivery(w, r)
+	if !proceed {
 		return
 	}
-	if !h.claimIdempotency(r) {
-		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
-		return
-	}
+	defer finishDelivery()
 	// Proposal namespaces push a dedicated branch, never the mapped
 	// direct branch. Direct namespaces push the mapped branch itself.
 	// The branch is derived from the secret's identity (namespace/name) so
@@ -322,14 +320,13 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 		return
 	}
-	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
-		writeError(w, r, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key")
+	// A retry of a sync that already succeeded is answered with its original
+	// response rather than refused — see beginDelivery.
+	w, finishDelivery, proceed := h.beginDelivery(w, r)
+	if !proceed {
 		return
 	}
-	if !h.claimIdempotency(r) {
-		writeError(w, r, http.StatusConflict, "DUPLICATE_REQUEST", "Request already processed")
-		return
-	}
+	defer finishDelivery()
 
 	// Fetch the live SealedSecret from Kubernetes.
 	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), req.Namespace, req.Name)
