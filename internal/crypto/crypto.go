@@ -166,7 +166,7 @@ func (w *Wrapper) EncryptYAML(ctx context.Context, secretYAML string, namespace,
 
 	var buf bytes.Buffer
 	encoder := w.codecs.LegacyCodec(ssv1alpha1.SchemeGroupVersion)
-	if err := encoder.Encode(sealed, &buf); err != nil {
+	if err = encoder.Encode(sealed, &buf); err != nil {
 		return "", fmt.Errorf("crypto: encode sealed secret: %w", err)
 	}
 	// The codec is the API server's serializer, and it writes JSON. What the
