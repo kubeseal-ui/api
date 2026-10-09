@@ -35,7 +35,10 @@ func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers
 	r.Get("/gitops/sync", protected.GitOpsSyncStatusHandler)
 	r.Post("/gitops/sync", protected.GitOpsSyncHandler)
 	r.Post("/secrets/{namespace}/{name}/reveal", protected.DecryptHandler)
-	r.Patch("/secrets/{namespace}/{name}/values/{key}", protected.ResealHandler)
+	// A batch has no single key to name in the path, so the keys travel in the
+	// body. The route stays a PATCH on the Secret's values collection, which is
+	// what it edits.
+	r.Patch("/secrets/{namespace}/{name}/values", protected.ResealHandler)
 	r.Post("/secrets/encrypt", protected.EncryptHandler)
 }
 

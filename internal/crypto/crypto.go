@@ -21,6 +21,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -248,6 +249,13 @@ const (
 	ResealDelete  ResealOp = "delete"
 )
 
+// ErrInvalidMutation marks a batch the caller got wrong rather than one this
+// package failed to carry out: an unknown operation, a key that does not exist,
+// an add over a key that does, or a batch that would empty the Secret. It is
+// deliberately separate from a decryption or encoding failure so a handler can
+// answer with a 4xx instead of blaming the backend for the caller's mistake.
+var ErrInvalidMutation = errors.New("crypto: invalid mutation")
+
 // ResealMany mutates any number of keys in an existing SealedSecret in one
 // pass: decrypt internally, apply every mutation, re-encrypt once, and return
 // the new SealedSecret YAML. Only the values the caller supplies are accepted;
@@ -261,7 +269,7 @@ func (w *Wrapper) ResealMany(ctx context.Context, sealedYAML string, mutations [
 		return "", fmt.Errorf("crypto: decrypt is disabled (ENABLE_DECRYPT=false)")
 	}
 	if len(mutations) == 0 {
-		return "", fmt.Errorf("crypto: no mutations given")
+		return "", fmt.Errorf("%w: no mutations given", ErrInvalidMutation)
 	}
 
 	secretYAML, err := w.DecryptYAML(ctx, sealedYAML)
@@ -328,13 +336,26 @@ func parseSealedSecret(yamlStr string) (*ssv1alpha1.SealedSecret, error) {
 	return &ss, nil
 }
 
-// mutateSecretYAML applies one mutation (replace/add/delete) to a
-// Secret YAML's stringData and returns the updated YAML string.
-func mutateSecretYAML(secretYAML, key, newValue string, op ResealOp, codecs serializer.CodecFactory) (string, error) {
+// mutateSecretYAML applies a batch of mutations to a Secret YAML's data and
+// returns the updated YAML along with the sealing scope the Secret already
+// carried.
+//
+// Every mutation is validated against the key set as it stood *before* the
+// batch, not against the state left by earlier mutations in the same batch. A
+// batch is one reviewed change, so it reads as a single description of the
+// finished Secret rather than as a sequence — which also means the outcome
+// cannot depend on the order the client happened to send, and a batch naming
+// the same key twice is refused rather than silently resolving to whichever
+// entry came last.
+//
+// Validation is complete before anything is applied, so a refused batch leaves
+// no partial mutation behind: the caller either gets a fully mutated Secret or
+// an error and the original.
+func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer.CodecFactory) (string, Scope, error) {
 	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(secretYAML), 4096)
 	var secret corev1.Secret
 	if err := decoder.Decode(&secret); err != nil {
-		return "", fmt.Errorf("crypto: decode secret for mutation: %w", err)
+		return "", StrictScope, fmt.Errorf("crypto: decode secret for mutation: %w", err)
 	}
 
 	data := map[string]string{}
@@ -345,27 +366,52 @@ func mutateSecretYAML(secretYAML, key, newValue string, op ResealOp, codecs seri
 		data[k] = v
 	}
 
-	switch op {
-	case ResealAdd:
-		if _, exists := data[key]; exists {
-			return "", fmt.Errorf("crypto: key %q already exists (use replace)", key)
+	present := make(map[string]bool, len(data))
+	for k := range data {
+		present[k] = true
+	}
+	// Deletions are counted against the starting state too, so a batch that
+	// would empty the Secret is refused as a whole rather than succeeding or
+	// failing depending on the order its entries arrive in.
+	finalCount := len(data)
+	seen := make(map[string]bool, len(mutations))
+	for _, m := range mutations {
+		if m.Key == "" {
+			return "", StrictScope, fmt.Errorf("%w: mutation has an empty key", ErrInvalidMutation)
 		}
-		data[key] = newValue
-	case ResealReplace:
-		if _, exists := data[key]; !exists {
-			return "", fmt.Errorf("crypto: key %q does not exist (use add)", key)
+		if seen[m.Key] {
+			return "", StrictScope, fmt.Errorf("%w: key %q appears twice in one batch", ErrInvalidMutation, m.Key)
 		}
-		data[key] = newValue
-	case ResealDelete:
-		if _, exists := data[key]; !exists {
-			return "", fmt.Errorf("crypto: key %q does not exist", key)
+		seen[m.Key] = true
+		switch m.Op {
+		case ResealAdd:
+			if present[m.Key] {
+				return "", StrictScope, fmt.Errorf("%w: key %q already exists (use replace)", ErrInvalidMutation, m.Key)
+			}
+			finalCount++
+		case ResealReplace:
+			if !present[m.Key] {
+				return "", StrictScope, fmt.Errorf("%w: key %q does not exist (use add)", ErrInvalidMutation, m.Key)
+			}
+		case ResealDelete:
+			if !present[m.Key] {
+				return "", StrictScope, fmt.Errorf("%w: key %q does not exist", ErrInvalidMutation, m.Key)
+			}
+			if finalCount <= 1 {
+				return "", StrictScope, fmt.Errorf("%w: cannot delete the final key", ErrInvalidMutation)
+			}
+			finalCount--
+		default:
+			return "", StrictScope, fmt.Errorf("%w: unknown operation %q", ErrInvalidMutation, m.Op)
 		}
-		if len(data) <= 1 {
-			return "", fmt.Errorf("crypto: cannot delete the final key")
+	}
+
+	for _, m := range mutations {
+		if m.Op == ResealDelete {
+			delete(data, m.Key)
+			continue
 		}
-		delete(data, key)
-	default:
-		return "", fmt.Errorf("crypto: unknown operation %q", op)
+		data[m.Key] = m.Value
 	}
 
 	mutated := &corev1.Secret{
@@ -373,9 +419,19 @@ func mutateSecretYAML(secretYAML, key, newValue string, op ResealOp, codecs seri
 			APIVersion: "v1",
 			Kind:       "Secret",
 		},
+		// Labels, annotations, and owner references are part of what the Secret
+		// is, and a patch that quietly dropped them would change the object far
+		// beyond the key it was asked to edit — the annotations also carry the
+		// sealing scope. The remaining ObjectMeta fields (uid, resourceVersion,
+		// generation, creationTimestamp, managedFields, selfLink) are assigned
+		// by the API server to one live object, so carrying them into a manifest
+		// would record something that was never true of the file.
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      secret.Name,
-			Namespace: secret.Namespace,
+			Name:            secret.Name,
+			Namespace:       secret.Namespace,
+			Labels:          secret.Labels,
+			Annotations:     secret.Annotations,
+			OwnerReferences: secret.OwnerReferences,
 		},
 		Type:       secret.Type,
 		StringData: data,
@@ -383,9 +439,35 @@ func mutateSecretYAML(secretYAML, key, newValue string, op ResealOp, codecs seri
 
 	var buf bytes.Buffer
 	if err := codecs.LegacyCodec(corev1.SchemeGroupVersion).Encode(mutated, &buf); err != nil {
-		return "", fmt.Errorf("crypto: encode mutated secret: %w", err)
+		return "", StrictScope, fmt.Errorf("crypto: encode mutated secret: %w", err)
 	}
-	return buf.String(), nil
+	return buf.String(), scopeFromAnnotations(secret.Annotations), nil
+}
+
+// scopeFromAnnotations recovers the sealing scope recorded on a Secret.
+//
+// The annotation keys are the library's to choose, so rather than restating
+// them here — where a rename would silently downgrade every edited Secret to
+// strict — this asks the library which annotation each scope writes, using the
+// same UpdateScopeAnnotations call EncryptYAML already relies on.
+func scopeFromAnnotations(annotations map[string]string) Scope {
+	// Cluster-wide first: it is the wider grant, so if a Secret somehow carried
+	// both annotations the more permissive reading is the safe one to preserve.
+	for _, scope := range []Scope{ClusterWideScope, NamespaceWideScope} {
+		probe := map[string]string{}
+		ssv1alpha1.UpdateScopeAnnotations(probe, scope.SealingScope())
+		matched := len(probe) > 0
+		for key, want := range probe {
+			if annotations[key] != want {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return scope
+		}
+	}
+	return StrictScope
 }
 
 // ---- test helpers ----

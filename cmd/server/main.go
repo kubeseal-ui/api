@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kubeseal-ui/api/internal/acl"
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
 	"github.com/kubeseal-ui/api/internal/auth/oidc"
 	"github.com/kubeseal-ui/api/internal/certprovider"
@@ -384,12 +383,6 @@ func main() {
 		}
 	}
 	cryptoWrapper := crypto.New(certProvider, privProvider)
-
-	// ACL identities (mock for Phase 1; OIDC in Phase 2)
-	_ = acl.RoleViewer
-	_ = acl.RoleEditor
-	_ = acl.RoleSecretManager
-	_ = acl.RolePlatformAdmin
 
 	// Router with production middleware chain (request ID, recovery, timeout, logging)
 	// OIDC discovery is injected by the server startup path.

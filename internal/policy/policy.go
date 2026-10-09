@@ -12,10 +12,12 @@
 //   - access:manage   — manage ACL mappings (platform admins)
 //
 // Built-in roles:
-//   - viewer         — metadata:read
-//   - editor         — metadata:read, secret:seal
-//   - secret-manager — metadata:read, secret:seal, secret:decrypt
-//   - platform-admin — metadata:read, secret:seal, access:manage (NO implicit decrypt or gitops)
+//   - viewer           — metadata:read
+//   - editor           — metadata:read, secret:seal
+//   - secret-manager   — metadata:read, secret:seal, secret:decrypt
+//   - release-proposer — metadata:read, gitops:propose
+//   - release-pusher   — metadata:read, gitops:push
+//   - platform-admin   — metadata:read, secret:seal, access:manage (NO implicit decrypt or gitops)
 //
 // Custom roles are validated against known capabilities.
 // Git mapping is per-namespace: namespace → {repo, branch, path template, auth ref, delivery mode}
@@ -97,6 +99,27 @@ var (
 		},
 	}
 
+	// Delivery roles are deliberately separate from the editing roles: a
+	// namespace's fixed mode names the capability it needs, and neither
+	// bundle carries seal or decrypt. Holding gitops:push lets a user
+	// deliver a manifest someone else sealed; it does not let them read
+	// plaintext or create secrets.
+	RoleReleaseProposer = Role{
+		Name: "release-proposer",
+		Capabilities: []Capability{
+			MetadataRead,
+			GitOpsPropose,
+		},
+	}
+
+	RoleReleasePusher = Role{
+		Name: "release-pusher",
+		Capabilities: []Capability{
+			MetadataRead,
+			GitOpsPush,
+		},
+	}
+
 	RolePlatformAdmin = Role{
 		Name: "platform-admin",
 		Capabilities: []Capability{
@@ -110,6 +133,8 @@ var (
 		RoleViewer,
 		RoleEditor,
 		RoleSecretManager,
+		RoleReleaseProposer,
+		RoleReleasePusher,
 		RolePlatformAdmin,
 	}
 )

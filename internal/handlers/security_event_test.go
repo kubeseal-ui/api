@@ -126,11 +126,21 @@ func TestRevealRecordsOutcomeNotAttempt(t *testing.T) {
 // decrypts the complete Secret internally to produce the before/after pair,
 // so it belongs in the same event stream as reveal and patch even though it
 // returns ciphertext only.
+//
+// The event's key field carries every key the batch names, sorted, so one
+// reviewed change is one audit record that says exactly what it touched — and
+// says it the same way regardless of the order the client listed them in.
 func TestDiffEmitsSecurityEvent(t *testing.T) {
 	sink := &eventSink{}
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
 	h.SecurityEvents = sink
-	req := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", `{"key":"password","operation":"replace","value":"x","base_commit":"abc"}`, protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
+	req := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff",
+		batchRequest(t, "abc",
+			mutation("password", "replace", "plaintext-marker-one"),
+			mutation("api_key", "add", "plaintext-marker-two"),
+			mutation("token", "delete", ""),
+		),
+		protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
 	req.Header.Set("Idempotency-Key", "idem-1")
 	req = withRouteParams(req, "ns", "name")
 	h.DiffHandler(httptest.NewRecorder(), req)
@@ -139,11 +149,19 @@ func TestDiffEmitsSecurityEvent(t *testing.T) {
 		t.Fatalf("events = %d, want exactly 1", len(sink.events))
 	}
 	e := sink.events[0]
-	if e.operation != "diff" || e.key != "password" || e.namespace != "ns" || e.secret != "name" {
+	if e.operation != "diff" || e.namespace != "ns" || e.secret != "name" {
 		t.Fatalf("unexpected event: %#v", e)
+	}
+	if e.key != "api_key,password,token" {
+		t.Fatalf("event key = %q, want the sorted changed key names", e.key)
 	}
 	if e.result != "not_found" {
 		t.Fatalf("result = %q, want not_found", e.result)
+	}
+	// The values are the sensitive half of the batch and must not reach the
+	// event through any field.
+	if strings.Contains(e.key, "plaintext-marker") || strings.Contains(e.secret, "plaintext-marker") {
+		t.Fatalf("event carries mutation values: %#v", e)
 	}
 }
 
@@ -214,12 +232,13 @@ func TestSealRecordsOutcomeNotAttempt(t *testing.T) {
 		{
 			// The response for this one is a 400, but the refusal is the
 			// mapping's policy and is recorded as a denial so an audit can tell
-			// it apart from malformed input.
+			// it apart from malformed input. The manifest is a valid Secret, so
+			// the path is the only thing wrong with the request.
 			name: "denied when target_path is outside the mapping",
 			build: func() *ProtectedHandlers {
 				return NewProtectedHandlersWithGitOps(mappedStore(), gitops.NewLocalTransport(), protectedK8s{}, &crypto.Wrapper{}, false)
 			},
-			body:       `{"namespace":"ns","name":"name","yaml":"apiVersion: v1","target_path":"clusters/other/name.yaml"}`,
+			body:       `{"namespace":"ns","name":"name","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: name\n  namespace: ns\nstringData:\n  password: plaintext-marker\n","target_path":"clusters/other/name.yaml"}`,
 			caps:       []policy.Capability{policy.SecretSeal},
 			wantResult: "denied",
 			wantNS:     "ns",

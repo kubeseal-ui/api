@@ -214,6 +214,90 @@ func readFileAtHead(repo *git.Repository, path string) ([]byte, error) {
 	return io.ReadAll(content)
 }
 
+// A silent drift in this method's signature would not break anything visibly:
+// SnapshotTransport would simply stop recognizing the transport, stop
+// memoizing, and the listing would quietly go back to one pull per Secret. The
+// assertion makes that a compile error instead.
+var _ BranchReader = (*GoGitTransport)(nil)
+
+// ReadBranch fetches the remote once and returns every file at the branch head.
+// It is the read SnapshotTransport builds its per-request memo from, and it is
+// what a namespace listing needs: the listing resolves drift for every Secret
+// it returns, so paying one fetch and one tree walk for all of them instead of
+// one per Secret is the difference between a column that renders and a request
+// that times out.
+//
+// Every blob at head is read, not just the ones this call is expected to
+// serve. A path template may render any extension, and a tree walk that guessed
+// would have to fall back to a second fetch exactly when it guessed wrong —
+// which is the cost being removed. The map lives for one request and is
+// discarded with it.
+//
+// A blob that cannot be read fails the whole snapshot rather than being skipped.
+// Skipping would turn "this file exists" into "this path is vacant", and the
+// vacant path is the documented new-file case; a corrupt pull should be a loud
+// failure, not a silent overwrite.
+func (t *GoGitTransport) ReadBranch(ctx context.Context, repository, branch, authRef string) (BranchSnapshot, error) {
+	target := Target{Repository: repository, Branch: branch}
+	auth, err := t.authFor(ctx, target, authRef)
+	if err != nil {
+		return BranchSnapshot{}, err
+	}
+	repo, err := t.openOrClone(ctx, target, auth)
+	if err != nil {
+		return BranchSnapshot{}, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return BranchSnapshot{}, fmt.Errorf("worktree: %w", err)
+	}
+	if pullErr := worktree.PullContext(ctx, &git.PullOptions{
+		RemoteName:    "origin",
+		ReferenceName: plumbing.NewBranchReferenceName(target.Branch),
+		Force:         true,
+		Auth:          auth,
+	}); pullErr != nil && !errors.Is(pullErr, git.NoErrAlreadyUpToDate) {
+		return BranchSnapshot{}, fmt.Errorf("fetch %s: %w", remoteURL(target), pullErr)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return BranchSnapshot{}, fmt.Errorf("head: %w", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return BranchSnapshot{}, fmt.Errorf("commit: %w", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return BranchSnapshot{}, fmt.Errorf("tree: %w", err)
+	}
+
+	files := map[string][]byte{}
+	fileIter := tree.Files()
+	defer fileIter.Close()
+	if err := fileIter.ForEach(func(f *object.File) error {
+		content, readErr := readBlob(f)
+		if readErr != nil {
+			return fmt.Errorf("read %s: %w", f.Name, readErr)
+		}
+		files[f.Name] = content
+		return nil
+	}); err != nil {
+		return BranchSnapshot{}, err
+	}
+	return BranchSnapshot{Commit: head.Hash().String(), Files: files}, nil
+}
+
+// readBlob reads one file's content at head.
+func readBlob(file *object.File) ([]byte, error) {
+	reader, err := file.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = reader.Close() }()
+	return io.ReadAll(reader)
+}
+
 // SearchManifest walks the repository tree at branch HEAD and finds a SealedSecret
 // matching the specified name and namespace across all .yaml and .yml files.
 func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch, namespace, name, authRef string) (ManifestSnapshot, error) {

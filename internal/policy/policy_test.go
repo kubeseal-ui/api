@@ -29,6 +29,16 @@ func TestBuiltInRolesHaveExpectedCapabilities(t *testing.T) {
 			expectedCaps: []Capability{MetadataRead, SecretSeal, SecretDecrypt},
 		},
 		{
+			name:         "release-proposer",
+			role:         RoleReleaseProposer,
+			expectedCaps: []Capability{MetadataRead, GitOpsPropose},
+		},
+		{
+			name:         "release-pusher",
+			role:         RoleReleasePusher,
+			expectedCaps: []Capability{MetadataRead, GitOpsPush},
+		},
+		{
 			name:         "platform-admin",
 			role:         RolePlatformAdmin,
 			expectedCaps: []Capability{MetadataRead, SecretSeal, AccessManage},

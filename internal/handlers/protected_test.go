@@ -78,9 +78,6 @@ func protectedRequest(method, path string, body string, id authmw.Identity) *htt
 		if parts[i] == "secrets" && i+2 < len(parts) {
 			ctx.URLParams.Add("namespace", parts[i+1])
 			ctx.URLParams.Add("name", parts[i+2])
-			if i+4 < len(parts) && parts[i+3] == "values" {
-				ctx.URLParams.Add("key", parts[i+4])
-			}
 			break
 		}
 	}
@@ -213,17 +210,133 @@ func TestDecryptRequiresBaseCommit(t *testing.T) {
 	assertErrorEnvelope(t, rr, "INVALID_REQUEST", "Invalid request", "")
 }
 
+// mutation renders one entry of a diff/patch request body.
+func mutation(key, operation, value string) map[string]string {
+	return map[string]string{"key": key, "operation": operation, "value": value}
+}
+
+// batchRequest builds a diff/patch request body for any number of mutations.
+// It marshals a struct rather than concatenating a string so the test does not
+// have to hand-escape JSON, and so a body with several entries cannot be
+// accidentally malformed into something that tests a different code path.
+func batchRequest(t *testing.T, baseCommit string, mutations ...map[string]string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"mutations": mutations, "base_commit": baseCommit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// resealResponse is the diff/patch response. It is a struct rather than a
+// map[string]string because the response carries the mutation summary — the
+// keys and operations that changed, without their values — alongside the
+// manifests.
+type resealResponse struct {
+	YAML       string `json:"yaml"`
+	Checksum   string `json:"checksum"`
+	Before     string `json:"before"`
+	After      string `json:"after"`
+	DiffBefore string `json:"diff_before"`
+	DiffAfter  string `json:"diff_after"`
+	BaseCommit string `json:"base_commit"`
+	Mutations  []struct {
+		Key       string `json:"key"`
+		Operation string `json:"operation"`
+	} `json:"mutations"`
+}
+
 func TestResealRequiresIdempotencyKey(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
 	rr := httptest.NewRecorder()
-	h.ResealHandler(rr, protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values/password", `{"operation":"replace","base_commit":"abc"}`, protectedIdentity(policy.SecretSeal, policy.SecretDecrypt)))
+	h.ResealHandler(rr, protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values", batchRequest(t, "abc", mutation("password", "replace", "new")), protectedIdentity(policy.SecretSeal, policy.SecretDecrypt)))
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 	assertErrorEnvelope(t, rr, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key", "")
 }
 
+// TestResealResponseIncludesEncryptedDiff covers the batch patch: three
+// mutations of different kinds in one request produce one resealed manifest,
+// and the response reports what changed without echoing the new values.
 func TestResealResponseIncludesEncryptedDiff(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := w.EncryptYAML(t.Context(), `apiVersion: v1
+kind: Secret
+metadata:
+  name: name
+  namespace: ns
+stringData:
+  password: old
+  keep: keep-old
+  remove: remove-old
+`, "ns", "name", crypto.StrictScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, live, "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", YAML: live}}}, w, true)
+	rr := httptest.NewRecorder()
+	// Replace, add, and delete together: the batch has to land as one change,
+	// which is the point of the endpoint taking an array.
+	body := batchRequest(t, "abc",
+		mutation("password", "replace", "new-value"),
+		mutation("added", "add", "added-value"),
+		mutation("remove", "delete", ""),
+	)
+	req := protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values", body, protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
+	req.Header.Set("Idempotency-Key", "patch-1")
+	h.ResealHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var resp resealResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	for field, got := range map[string]string{
+		"yaml":        resp.YAML,
+		"checksum":    resp.Checksum,
+		"diff_before": resp.DiffBefore,
+		"diff_after":  resp.DiffAfter,
+	} {
+		if got == "" {
+			t.Fatalf("missing %q: %s", field, rr.Body.String())
+		}
+	}
+	if resp.DiffBefore != live || resp.DiffAfter != resp.YAML || resp.DiffBefore == resp.DiffAfter {
+		t.Fatalf("unexpected patch diff: %s", rr.Body.String())
+	}
+	// The response names the keys it changed so the UI can confirm the batch,
+	// but it must not carry the values back: the caller already has them, and
+	// plaintext has no business in a response body.
+	if len(resp.Mutations) != 3 {
+		t.Fatalf("mutation summary = %v, want three entries", resp.Mutations)
+	}
+	for _, m := range resp.Mutations {
+		if m.Key == "" || m.Operation == "" {
+			t.Fatalf("incomplete mutation summary entry: %+v", m)
+		}
+	}
+	if strings.Contains(rr.Body.String(), "old") || strings.Contains(rr.Body.String(), "new-value") ||
+		strings.Contains(rr.Body.String(), "added-value") {
+		t.Fatalf("plaintext leaked: %s", rr.Body.String())
+	}
+}
+
+// TestResealRejectsAnInvalidBatch verifies that a mutation the crypto layer
+// refuses reaches the caller as a 400 naming the request, not as a 502 blaming
+// the backend. Whether a key exists is only knowable after decryption, so this
+// is the path that carries that refusal out of the crypto layer.
+func TestResealRejectsAnInvalidBatch(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
 		t.Fatal(err)
@@ -247,32 +360,56 @@ stringData:
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", YAML: live}}}, w, true)
 	rr := httptest.NewRecorder()
-	req := protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values/password", `{"operation":"replace","value":"new","base_commit":"abc"}`, protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
-	req.Header.Set("Idempotency-Key", "patch-1")
+	req := protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values",
+		batchRequest(t, "abc", mutation("absent", "replace", "x")),
+		protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
+	req.Header.Set("Idempotency-Key", "patch-invalid")
 	h.ResealHandler(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
 	}
-	var body map[string]string
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
+	assertErrorEnvelope(t, rr, "INVALID_MUTATION", "Invalid mutation", "")
+}
+
+// TestResealInvalidBatchDoesNotSpendTheIdempotencyKey verifies the ordering
+// inside the handler: a batch refused from the body alone — here an operation
+// that is not one of the three — is refused before the key is claimed, so a
+// corrected retry can reuse the key the client chose rather than being told the
+// request was already processed.
+//
+// This holds for body-only refusals and not for rule violations: whether a key
+// exists is only knowable after decryption, which is after the claim (see
+// TestResealRejectsAnInvalidBatch). Claiming early is the deliberate trade —
+// the claim is what stops a duplicate from paying for a second decrypt.
+func TestResealInvalidBatchDoesNotSpendTheIdempotencyKey(t *testing.T) {
+	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
+	// Refused while parsing: the operation is not one of the three.
+	rr := httptest.NewRecorder()
+	req := protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values",
+		batchRequest(t, "abc", mutation("password", "merge", "x")),
+		protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
+	req.Header.Set("Idempotency-Key", "reused")
+	h.ResealHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
 	}
-	for _, field := range []string{"yaml", "checksum", "diff_before", "diff_after"} {
-		if body[field] == "" {
-			t.Fatalf("missing %q: %s", field, rr.Body.String())
-		}
-	}
-	if body["diff_before"] != live || body["diff_after"] != body["yaml"] || body["diff_before"] == body["diff_after"] {
-		t.Fatalf("unexpected patch diff: %s", rr.Body.String())
-	}
-	if strings.Contains(rr.Body.String(), "old") || strings.Contains(rr.Body.String(), "new") {
-		t.Fatalf("plaintext leaked: %s", rr.Body.String())
+	assertErrorEnvelope(t, rr, "INVALID_REQUEST", "Invalid request", "")
+
+	// The same key on a well-formed batch must not be rejected as a duplicate.
+	rr = httptest.NewRecorder()
+	req = protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values",
+		batchRequest(t, "abc", mutation("password", "replace", "x")),
+		protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
+	req.Header.Set("Idempotency-Key", "reused")
+	h.ResealHandler(rr, req)
+	if rr.Code == http.StatusConflict {
+		t.Fatalf("the abandoned request should not have claimed the key: %s", rr.Body.String())
 	}
 }
 
 func TestDiffHandlerRejectsDuplicateIdempotencyKey(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
-	body := `{"key":"password","operation":"replace","value":"new","base_commit":"abc"}`
+	body := batchRequest(t, "abc", mutation("password", "replace", "new"))
 	first := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", body, protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
 	first.Header.Set("Idempotency-Key", "same")
 	second := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", body, protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
@@ -312,12 +449,12 @@ stringData:
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", YAML: live}}}, w, true)
-	status, statusErr := h.gitStatus(httptest.NewRequest(http.MethodPost, "/", nil), "ns", "name", live, "abc")
+	status, statusErr := h.gitStatus(t.Context(), h.requestTransport(), "ns", "name", live, "abc")
 	if statusErr != nil || status["drift"] != string(kubernetes.DriftSync) {
 		t.Fatalf("git status=%v err=%v", status, statusErr)
 	}
 	rr := httptest.NewRecorder()
-	req := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", `{"key":"password","operation":"replace","value":"new","base_commit":"abc"}`, protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
+	req := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", batchRequest(t, "abc", mutation("password", "replace", "new")), protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
 	req.Header.Set("Idempotency-Key", "diff-1")
 	ctx := chi.NewRouteContext()
 	ctx.URLParams.Add("namespace", "ns")
@@ -327,17 +464,18 @@ stringData:
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
 	}
-	var body map[string]string
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+	var resp resealResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"before", "after", "key", "base_commit", "checksum"} {
-		if body[field] == "" {
-			t.Fatalf("missing %q in response: %s", field, rr.Body.String())
-		}
+	if resp.Before == "" || resp.After == "" || resp.Checksum == "" || resp.BaseCommit == "" {
+		t.Fatalf("incomplete diff response: %s", rr.Body.String())
 	}
-	if body["before"] == body["after"] || body["key"] != "password" || body["base_commit"] != "abc" {
+	if resp.Before == resp.After || resp.BaseCommit != "abc" {
 		t.Fatalf("unexpected diff response: %s", rr.Body.String())
+	}
+	if len(resp.Mutations) != 1 || resp.Mutations[0].Key != "password" || resp.Mutations[0].Operation != "replace" {
+		t.Fatalf("mutation summary does not describe the batch: %s", rr.Body.String())
 	}
 	if strings.Contains(rr.Body.String(), "old\n") || strings.Contains(rr.Body.String(), "new\n") {
 		t.Fatalf("plaintext leaked in diff response: %s", rr.Body.String())
@@ -347,7 +485,7 @@ stringData:
 func TestDiffHandlerRequiresIdempotencyKey(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
 	rr := httptest.NewRecorder()
-	req := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", `{"key":"password","operation":"replace","value":"new","base_commit":"abc"}`, protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
+	req := protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/diff", batchRequest(t, "abc", mutation("password", "replace", "new")), protectedIdentity(policy.SecretSeal, policy.SecretDecrypt))
 	h.DiffHandler(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
@@ -595,5 +733,171 @@ status:
 
 	if !bytes.Equal(gitCanon, liveCanon) {
 		t.Fatalf("expected canonical forms to match, but they differed:\nGit:  %s\nLive: %s", string(gitCanon), string(liveCanon))
+	}
+}
+
+// liveSecretManifest is what `kubectl get secret -o yaml` hands back for a live
+// Secret: the desired state plus everything the API server attached to that one
+// object, and the apply annotations that record how it got there.
+const liveSecretManifest = `apiVersion: v1
+kind: Secret
+metadata:
+  name: adopted
+  namespace: ns
+  uid: "0f8e1c2a-1111-2222-3333-444455556666"
+  resourceVersion: "918273"
+  generation: 4
+  creationTimestamp: "2025-01-01T00:00:00Z"
+  selfLink: /api/v1/namespaces/ns/secrets/adopted
+  managedFields:
+  - manager: kubectl
+    operation: Update
+  ownerReferences:
+  - apiVersion: apps/v1
+    kind: Deployment
+    name: payments
+    uid: "99999999-1111-2222-3333-444455556666"
+  labels:
+    app: payments-api
+    argocd.argoproj.io/instance: payments
+  annotations:
+    owner: platform-team
+    kubectl.kubernetes.io/last-applied-configuration: '{"kind":"Secret","data":{"password":"c2VjcmV0"}}'
+    argocd.argoproj.io/tracking-id: payments:v1/Secret:ns/adopted
+type: kubernetes.io/tls
+data:
+  tls.crt: Y2VydA==
+  tls.key: a2V5
+status:
+  something: live-only
+`
+
+// TestNormalizeSecretYAMLStripsEverythingButDesiredState covers the normalizer
+// directly, so each rule is pinned rather than inferred from a sealed output.
+func TestNormalizeSecretYAMLStripsEverythingButDesiredState(t *testing.T) {
+	normalized, err := normalizeSecretYAML(liveSecretManifest, "ns", "adopted")
+	if err != nil {
+		t.Fatalf("normalizeSecretYAML: %v", err)
+	}
+
+	// Kept: everything that describes what the Secret should be.
+	for _, want := range []string{"kubernetes.io/tls", "app: payments-api", "owner: platform-team", "tls.crt", "tls.key"} {
+		if !strings.Contains(normalized, want) {
+			t.Errorf("normalized manifest dropped %q:\n%s", want, normalized)
+		}
+	}
+	// Dropped: everything that describes the live object's life rather than its
+	// content, including the apply annotation that embeds the whole object.
+	for _, unwanted := range []string{
+		"uid:", "resourceVersion", "generation", "creationTimestamp", "selfLink", "managedFields",
+		"ownerReferences", "status", "last-applied-configuration", "argocd.argoproj.io/",
+		"0f8e1c2a-1111-2222-3333-444455556666",
+	} {
+		if strings.Contains(normalized, unwanted) {
+			t.Errorf("normalized manifest kept %q:\n%s", unwanted, normalized)
+		}
+	}
+}
+
+// TestNormalizeSecretYAMLRefusesTheWrongDocument pins the refusals. A copy-paste
+// flow's likeliest mistake is pasting the wrong manifest, and sealing one
+// Secret's content under another's name is a silent failure with no error to
+// find afterwards.
+func TestNormalizeSecretYAMLRefusesTheWrongDocument(t *testing.T) {
+	const secretFor = `apiVersion: v1
+kind: Secret
+metadata:
+  name: NAME
+  namespace: NS
+stringData:
+  password: x
+`
+	cases := []struct {
+		name     string
+		manifest string
+		want     string
+	}{
+		{"not a Secret", "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: adopted\n", "ConfigMap"},
+		{"a SealedSecret", "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: adopted\n", "SealedSecret"},
+		{"empty document", "---\n", "empty"},
+		{"no kind at all", "metadata:\n  name: adopted\n", `kind ""`},
+		{"a different name", strings.Replace(strings.Replace(secretFor, "NAME", "other", 1), "NS", "ns", 1), `names "other"`},
+		{"a different namespace", strings.Replace(strings.Replace(secretFor, "NAME", "adopted", 1), "NS", "other", 1), `namespace "other"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := normalizeSecretYAML(tc.manifest, "ns", "adopted")
+			if err == nil {
+				t.Fatal("expected a refusal, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestEncryptSealsAnAdoptedManifest pins the end-to-end adopt path: a pasted
+// live Secret is sealed through the ordinary create endpoint, and the ciphertext
+// carries the content while dropping the live object's bookkeeping. No new
+// Kubernetes permission is involved — the operator's own kubectl read the Secret
+// — which is the whole reason this is a paste rather than a server-side lookup.
+func TestEncryptSealsAnAdoptedManifest(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlers(protectedK8s{}, w, false)
+
+	body, err := json.Marshal(map[string]string{"namespace": "ns", "name": "adopted", "yaml": liveSecretManifest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	h.EncryptHandler(rr, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", string(body), protectedIdentity(policy.SecretSeal)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	var response struct {
+		YAML string `json:"yaml"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	// The type, labels, and the Secret's own annotation survive into the
+	// manifest; the encrypted values are ciphertext, so the base64 above is
+	// nowhere in the output.
+	for _, want := range []string{"kubernetes.io/tls", "app: payments-api", "owner: platform-team"} {
+		if !strings.Contains(response.YAML, want) {
+			t.Errorf("sealed manifest dropped %q:\n%s", want, response.YAML)
+		}
+	}
+	if strings.Contains(response.YAML, "Y2VydA==") || strings.Contains(response.YAML, "a2V5") {
+		t.Errorf("plaintext value survived into the sealed manifest:\n%s", response.YAML)
+	}
+	for _, unwanted := range []string{"last-applied-configuration", "resourceVersion", "ownerReferences", "selfLink"} {
+		if strings.Contains(response.YAML, unwanted) {
+			t.Errorf("sealed manifest kept %q:\n%s", unwanted, response.YAML)
+		}
+	}
+}
+
+// TestEncryptRefusesAManifestForAnotherSecret covers the refusal at the endpoint
+// rather than in the normalizer: the operator is told which resource they pasted
+// instead of being handed a manifest sealed under the wrong name.
+func TestEncryptRefusesAManifestForAnotherSecret(t *testing.T) {
+	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, false)
+	body := `{"namespace":"ns","name":"adopted","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: something-else\n  namespace: ns\nstringData:\n  password: x\n"}`
+	rr := httptest.NewRecorder()
+	h.EncryptHandler(rr, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", body, protectedIdentity(policy.SecretSeal)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "INVALID_MANIFEST", "Manifest is not a Kubernetes Secret for this name and namespace", "")
+	// The refusal names no field of the submitted manifest: the message is
+	// bounded, and the manifest is not echoed back into an error body.
+	if strings.Contains(rr.Body.String(), "something-else") {
+		t.Fatalf("error body echoed the submitted manifest: %s", rr.Body.String())
 	}
 }

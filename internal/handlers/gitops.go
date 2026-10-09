@@ -223,7 +223,7 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		liveYAML = secret.YAML
 	}
 
-	gitStat, gitErr := h.gitStatus(r, namespace, name, liveYAML, "")
+	gitStat, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, liveYAML, "")
 	if gitErr != nil {
 		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
 		return
@@ -259,14 +259,17 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 
 // resolveSyncPath resolves the target Git path for a sync using two-tier
 // Option A discovery: fast-path template check, then full tree walk fallback.
-func (h *ProtectedHandlers) resolveSyncPath(ctx context.Context, mapping policy.GitMapping, namespace, name string) string {
+// Both tiers read through the request's transport so the two reads share one
+// fetch — the fallback exists precisely for the case where the first read
+// found nothing, so without a snapshot it would always pay a second pull.
+func (h *ProtectedHandlers) resolveSyncPath(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, namespace, name string) string {
 	if defaultPath := mapping.RenderPath(namespace, name); defaultPath != "" {
-		_, readErr := h.GitTransport.ReadManifest(ctx, gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, mapping.AuthRef)
+		_, readErr := transport.ReadManifest(ctx, gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, mapping.AuthRef)
 		if readErr == nil {
 			return defaultPath
 		}
 		if errors.Is(readErr, gitops.ErrNotFound) {
-			snap, sErr := h.GitTransport.SearchManifest(ctx, mapping.Repository, mapping.Branch, namespace, name, mapping.AuthRef)
+			snap, sErr := transport.SearchManifest(ctx, mapping.Repository, mapping.Branch, namespace, name, mapping.AuthRef)
 			if sErr == nil && snap.Target.Path != "" {
 				return snap.Target.Path
 			}
@@ -350,7 +353,7 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		}
 		path = req.TargetPath
 	} else {
-		path = h.resolveSyncPath(r.Context(), mapping, req.Namespace, req.Name)
+		path = h.resolveSyncPath(r.Context(), h.requestTransport(), mapping, req.Namespace, req.Name)
 	}
 	if path == "" {
 		writeError(w, r, http.StatusInternalServerError, "INVALID_MAPPING", "Git path could not be resolved")

@@ -301,6 +301,166 @@ func TestResealAddExistingKeyFails(t *testing.T) {
 	}
 }
 
+// TestResealManyAppliesAMixedBatch verifies that a replace, an add, and a
+// delete in one batch land together and leave unrelated keys alone. One batch
+// is one reviewed change and one commit, so the three must not need three
+// round trips.
+func TestResealManyAppliesAMixedBatch(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := SecretYAML("secret", "default", map[string]string{
+		"keep":   "keep-val",
+		"change": "old-val",
+		"remove": "remove-val",
+	}, "")
+
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	resealed, err := w.ResealMany(t.Context(), sealed, []Mutation{
+		{Key: "change", Value: "new-val", Op: ResealReplace},
+		{Key: "added", Value: "added-val", Op: ResealAdd},
+		{Key: "remove", Op: ResealDelete},
+	})
+	if err != nil {
+		t.Fatalf("ResealMany: %v", err)
+	}
+
+	decrypted, err := w.DecryptYAML(t.Context(), resealed)
+	if err != nil {
+		t.Fatalf("DecryptYAML after ResealMany: %v", err)
+	}
+	for _, want := range []string{"keep: keep-val", "change: new-val", "added: added-val"} {
+		if !strings.Contains(decrypted, want) {
+			t.Errorf("decrypted output missing %q: %s", want, decrypted)
+		}
+	}
+	if strings.Contains(decrypted, "remove:") {
+		t.Errorf("deleted key should not appear: %s", decrypted)
+	}
+}
+
+// TestResealManyRejectsInvalidBatches verifies that validation covers the whole
+// batch before anything is applied.
+//
+// Each rule is checked against the key set as it stood before the batch, not
+// against the state left by the entries ahead of it, which is what makes the
+// outcome independent of the order the client sent. A batch that would remove
+// the last remaining key is refused as a whole, so the Secret can never be left
+// empty by a sequence of individually-valid deletions.
+func TestResealManyRejectsInvalidBatches(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := SecretYAML("secret", "default", map[string]string{"one": "1", "two": "2"}, "")
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		mutations []Mutation
+	}{
+		{"duplicate key in one batch", []Mutation{
+			{Key: "one", Value: "a", Op: ResealReplace},
+			{Key: "one", Value: "b", Op: ResealReplace},
+		}},
+		{"replace a key that does not exist", []Mutation{{Key: "absent", Value: "a", Op: ResealReplace}}},
+		{"add a key that already exists", []Mutation{{Key: "one", Value: "a", Op: ResealAdd}}},
+		{"delete a key that does not exist", []Mutation{{Key: "absent", Op: ResealDelete}}},
+		{"delete every key", []Mutation{
+			{Key: "one", Op: ResealDelete},
+			{Key: "two", Op: ResealDelete},
+		}},
+		{"empty key", []Mutation{{Key: "", Value: "a", Op: ResealAdd}}},
+		{"unknown operation", []Mutation{{Key: "one", Value: "a", Op: ResealOp("merge")}}},
+	}
+	for _, tc := range cases {
+		if _, err := w.ResealMany(t.Context(), sealed, tc.mutations); err == nil {
+			t.Errorf("%s: expected an error, got nil", tc.name)
+		}
+	}
+}
+
+// TestResealManyRejectsAnEmptyBatch verifies that "change nothing" is refused
+// rather than accepted as a no-op. A request that describes no change is a bug
+// in the caller, and answering it with a re-sealed Secret would produce a fresh
+// commit whose content is identical to the old one.
+func TestResealManyRejectsAnEmptyBatch(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := SecretYAML("secret", "default", map[string]string{"key": "val"}, "")
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	if _, err := w.ResealMany(t.Context(), sealed, nil); err == nil {
+		t.Fatal("expected an error for an empty batch")
+	}
+}
+
+// TestResealPreservesMetadataAndScope verifies that editing a key leaves the
+// rest of the object intact.
+//
+// secret-editing.md promises an edit preserves type, labels, annotations, and
+// template. It did not: the rebuild carried only name, namespace, type, and
+// data, so every patch silently stripped the template's labels and annotations,
+// and the re-seal was hardcoded to strict — which quietly narrowed a
+// namespace-wide Secret, changing where it can be decrypted.
+func TestResealPreservesMetadataAndScope(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := `apiVersion: v1
+kind: Secret
+metadata:
+  name: secret
+  namespace: payments
+  labels:
+    app: payments-api
+  annotations:
+    owner: platform-team
+type: kubernetes.io/tls
+stringData:
+  tls.crt: cert
+  tls.key: key
+`
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "payments", "secret", NamespaceWideScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+	if !strings.Contains(sealed, "namespace-wide") {
+		t.Fatalf("precondition: sealed secret is not namespace-wide: %s", sealed)
+	}
+
+	resealed, err := w.Reseal(t.Context(), sealed, "tls.crt", "new-cert", ResealReplace)
+	if err != nil {
+		t.Fatalf("Reseal: %v", err)
+	}
+
+	if !strings.Contains(resealed, "namespace-wide") {
+		t.Errorf("scope was not preserved across the edit: %s", resealed)
+	}
+
+	decrypted, err := w.DecryptYAML(t.Context(), resealed)
+	if err != nil {
+		t.Fatalf("DecryptYAML after Reseal: %v", err)
+	}
+	for _, want := range []string{
+		"kubernetes.io/tls",   // type
+		"app: payments-api",   // label
+		"owner: platform-team", // annotation
+		"tls.key: key",        // unrelated key
+		"tls.crt: new-cert",   // the edit itself
+	} {
+		if !strings.Contains(decrypted, want) {
+			t.Errorf("decrypted output missing %q: %s", want, decrypted)
+		}
+	}
+}
+
 // TestEncryptRejectsInvalidSecretYAML verifies malformed YAML is rejected.
 func TestEncryptRejectsInvalidSecretYAML(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
