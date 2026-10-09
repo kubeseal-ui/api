@@ -10,12 +10,6 @@ import (
 	"time"
 )
 
-// TestRedactReplacesSensitiveKeys documents the redaction contract:
-// keys whose name contains a sensitive marker must have their values
-// replaced with the literal "[REDACTED]" sentinel. The original value
-// must NOT appear in the emitted log line. Regression test for the
-// phase-1 "no plaintext, ciphertext, token, cookie, PEM, or body
-// leakage in logs and errors" requirement.
 func TestRedactReplacesSensitiveKeys(t *testing.T) {
 	var buf bytes.Buffer
 	h := RedactingJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
@@ -39,7 +33,6 @@ func TestRedactReplacesSensitiveKeys(t *testing.T) {
 			t.Errorf("redaction failed: %q present in log output: %s", leak, out)
 		}
 	}
-	// Non-sensitive keys still flow through.
 	if !strings.Contains(out, "alice") {
 		t.Errorf("expected non-sensitive username to pass through; got: %s", out)
 	}
@@ -48,8 +41,6 @@ func TestRedactReplacesSensitiveKeys(t *testing.T) {
 	}
 }
 
-// TestRedactPreservesJSONStructure ensures redaction does not break the
-// JSON envelope that downstream log shippers rely on.
 func TestRedactPreservesJSONStructure(t *testing.T) {
 	var buf bytes.Buffer
 	h := RedactingJSONHandler(&buf, nil)

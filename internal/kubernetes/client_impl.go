@@ -42,7 +42,6 @@ func NewClient(core coreclient.Interface, dyn dynamic.Interface, options Options
 	return &KubeClient{core: core, dynamic: dyn, options: options}
 }
 
-// NewClientFromConfig constructs a production client from a Kubernetes REST configuration.
 func NewClientFromConfig(config *rest.Config, options Options) (Client, error) {
 	core, err := coreclient.NewForConfig(config)
 	if err != nil {
@@ -109,8 +108,6 @@ func projectSealedSecret(obj *unstructured.Unstructured) (SealedSecret, error) {
 	}
 	var annotations = obj.GetAnnotations()
 	scope := annotations["sealedsecrets.bitnami.com/scope"]
-	// Extract key names and creation timestamp from the unstructured object.
-	// These are metadata the UI needs without decrypting.
 	var keys []string
 	d, found, err := unstructured.NestedStringMap(obj.Object, "spec", "encryptedData")
 	if err != nil {

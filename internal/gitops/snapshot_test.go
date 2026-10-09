@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-// transportCounts records how much work reached the wrapped transport.
 type transportCounts struct {
 	branchReads int
 	reads       int
@@ -15,9 +14,9 @@ type transportCounts struct {
 	pushes      int
 }
 
-// countingGit delegates to a LocalTransport and counts the calls. It has no
-// ReadBranch on purpose: a transport that cannot enumerate a branch is the
-// degradation case SnapshotTransport must pass through untouched.
+// countingGit delegates to a LocalTransport and counts the calls. It has no ReadBranch on
+// purpose: a transport that cannot enumerate a branch is the degradation case SnapshotTransport
+// must pass through untouched.
 type countingGit struct {
 	*LocalTransport
 	counts *transportCounts
@@ -43,8 +42,7 @@ func (c *countingGit) PushBranch(ctx context.Context, change Change, authRef str
 	return c.LocalTransport.PushBranch(ctx, change, authRef)
 }
 
-// branchCounting adds the BranchReader capability, which is what turns
-// memoization on.
+// branchCounting adds the BranchReader capability, which is what turns memoization on.
 type branchCounting struct {
 	*countingGit
 }
@@ -80,11 +78,8 @@ func countingBranchTransport(t *testing.T) (*branchCounting, *transportCounts) {
 	return &branchCounting{countingGit: &countingGit{LocalTransport: inner, counts: counts}}, counts
 }
 
-// TestSnapshotServesEveryReadFromOneBranchLoad is the point of the type: a
-// namespace listing resolves drift for every Secret it returns, and each
-// resolution reads the templated path and then searches the tree when that path
-// is vacant. All of those reads share one branch and one moment, so they must
-// cost one fetch — not one per read.
+// A namespace listing resolves drift for every Secret it returns, so all of those reads share one
+// branch and one moment and must cost one fetch — not one per read.
 func TestSnapshotServesEveryReadFromOneBranchLoad(t *testing.T) {
 	transport, counts := countingBranchTransport(t)
 	transport.Seed(Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, apiSealedSecret, "abc")
@@ -117,8 +112,7 @@ func TestSnapshotServesEveryReadFromOneBranchLoad(t *testing.T) {
 	}
 }
 
-// TestSnapshotLoadsEachBranchOnce pins the memo's scope: it is per branch, not
-// per request-global, so a namespace mapped across two branches still costs two
+// The memo is per branch, not request-global: a namespace mapped across two branches costs two
 // loads and no more.
 func TestSnapshotLoadsEachBranchOnce(t *testing.T) {
 	transport, counts := countingBranchTransport(t)
@@ -136,10 +130,8 @@ func TestSnapshotLoadsEachBranchOnce(t *testing.T) {
 	}
 }
 
-// TestSnapshotReportsAVacantPathWithTheBranchHead pins the contract the
-// new-file flow depends on: a path that is not in the snapshot is ErrNotFound,
-// and the snapshot still carries the head a BaseCommit is compared against.
-// Without the head, a namespace with no secrets yet could not create one.
+// A path not in the snapshot is ErrNotFound, and the snapshot still carries the head a BaseCommit
+// is compared against — without it a namespace with no secrets yet could not create one.
 func TestSnapshotReportsAVacantPathWithTheBranchHead(t *testing.T) {
 	transport, _ := countingBranchTransport(t)
 	transport.Seed(Target{Repository: "platform", Branch: "main", Path: "a.yaml"}, "one", "abc")
@@ -157,10 +149,8 @@ func TestSnapshotReportsAVacantPathWithTheBranchHead(t *testing.T) {
 	}
 }
 
-// TestSnapshotSearchIsDeterministic pins the ordering. Two files claiming the
-// same identity is a misconfiguration, but map iteration order is random, so
-// without the sort the reported path — and the drift it implies — would flap
-// between requests.
+// Two files claiming the same identity is a misconfiguration, but map iteration order is random,
+// so without the sort the reported path — and the drift it implies — would flap between requests.
 func TestSnapshotSearchIsDeterministic(t *testing.T) {
 	transport, _ := countingBranchTransport(t)
 	transport.Seed(Target{Repository: "platform", Branch: "main", Path: "z-last.yaml"}, apiSealedSecret, "abc")
@@ -178,10 +168,8 @@ func TestSnapshotSearchIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestSnapshotNeverServesWritesFromTheCache pins the half of the design that
-// keeps delivery honest. The snapshot is a read memo only: a push must reach the
-// transport, and the branch it touched must be dropped so that a later read in
-// the same request re-reads instead of reporting the content the push replaced.
+// The snapshot is a read memo only: a push must reach the transport, and the branch it touched
+// must be dropped so a later read re-reads instead of reporting what the push replaced.
 func TestSnapshotNeverServesWritesFromTheCache(t *testing.T) {
 	transport, counts := countingBranchTransport(t)
 	transport.Seed(Target{Repository: "platform", Branch: "main", Path: "a.yaml"}, "before", "abc")
@@ -214,9 +202,8 @@ func TestSnapshotNeverServesWritesFromTheCache(t *testing.T) {
 	}
 }
 
-// TestSnapshotPassesThroughWithoutABranchReader pins the degradation. Mock mode
-// and any transport that cannot enumerate a branch must behave exactly as they
-// did before the wrapper existed: every read goes straight through.
+// Mock mode and any transport that cannot enumerate a branch must behave exactly as they did
+// before the wrapper existed: every read goes straight through.
 func TestSnapshotPassesThroughWithoutABranchReader(t *testing.T) {
 	counts := &transportCounts{}
 	inner := NewLocalTransport()
@@ -238,9 +225,8 @@ func TestSnapshotPassesThroughWithoutABranchReader(t *testing.T) {
 	}
 }
 
-// TestSnapshotDryRunIsNeverMemoized: a dry run exists to compare the caller's
-// base against the live head. Answering it from the snapshot would defeat the
-// check the write path depends on, so it must always reach the transport.
+// A dry run exists to compare the caller's base against the live head; answering it from the
+// snapshot would defeat the check the write path depends on.
 func TestSnapshotDryRunIsNeverMemoized(t *testing.T) {
 	transport, counts := countingBranchTransport(t)
 	transport.Seed(Target{Repository: "platform", Branch: "main", Path: "a.yaml"}, "before", "abc")

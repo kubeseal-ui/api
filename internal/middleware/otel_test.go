@@ -17,10 +17,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// spanTracerProvider installs a recording provider as the GLOBAL OTel
-// provider (what SetupTelemetry does at boot) and registers a span
-// recorder so tests can assert on the spans the middleware ended. The
-// previous provider is restored on cleanup.
+// spanTracerProvider installs a recording provider as the GLOBAL OTel provider, as
+// SetupTelemetry does at boot, and restores the previous one on cleanup.
 func spanTracerProvider(t *testing.T) (*tracetest.SpanRecorder, func()) {
 	t.Helper()
 	recorder := tracetest.NewSpanRecorder()
@@ -100,18 +98,16 @@ func TestOTelSpanRecordsStatusOnSpan(t *testing.T) {
 }
 
 func TestOTelSpanRoutePatternFallsBackConservatively(t *testing.T) {
-	// A path with resource-shaped segments collapses to "unmatched" so
-	// namespace and secret names never become labels.
+	// Resource-shaped segments collapse to "unmatched" so namespace and secret names never
+	// become labels.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/secrets/db/pg-cred", nil)
 	if got := OTelSpanRoutePattern(req); got != "unmatched" {
 		t.Fatalf("route pattern = %q, want unmatched", got)
 	}
-	// Fixed health paths keep the raw path.
 	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	if got := OTelSpanRoutePattern(req); got != "/healthz" {
 		t.Fatalf("route pattern = %q, want /healthz", got)
 	}
-	// The router-provided pattern wins over the raw path.
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/secrets/db/pg-cred", nil)
 	req = req.WithContext(contextWithRoutePattern(req.Context(), "/api/v1/secrets/{namespace}/{name}"))
 	if got := OTelSpanRoutePattern(req); got != "/api/v1/secrets/{namespace}/{name}" {
@@ -122,8 +118,8 @@ func TestOTelSpanRoutePatternFallsBackConservatively(t *testing.T) {
 func TestOTelSpanExtractsInboundTraceparent(t *testing.T) {
 	recorder, _ := spanTracerProvider(t)
 
-	// The global propagator defaults to no-op until SetupTelemetry
-	// installs W3C TraceContext at boot; the test mirrors that.
+	// The global propagator is a no-op until SetupTelemetry installs W3C TraceContext at
+	// boot; the test mirrors that.
 	previousProp := otel.GetTextMapPropagator()
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	t.Cleanup(func() { otel.SetTextMapPropagator(previousProp) })
@@ -157,7 +153,6 @@ func TestRequestLoggerAddsTraceCorrelation(t *testing.T) {
 	if !strings.Contains(out, `"route":"/healthz"`) {
 		t.Fatalf("route not recorded: %s", out)
 	}
-	// Request headers never appear in the log line.
 	if strings.Contains(out, "authorization") || strings.Contains(out, "cookie") {
 		t.Fatalf("log line carries sensitive headers: %s", out)
 	}

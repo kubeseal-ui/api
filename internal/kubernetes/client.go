@@ -1,20 +1,11 @@
-// Package kubernetes defines the read-only Kubernetes client surface
-// the api depends on, plus a deterministic fake for tests.
+// Package kubernetes defines the read-only Kubernetes client surface the api depends on,
+// plus a deterministic fake for tests.
 //
-// The api NEVER creates, updates, patches, or deletes Kubernetes
-// resources — this package exposes only list/get reads over
-// namespaces, SealedSecrets, and (in decrypt-enabled mode) the
-// controller's active private-key Secret.
-//
-// Phase-1 contract (internal-docs/engineering/backend/kubernetes-client.md):
-//
-//   - Listing is metadata-only; ACL filtering happens at the API layer.
-//   - Active-key selection must be deterministic and never depend on
-//     API list order: reject malformed entries, pick the newest valid
-//     creationTimestamp, use the name as a stable tie-breaker only.
-//   - Ambiguous or malformed active-key state fails closed (error),
-//     never silently picks the first item.
-//   - Key bytes are never cached, logged, or retained after use.
+// The api never writes to Kubernetes: only list/get reads over namespaces, SealedSecrets,
+// and (in decrypt-enabled mode) the controller's private-key Secret. Active-key selection
+// is deterministic and never depends on API list order; ambiguous or malformed state fails
+// closed rather than picking the first item. Key bytes are never cached, logged, or
+// retained after use.
 package kubernetes
 
 import (
@@ -24,42 +15,33 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Namespace is the minimal metadata projection of a namespace used by
-// the api. Only fields the UI needs flow across the boundary.
+// Namespace is the metadata projection of a namespace the api exposes to the UI.
 type Namespace struct {
 	Name          string `json:"name"`
 	GitManaged    bool   `json:"git_managed"`
 	DeliveryMode  string `json:"delivery_mode,omitempty"`
 	GitRepository string `json:"git_mapping,omitempty"`
-	// Capabilities is the caller's effective capability set in this
-	// namespace, filled in by the handler from the authenticated
-	// identity — never by the Kubernetes client, which knows nothing
-	// about callers. It is what lets the UI decide which actions to
-	// offer without probing each endpoint for a 403.
+	// Capabilities is the caller's effective capability set in this namespace, filled in by
+	// the handler from the authenticated identity — never by the client, which knows
+	// nothing about callers.
 	Capabilities []string `json:"capabilities"`
 }
 
-// DriftStatus describes the relationship between the live SealedSecret
-// and its Git-managed counterpart.
 type DriftStatus string
 
 const (
-	// DriftSync means the live SealedSecret matches its Git-managed version.
-	DriftSync DriftStatus = "in-sync"
-	// DriftDiverged means the live and Git versions differ.
+	DriftSync     DriftStatus = "in-sync"
 	DriftDiverged DriftStatus = "diverged"
-	// DriftUnknown means drift could not be determined (e.g. no Git mapping).
-	DriftUnknown DriftStatus = "unknown"
+	DriftUnknown  DriftStatus = "unknown"
 )
 
-// SealedSecret is the minimal metadata projection of a SealedSecret.
-// Ciphertext and other spec internals are deliberately NOT exposed
-// here — the api returns YAML on demand through the crypto layer.
+// SealedSecret is the metadata projection of a SealedSecret. Ciphertext and other spec
+// internals stay out of it; YAML is served on demand through the crypto layer.
 type SealedSecret struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
-	// Scope is the sealed secret's mobility scope (strict,
-	// namespace-wide, cluster-wide). Derived from annotations.
+	// Scope is the sealed secret's mobility scope (strict, namespace-wide, cluster-wide),
+	// derived from annotations.
 	Scope     string   `json:"scope"`
 	KeyCount  int      `json:"key_count"`
 	Keys      []string `json:"keys,omitempty"`
@@ -67,44 +49,37 @@ type SealedSecret struct {
 	YAML      string   `json:"-"`
 }
 
-// ActiveKey is the resolved controller private key. Callers must
-// release Key after use (zero it); the client never retains it.
+// ActiveKey is the resolved controller private key; the client never retains it, and
+// callers must zero Key after use.
 type ActiveKey struct {
-	// Name of the Secret the key came from (for audit logging).
+	// Name of the Secret the key came from, for audit logging.
 	Name string
-	// Key is the parsed RSA private key material. Bytes are copied
-	// out of the k8s Secret on demand and zeroed after use by the
-	// caller.
+	// Key is the parsed RSA private key material, copied out of the Secret on demand and
+	// zeroed after use by the caller.
 	Key []byte
 }
 
-// Client is the read-only Kubernetes surface. Implementations must be
-// safe for concurrent use.
+// Client is the read-only Kubernetes surface. Implementations must be safe for concurrent
+// use.
 type Client interface {
-	// ListNamespaces returns all namespaces the service account can
-	// see. ACL filtering is the caller's responsibility.
+	// ListNamespaces returns all namespaces the service account can see; ACL filtering is
+	// the caller's responsibility.
 	ListNamespaces(ctx context.Context) ([]Namespace, error)
 
-	// GetSealedSecret returns one SealedSecret by namespace/name.
 	GetSealedSecret(ctx context.Context, namespace, name string) (SealedSecret, error)
 
-	// ListSealedSecrets returns all SealedSecrets in a namespace.
 	ListSealedSecrets(ctx context.Context, namespace string) ([]SealedSecret, error)
 
-	// FindActiveControllerKey returns the controller's active private
-	// key. Only used in decrypt-enabled mode. Fails closed on
-	// ambiguous or malformed state (see package doc).
+	// FindActiveControllerKey returns the controller's active private key (decrypt-enabled
+	// mode only, see the package doc on failing closed).
 	FindActiveControllerKey(ctx context.Context) (ActiveKey, error)
 
-	// FindAllControllerKeys returns all valid controller private keys.
-	// Used during decryption so secrets encrypted with previously rotated
-	// keys can still be unsealed.
+	// FindAllControllerKeys returns every valid controller private key, so secrets sealed
+	// under previously rotated keys can still be unsealed.
 	FindAllControllerKeys(ctx context.Context) ([]ActiveKey, error)
 }
 
-// Secret is an alias so tests can construct fake controller key
-// Secrets without importing corev1 everywhere.
+// Secret and ObjectMeta are aliases so tests can build fixtures without importing corev1.
 type Secret = corev1.Secret
 
-// ObjectMeta alias for constructing test fixtures.
 type ObjectMeta = metav1.ObjectMeta

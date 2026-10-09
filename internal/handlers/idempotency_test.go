@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// idempotencyTestClock is a hand-cranked time source, so the TTL can be crossed
-// without the test sleeping through it.
+// idempotencyTestClock is a hand-cranked time source, so the TTL can be crossed without sleeping.
 type idempotencyTestClock struct{ t time.Time }
 
 func (c *idempotencyTestClock) now() time.Time          { return c.t }
@@ -42,9 +41,8 @@ func TestIdempotencyStoreForgetsAKeyAfterTheTTL(t *testing.T) {
 	}
 }
 
-// The store must not grow without limit. A burst of distinct keys inside one
-// TTL window is all live at once, so expiring alone cannot bound it — this is
-// the case the cap exists for, and the leak it replaces.
+// The store must not grow without limit. A burst of distinct keys inside one TTL window is all live
+// at once, so expiring alone cannot bound it — this is the case the cap exists for.
 func TestIdempotencyStoreIsBoundedByTheCap(t *testing.T) {
 	store, _ := newIdempotencyTestStore()
 	total := idempotencyMaxKeys * 2
@@ -63,8 +61,8 @@ func TestIdempotencyStoreIsBoundedByTheCap(t *testing.T) {
 	}
 }
 
-// Re-claiming after expiry appends to the order, so the sweep has to leave the
-// map and the order agreeing about which keys are live.
+// Re-claiming after expiry appends to the order, so the sweep must leave the map and the order
+// agreeing about which keys are live.
 func TestIdempotencyStoreSweepKeepsOrderConsistent(t *testing.T) {
 	store, clock := newIdempotencyTestStore()
 	for i := 0; i < 10; i++ {

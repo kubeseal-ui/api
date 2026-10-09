@@ -11,8 +11,6 @@ import (
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
-// tokenFileFor writes a token to a temp file so adapter construction has
-// a path it can validate at boot.
 func tokenFileFor(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "token")
@@ -113,10 +111,9 @@ func TestProposalAdaptersMalformedEntryFailsClosed(t *testing.T) {
 	}
 }
 
-// TestRouterRefusesBootWhenProposalNamespaceNamesUnregisteredAdapter pins
-// the fail-closed contract end to end: a proposal namespace that names an
-// adapter no registry entry provides must stop the API from booting rather
-// than serving deliveries with an unusable provider.
+// TestRouterRefusesBootWhenProposalNamespaceNamesUnregisteredAdapter pins the fail-closed contract
+// end to end: a proposal namespace that names an adapter no registry entry provides must stop the API
+// from booting rather than serving deliveries with an unusable provider.
 func TestRouterRefusesBootWhenProposalNamespaceNamesUnregisteredAdapter(t *testing.T) {
 	_, err := newRouter(routerOptions{
 		logger:    testLogger(),
@@ -136,8 +133,8 @@ func TestRouterRefusesBootWhenProposalNamespaceNamesUnregisteredAdapter(t *testi
 	}
 }
 
-// TestRouterBootsWithRegisteredAdapter is the positive counterpart: the
-// same mapping seeds successfully once the adapter registry holds the name.
+// TestRouterBootsWithRegisteredAdapter is the positive counterpart: the same mapping seeds
+// successfully once the adapter registry holds the name.
 func TestRouterBootsWithRegisteredAdapter(t *testing.T) {
 	tokenFile := tokenFileFor(t)
 	adapters, err := proposalAdapters(&config.Config{GitOpsProposalAdapters: "github-pr:github:" + tokenFile})

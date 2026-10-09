@@ -50,7 +50,6 @@ func TestSeedGitMappingsUnknownAdapterFailsClosed(t *testing.T) {
 
 func TestSeedGitMappingsProposalValidationStillApplies(t *testing.T) {
 	store := NewPolicyStore()
-	// A proposal spec with a resolved adapter but an unsafe path template fails validation.
 	specs := []GitMappingSpec{
 		{Namespace: "staging", Repository: "org/repo", Branch: "main", PathTemplate: "../{namespace}/{name}.yaml", AuthRef: "cred", Mode: GitDeliveryProposal, ProposalAdapterName: "github-pr"},
 	}

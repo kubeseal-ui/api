@@ -1,5 +1,3 @@
-// Package handlers: P2.T4 auth handler coverage. RED-GREEN-REFACTOR per
-// test-driven-development skill.
 package handlers
 
 import (
@@ -72,7 +70,6 @@ func testAuthConfig() middleware.AuthConfig {
 	}
 }
 
-// TestLoginHandlerSetsPKCECookieAndRedirects: Login issues PKCE cookie + 302.
 func TestLoginHandlerSetsPKCECookieAndRedirects(t *testing.T) {
 	fp := &fakeProvider{}
 	auth := NewAuthHandlers(fp, testAuthConfig(), []byte("test-signing-key"))
@@ -101,12 +98,9 @@ func TestLoginHandlerSetsPKCECookieAndRedirects(t *testing.T) {
 	}
 }
 
-// TestCallbackHandlerEstablishesSession: Callback with valid state+code sets
-// session, refresh, and csrf cookies.
 func TestCallbackHandlerEstablishesSession(t *testing.T) {
 	fp := &fakeProvider{}
 	auth := NewAuthHandlers(fp, testAuthConfig(), []byte("test-signing-key"))
-	// Pre-mint a flow state.
 	flow, err := oidc.NewFlowState()
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +129,6 @@ func TestCallbackHandlerEstablishesSession(t *testing.T) {
 	}
 }
 
-// TestCallbackHandlerRejectsStateMismatch: state query != flow state => 400.
 func TestCallbackHandlerRejectsStateMismatch(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	flow, _ := oidc.NewFlowState()
@@ -149,7 +142,6 @@ func TestCallbackHandlerRejectsStateMismatch(t *testing.T) {
 	}
 }
 
-// TestCallbackHandlerRejectsExpiredFlow: stale PKCE cookie => 400.
 func TestCallbackHandlerRejectsExpiredFlow(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	stale := &oidc.FlowState{State: "x", Nonce: "n", PKCEVerifier: "v", CreatedAt: time.Now().Add(-10 * time.Minute).Unix()}
@@ -163,7 +155,6 @@ func TestCallbackHandlerRejectsExpiredFlow(t *testing.T) {
 	}
 }
 
-// TestCallbackHandlerRejectsBadSignature: PKCE cookie signed with wrong key => 400.
 func TestCallbackHandlerRejectsBadSignature(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	flow, _ := oidc.NewFlowState()
@@ -177,7 +168,6 @@ func TestCallbackHandlerRejectsBadSignature(t *testing.T) {
 	}
 }
 
-// TestMeHandlerRequiresAuthenticatedIdentity: no identity in ctx => 401.
 func TestMeHandlerRequiresAuthenticatedIdentity(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	rr := httptest.NewRecorder()
@@ -188,7 +178,6 @@ func TestMeHandlerRequiresAuthenticatedIdentity(t *testing.T) {
 	}
 }
 
-// TestMeHandlerReturnsIdentity: identity in ctx => 200 with email/username.
 func TestMeHandlerReturnsIdentity(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	rr := httptest.NewRecorder()
@@ -203,7 +192,6 @@ func TestMeHandlerReturnsIdentity(t *testing.T) {
 	}
 }
 
-// TestLogoutHandlerClearsCookies: POST with valid CSRF clears session+refresh+csrf.
 func TestLogoutHandlerClearsCookies(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	rr := httptest.NewRecorder()
@@ -229,7 +217,6 @@ func TestLogoutHandlerClearsCookies(t *testing.T) {
 	}
 }
 
-// TestLogoutHandlerRequiresCSRF: missing CSRF => 403.
 func TestLogoutHandlerRequiresCSRF(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	rr := httptest.NewRecorder()
@@ -241,7 +228,6 @@ func TestLogoutHandlerRequiresCSRF(t *testing.T) {
 	}
 }
 
-// TestCSRFHandlerIssuesTokenWhenUnauthenticated: no identity => minted token.
 func TestCSRFHandlerIssuesTokenWhenUnauthenticated(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	rr := httptest.NewRecorder()
@@ -255,7 +241,6 @@ func TestCSRFHandlerIssuesTokenWhenUnauthenticated(t *testing.T) {
 	}
 }
 
-// TestCSRFHandlerReturnsSessionToken: with identity, return its CSRF.
 func TestCSRFHandlerReturnsSessionToken(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	rr := httptest.NewRecorder()
@@ -279,10 +264,8 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// TestMeHandlerCarriesGlobalAndScopedGrants: /auth/me returns the flat grant
-// list under "capabilities" and the per-namespace grants under "namespaces",
-// which is the shape internal-docs/architecture/api.md documents and the two
-// halves the UI unions.
+// TestMeHandlerCarriesGlobalAndScopedGrants pins the shape the UI unions: the flat grant
+// list under "capabilities" and the per-namespace grants under "namespaces".
 func TestMeHandlerCarriesGlobalAndScopedGrants(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	rr := httptest.NewRecorder()
@@ -312,8 +295,7 @@ func TestMeHandlerCarriesGlobalAndScopedGrants(t *testing.T) {
 	}
 }
 
-// TestMeHandlerAlwaysSendsTheNamespaceMap: the key is present even when there
-// is nothing scoped, so a client reads it without a presence check.
+// The key is present even when nothing is scoped, so a client needs no presence check.
 func TestMeHandlerAlwaysSendsTheNamespaceMap(t *testing.T) {
 	auth := NewAuthHandlers(&fakeProvider{}, testAuthConfig(), []byte("test-signing-key"))
 	rr := httptest.NewRecorder()

@@ -1,6 +1,3 @@
-// Package crypto tests — RED-GREEN-REFACTOR per the
-// test-driven-development skill. Each test documents a security or
-// correctness contract from internal-docs/engineering/backend/crypto-wrapper.md.
 package crypto
 
 import (
@@ -10,9 +7,6 @@ import (
 	"testing"
 )
 
-// TestEncryptDecryptRoundTripStrict verifies that a secret encrypted
-// with StrictScope can be decrypted back to the original data, and
-// that the scope annotation is present on the SealedSecret.
 func TestEncryptDecryptRoundTripStrict(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -41,14 +35,9 @@ func TestEncryptDecryptRoundTripStrict(t *testing.T) {
 	}
 }
 
-// TestEncryptYAMLWritesYAML pins the format of the manifest the API hands out.
-//
-// Every manifest a client sees comes from EncryptYAML — the create path
-// directly, and the diff and patch paths through ResealMany — and it is posted
-// straight back to the delivery endpoints, which commit it verbatim. The codec
-// underneath serializes to JSON, and JSON is a subset of YAML: the file parsed,
-// sealed, and reconciled, so nothing anywhere failed. What shipped was a single
-// line of JSON in a directory of YAML, which no assertion here was watching.
+// TestEncryptYAMLWritesYAML pins the manifest format: every manifest a client sees comes
+// from EncryptYAML and is committed verbatim, and JSON is a valid YAML subset, so a
+// one-line JSON document would parse and reconcile while breaking every diff.
 func TestEncryptYAMLWritesYAML(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -59,9 +48,8 @@ func TestEncryptYAMLWritesYAML(t *testing.T) {
 		t.Fatalf("EncryptYAML: %v", err)
 	}
 
-	// The indentation and the per-key lines are the point: the same document
-	// rendered as JSON is one line, so a first-line check is what distinguishes
-	// them rather than a substring that both forms contain.
+	// The same document rendered as JSON is one line, so a first-line check distinguishes
+	// them rather than a substring both forms contain.
 	if !strings.HasPrefix(sealed, "apiVersion:") {
 		t.Fatalf("sealed manifest does not begin with a YAML key:\n%s", sealed)
 	}
@@ -71,14 +59,12 @@ func TestEncryptYAMLWritesYAML(t *testing.T) {
 	if !strings.Contains(sealed, "\nkind: SealedSecret\n") {
 		t.Fatalf("sealed manifest does not carry kind on its own line:\n%s", sealed)
 	}
-	// Format is not the whole contract: the rendering has to be the document the
-	// controller reads back.
+	// The rendering also has to be the document the controller reads back.
 	if _, err := parseSealedSecret(sealed); err != nil {
 		t.Fatalf("the YAML rendering does not parse as a SealedSecret: %v", err)
 	}
 }
 
-// TestEncryptDecryptRoundTripNamespaceWide verifies namespace-wide scope.
 func TestEncryptDecryptRoundTripNamespaceWide(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -100,7 +86,6 @@ func TestEncryptDecryptRoundTripNamespaceWide(t *testing.T) {
 	}
 }
 
-// TestEncryptDecryptRoundTripClusterWide verifies cluster-wide scope.
 func TestEncryptDecryptRoundTripClusterWide(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -122,9 +107,6 @@ func TestEncryptDecryptRoundTripClusterWide(t *testing.T) {
 	}
 }
 
-// TestDecryptWrongKeyFails verifies that decryption with a key that
-// does not match the encryption key fails rather than silently
-// producing garbage.
 func TestDecryptWrongKeyFails(t *testing.T) {
 	w1, _ := mustNewTestCrypto(t)
 	w2, _ := mustNewTestCrypto(t) // different key
@@ -142,9 +124,8 @@ func TestDecryptWrongKeyFails(t *testing.T) {
 	}
 }
 
-// multiPrivProvider is a PrivateKeyProvider that returns several keys,
-// standing in for a controller that has rotated its sealing key and
-// retained the previous ones.
+// multiPrivProvider stands in for a controller that rotated its sealing key and kept the
+// previous ones.
 type multiPrivProvider struct {
 	keys []*rsa.PrivateKey
 }
@@ -153,12 +134,9 @@ func (m *multiPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, e
 	return m.keys, nil
 }
 
-// TestDecryptAfterKeyRotation verifies that a SealedSecret sealed before
-// a controller key rotation still decrypts once the provider supplies
-// the retained key alongside the new active one. The sealed-secrets
-// controller rotates its sealing key on a schedule and keeps the old
-// keys; a decrypt path holding only the newest key cannot open secrets
-// sealed before the rotation.
+// TestDecryptAfterKeyRotation pins the retained-key contract: the controller rotates its
+// sealing key on a schedule and keeps the old ones, so a decrypt path holding only the
+// newest key cannot open secrets sealed before the rotation.
 func TestDecryptAfterKeyRotation(t *testing.T) {
 	w1, oldKey := mustNewTestCrypto(t) // key that sealed the secret
 	w2, newKey := mustNewTestCrypto(t) // active key after rotation
@@ -186,7 +164,6 @@ func TestDecryptAfterKeyRotation(t *testing.T) {
 	}
 }
 
-// TestResealReplace verifies that replacing one key preserves others.
 func TestResealReplace(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -220,7 +197,6 @@ func TestResealReplace(t *testing.T) {
 	}
 }
 
-// TestResealAdd verifies that adding a new key preserves existing keys.
 func TestResealAdd(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -250,7 +226,6 @@ func TestResealAdd(t *testing.T) {
 	}
 }
 
-// TestResealDelete verifies that deleting a key preserves other keys.
 func TestResealDelete(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -281,7 +256,6 @@ func TestResealDelete(t *testing.T) {
 	}
 }
 
-// TestResealDeleteLastKeyFails verifies the final-key protection.
 func TestResealDeleteLastKeyFails(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -300,7 +274,6 @@ func TestResealDeleteLastKeyFails(t *testing.T) {
 	}
 }
 
-// TestResealReplaceNonExistentFails verifies replace on a non-existent key fails.
 func TestResealReplaceNonExistentFails(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -319,7 +292,6 @@ func TestResealReplaceNonExistentFails(t *testing.T) {
 	}
 }
 
-// TestResealAddExistingKeyFails verifies add on an existing key fails.
 func TestResealAddExistingKeyFails(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -338,10 +310,8 @@ func TestResealAddExistingKeyFails(t *testing.T) {
 	}
 }
 
-// TestResealManyAppliesAMixedBatch verifies that a replace, an add, and a
-// delete in one batch land together and leave unrelated keys alone. One batch
-// is one reviewed change and one commit, so the three must not need three
-// round trips.
+// One batch is one reviewed change and one commit, so a mixed batch must land in one
+// round trip.
 func TestResealManyAppliesAMixedBatch(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -379,14 +349,8 @@ func TestResealManyAppliesAMixedBatch(t *testing.T) {
 	}
 }
 
-// TestResealManyRejectsInvalidBatches verifies that validation covers the whole
-// batch before anything is applied.
-//
-// Each rule is checked against the key set as it stood before the batch, not
-// against the state left by the entries ahead of it, which is what makes the
-// outcome independent of the order the client sent. A batch that would remove
-// the last remaining key is refused as a whole, so the Secret can never be left
-// empty by a sequence of individually-valid deletions.
+// TestResealManyRejectsInvalidBatches pins that validation covers the whole batch before
+// anything is applied, so the outcome is independent of the order the client sent.
 func TestResealManyRejectsInvalidBatches(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -421,10 +385,8 @@ func TestResealManyRejectsInvalidBatches(t *testing.T) {
 	}
 }
 
-// TestResealManyRejectsAnEmptyBatch verifies that "change nothing" is refused
-// rather than accepted as a no-op. A request that describes no change is a bug
-// in the caller, and answering it with a re-sealed Secret would produce a fresh
-// commit whose content is identical to the old one.
+// A request that describes no change is a caller bug: answering it with a re-sealed
+// Secret would commit content identical to the old one.
 func TestResealManyRejectsAnEmptyBatch(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -439,14 +401,9 @@ func TestResealManyRejectsAnEmptyBatch(t *testing.T) {
 	}
 }
 
-// TestResealPreservesMetadataAndScope verifies that editing a key leaves the
-// rest of the object intact.
-//
-// secret-editing.md promises an edit preserves type, labels, annotations, and
-// template. It did not: the rebuild carried only name, namespace, type, and
-// data, so every patch silently stripped the template's labels and annotations,
-// and the re-seal was hardcoded to strict — which quietly narrowed a
-// namespace-wide Secret, changing where it can be decrypted.
+// TestResealPreservesMetadataAndScope pins that an edit keeps type, labels, annotations,
+// template, and the Secret's own sealing scope: hardcoding strict on re-seal quietly
+// narrows where a namespace-wide Secret can be decrypted.
 func TestResealPreservesMetadataAndScope(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -486,11 +443,11 @@ stringData:
 		t.Fatalf("DecryptYAML after Reseal: %v", err)
 	}
 	for _, want := range []string{
-		"kubernetes.io/tls",   // type
-		"app: payments-api",   // label
-		"owner: platform-team", // annotation
-		"tls.key: key",        // unrelated key
-		"tls.crt: new-cert",   // the edit itself
+		"kubernetes.io/tls",
+		"app: payments-api",
+		"owner: platform-team",
+		"tls.key: key",
+		"tls.crt: new-cert",
 	} {
 		if !strings.Contains(decrypted, want) {
 			t.Errorf("decrypted output missing %q: %s", want, decrypted)
@@ -498,7 +455,6 @@ stringData:
 	}
 }
 
-// TestEncryptRejectsInvalidSecretYAML verifies malformed YAML is rejected.
 func TestEncryptRejectsInvalidSecretYAML(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -508,8 +464,6 @@ func TestEncryptRejectsInvalidSecretYAML(t *testing.T) {
 	}
 }
 
-// TestDecryptWithoutPrivateKeyProviderFails verifies decryption fails
-// closed when no private key provider is configured.
 func TestDecryptWithoutPrivateKeyProviderFails(t *testing.T) {
 	w := New(mustNewFakeCertProvider(t), nil)
 
@@ -528,8 +482,6 @@ func TestDecryptWithoutPrivateKeyProviderFails(t *testing.T) {
 	}
 }
 
-// TestResealWithoutPrivateKeyProviderFails verifies reseal fails closed
-// when no private key provider is configured.
 func TestResealWithoutPrivateKeyProviderFails(t *testing.T) {
 	w := New(mustNewFakeCertProvider(t), nil)
 
@@ -545,8 +497,6 @@ func TestResealWithoutPrivateKeyProviderFails(t *testing.T) {
 	}
 }
 
-// TestValidateSealedSecretYAML verifies that a valid SealedSecret
-// YAML passes validation and invalid input does not.
 func TestValidateSealedSecretYAML(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -565,8 +515,6 @@ func TestValidateSealedSecretYAML(t *testing.T) {
 	}
 }
 
-// TestDecryptRejectsWrongYAML verifies that decrypting a non-SealedSecret
-// YAML fails.
 func TestDecryptRejectsWrongYAML(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -576,7 +524,6 @@ func TestDecryptRejectsWrongYAML(t *testing.T) {
 	}
 }
 
-// TestScopeString verifies the String() method for all scopes.
 func TestScopeString(t *testing.T) {
 	cases := []struct {
 		scope Scope
@@ -593,7 +540,6 @@ func TestScopeString(t *testing.T) {
 	}
 }
 
-// TestScopeSet verifies parsing and rejection of invalid scope strings.
 func TestScopeSet(t *testing.T) {
 	var s Scope
 	if err := s.Set("strict"); err != nil {
@@ -608,8 +554,7 @@ func TestScopeSet(t *testing.T) {
 	}
 }
 
-// mustNewFakeCertProvider creates a Provider backed by a test cert
-// for use in tests that only need encryption (no decryption).
+// mustNewFakeCertProvider backs a Provider with a test cert for tests that only encrypt.
 func mustNewFakeCertProvider(t *testing.T) Provider {
 	t.Helper()
 	w, _, err := NewTestCrypto()

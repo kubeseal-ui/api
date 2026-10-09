@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// TestLoadDefaults documents the documented defaults when neither flags
-// nor env vars are set. The values are the contract for "what does the
-// kubeseal-ui api do with no configuration".
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("KUBESEAL_API_PORT", "")
 	t.Setenv("LOG_LEVEL", "")
@@ -33,8 +30,6 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-// TestLoadFromEnv confirms env vars override the defaults. Flag values
-// are tested separately in TestLoadFromFlags.
 func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("KUBESEAL_API_PORT", "9090")
 	t.Setenv("LOG_LEVEL", "debug")
@@ -63,10 +58,6 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 }
 
-// TestLoadInvalidPortEnvIgnored documents the env-validation contract:
-// malformed port values fall back to the default (8080) rather than
-// silently zeroing the port. Regression test for the errcheck finding
-// in commit 27dc91b.
 func TestLoadInvalidPortEnvIgnored(t *testing.T) {
 	t.Setenv("KUBESEAL_API_PORT", "not-a-number")
 
@@ -79,10 +70,6 @@ func TestLoadInvalidPortEnvIgnored(t *testing.T) {
 	}
 }
 
-// TestLoadUnknownLogLevelRejected documents that unrecognised log levels
-// fail closed at load time. The server should never start with an
-// invalid log level — better to refuse and let an operator fix the
-// config than to silently log at default level.
 func TestLoadUnknownLogLevelRejected(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "loud")
 
@@ -95,10 +82,6 @@ func TestLoadUnknownLogLevelRejected(t *testing.T) {
 	}
 }
 
-// TestReadyRequiresOIDC documents the readiness contract from
-// phase-1.md: the api is ready when OIDC issuer + client id are both
-// configured. Until they are, /readyz must report not_ready so kubelet
-// does not route traffic.
 func TestReadyRequiresOIDC(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "")
 	t.Setenv("OIDC_CLIENT_ID", "")
@@ -112,9 +95,6 @@ func TestReadyRequiresOIDC(t *testing.T) {
 	}
 }
 
-// TestReadyWithOIDC confirms readiness flips true once both OIDC values
-// are present. EnableDecrypt is intentionally NOT part of readiness —
-// decryption is gated at request time, not at startup.
 func TestReadyWithOIDC(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
@@ -128,11 +108,6 @@ func TestReadyWithOIDC(t *testing.T) {
 	}
 }
 
-// TestStringRedactsSecrets is the regression test for the phase-1
-// "no plaintext, ciphertext, token, cookie, PEM, or body leakage in
-// logs and errors" requirement. The String method is what main.go uses
-// to log the loaded config at startup; if it ever leaks a secret value,
-// the test must fail.
 func TestStringRedactsSecrets(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "super-secret-client-id")
@@ -146,8 +121,7 @@ func TestStringRedactsSecrets(t *testing.T) {
 	if strings.Contains(out, "super-secret-client-id") {
 		t.Errorf("OIDCClientID leaked in String output: %s", out)
 	}
-	// Issuer is not a secret per the kubeseal-ui threat model
-	// (internal-docs/security/threat-model.md) so it must flow through.
+	// The issuer is not a secret, so it must flow through.
 	if !strings.Contains(out, "https://auth.example.com") {
 		t.Errorf("OIDCIssuer unexpectedly redacted: %s", out)
 	}

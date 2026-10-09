@@ -9,12 +9,10 @@ import (
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
-// A repeated Idempotency-Key on a delivery is answered with the first response
-// rather than refused. The push to Git has already happened by then, and the
-// branch is derived from the secret's identity so a retry is the same request
-// arriving twice, not a new intent — the caller that lost the first response
-// needs the commit it produced, and refusing it left them holding an error for
-// work that had succeeded.
+// A repeated Idempotency-Key on a delivery is answered with the first response rather than refused:
+// the push to Git has already happened, and the branch is derived from the secret's identity, so a
+// retry is the same request arriving twice and the caller that lost the first response needs the
+// commit it produced.
 func TestGitOpsDeliverReplaysARepeatInsteadOfReExecutingIt(t *testing.T) {
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")
@@ -39,11 +37,9 @@ func TestGitOpsDeliverReplaysARepeatInsteadOfReExecutingIt(t *testing.T) {
 		t.Fatalf("first status = %d: %s", first.Code, first.Body.String())
 	}
 
-	// Both ways this could go wrong are distinguishable in the status alone. A
-	// refusal is a 409 DUPLICATE_REQUEST, and running the delivery a second time
-	// is a 409 GIT_CONFLICT, because the first push moved the branch head that
-	// the retry's base commit is checked against. Only a replay is a 200 whose
-	// body is the one already sent.
+	// A refusal is a 409 DUPLICATE_REQUEST, and running the delivery again is a 409 GIT_CONFLICT —
+	// the first push moved the branch head the retry's base commit is checked against. Only a replay
+	// is a 200 whose body is the one already sent.
 	duplicateReq := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", body, protectedIdentity(policy.GitOpsPush))
 	duplicateReq.Header.Set("Idempotency-Key", "request-1")
 	duplicate := httptest.NewRecorder()
@@ -56,9 +52,8 @@ func TestGitOpsDeliverReplaysARepeatInsteadOfReExecutingIt(t *testing.T) {
 	}
 }
 
-// A delivery that failed released its key, so the caller can genuinely try
-// again. Holding the key after a transient failure would refuse every retry
-// until it expired, which is the opposite of what the key is for.
+// A delivery that failed released its key, so the caller can genuinely try again; holding it after a
+// transient failure would refuse every retry until it expired, the opposite of what the key is for.
 func TestGitOpsDeliverRetryAfterFailureIsNotRefused(t *testing.T) {
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")

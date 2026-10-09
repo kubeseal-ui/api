@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// TestProposalPushDoesNotTouchDirectBranch pins the proposal-mode contract:
-// a branch push targets the proposal branch; the direct branch keeps its
-// content until a direct delivery lands.
+// A branch push targets the proposal branch; the direct branch keeps its content until a direct
+// delivery lands.
 func TestProposalPushDoesNotTouchDirectBranch(t *testing.T) {
 	transport := NewLocalTransport()
 	direct := Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}
@@ -22,7 +21,6 @@ func TestProposalPushDoesNotTouchDirectBranch(t *testing.T) {
 		t.Fatalf("pushed.Branch = %q, want proposal-1", pushed.Branch)
 	}
 
-	// The direct branch is untouched.
 	snapshot, err := transport.ReadManifest(context.Background(), direct, "")
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +29,6 @@ func TestProposalPushDoesNotTouchDirectBranch(t *testing.T) {
 		t.Fatalf("direct branch changed: %q", snapshot.Content)
 	}
 
-	// The proposal branch carries the change.
 	proposal, err := transport.ReadManifest(context.Background(), Target{Repository: "platform", Branch: "proposal-1", Path: "clusters/payments/api.yaml"}, "")
 	if err != nil {
 		t.Fatal(err)

@@ -10,9 +10,8 @@ import (
 	"testing"
 )
 
-// bareRemote initializes a local bare repository and seeds an initial
-// commit on the given branch through the system git binary. Bare remotes
-// verify provider-neutral transport per the phase-4 verification plan.
+// bareRemote initializes a local bare repository with an initial commit on the given branch,
+// through the system git binary.
 func bareRemote(t *testing.T, dir, branch string) string {
 	t.Helper()
 	cmd := exec.Command("git", "init", "--bare", "--initial-branch", branch, dir)
@@ -84,7 +83,6 @@ func TestGoGitTransportRoundTripAgainstBareRemote(t *testing.T) {
 		t.Fatalf("unexpected snapshot: %#v", snapshot)
 	}
 
-	// Dry-run returns the before/after without mutating the remote.
 	diff, err := transport.DryRun(ctx, Change{Target: target, BaseCommit: snapshot.Commit, Content: []byte("after-content")}, "")
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +98,6 @@ func TestGoGitTransportRoundTripAgainstBareRemote(t *testing.T) {
 		t.Fatal("dry-run mutated the remote")
 	}
 
-	// Push lands on the remote and the read-back matches.
 	pushed, err := transport.PushBranch(ctx, Change{Target: target, BaseCommit: snapshot.Commit, Content: []byte("after-content")}, "")
 	if err != nil {
 		t.Fatal(err)
@@ -159,16 +156,13 @@ func TestGoGitTransportMissingMappedFileIsVacancy(t *testing.T) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
 
-	// The vacancy sentinel is not a zero snapshot: it carries the branch head,
-	// which is what a create must build on and what the new-secret flow reports
-	// to the client. Without it no client could deliver a first Secret into an
-	// empty namespace.
+	// The vacancy sentinel is not a zero snapshot: it carries the branch head, which is what a
+	// create must build on and what the new-secret flow reports to the client.
 	vacant, err := transport.ReadManifest(ctx, target, "")
 	if vacant.Commit == "" || vacant.Target.Path != target.Path {
 		t.Fatalf("vacancy snapshot lost the branch head: %#v (err = %v)", vacant, err)
 	}
 
-	// A new-file change against that head pushes and creates the path.
 	snapshot, err := transport.ReadManifest(ctx, Target{Repository: remoteURL, Branch: "main", Path: "other/README.md"}, "")
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +251,6 @@ func TestFileCredentialResolverReadsTokenPerCall(t *testing.T) {
 		t.Fatal("resolved credential must produce an auth method")
 	}
 
-	// Rotation: rewriting the file takes effect on the next resolve.
 	if err := writeFile(tokenFile, "rotated-token"); err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +295,6 @@ func TestGoGitTransportSearchManifestOptionA(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// 1. Search for existing secret in nested subdirectory
 	snap, err := transport.SearchManifest(ctx, remoteURL, "main", "cluster", "my-cred", "")
 	if err != nil {
 		t.Fatalf("SearchManifest failed: %v", err)
@@ -314,7 +306,6 @@ func TestGoGitTransportSearchManifestOptionA(t *testing.T) {
 		t.Fatalf("content mismatch: %q", string(snap.Content))
 	}
 
-	// 2. Search for non-existent secret returns ErrNotFound
 	_, err = transport.SearchManifest(ctx, remoteURL, "main", "cluster", "non-existent", "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)

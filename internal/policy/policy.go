@@ -1,34 +1,11 @@
-// Package policy implements the capability registry, role definitions,
-// namespace Git mappings, and authorization logic for the kubeseal-ui API.
+// Package policy implements the capability registry, role definitions, namespace Git
+// mappings, and authorization logic for the kubeseal-ui API.
 //
-// Per internal-docs/engineering/backend/crypto-wrapper.md and phase-2.md:
-//
-// Capabilities:
-//   - metadata:read   — list namespaces and SealedSecret metadata
-//   - secret:seal     — encrypt / create SealedSecrets
-//   - secret:decrypt  — decrypt (requires ENABLE_DECRYPT=true)
-//   - gitops:propose  — propose sealed YAML via PR (GitOps proposal mode)
-//   - gitops:push     — push sealed YAML directly to Git (GitOps direct mode)
-//   - access:manage   — manage ACL mappings (platform admins)
-//
-// Built-in roles:
-//   - viewer           — metadata:read
-//   - editor           — metadata:read, secret:seal
-//   - secret-manager   — metadata:read, secret:seal, secret:decrypt
-//   - release-proposer — metadata:read, gitops:propose
-//   - release-pusher   — metadata:read, gitops:push
-//   - platform-admin   — metadata:read, secret:seal, access:manage (NO implicit decrypt or gitops)
-//
-// Custom roles are validated against known capabilities.
-//
-// Grants are namespace-scoped. A group rule names a role and the namespaces it
-// applies in; an identity's capabilities in a namespace are the union of its
-// rules scoped to that namespace and its rules scoped to "*". With no policy
-// document loaded — see document.go — the store falls back to the older
-// behaviour where an OIDC group named exactly after a role granted that role
-// everywhere.
-//
-// Git mapping is per-namespace: namespace → {repo, branch, path template, auth ref, delivery mode}
+// Grants are namespace-scoped: a group rule names a role and the namespaces it applies in,
+// and an identity's capabilities in a namespace are the union of its rules scoped to that
+// namespace and its rules scoped to "*". With no policy document loaded — see document.go —
+// the store falls back to the older behaviour where an OIDC group named exactly after a
+// role granted that role everywhere.
 package policy
 
 import (
@@ -45,7 +22,6 @@ import (
 // Capability is a named permission.
 type Capability string
 
-// Known capabilities.
 const (
 	MetadataRead  Capability = "metadata:read"
 	SecretSeal    Capability = "secret:seal"
@@ -55,7 +31,7 @@ const (
 	AccessManage  Capability = "access:manage"
 )
 
-// All lists every capability for validation.
+// All is every known capability, in the canonical order orderedCapabilities renders in.
 var All = []Capability{
 	MetadataRead,
 	SecretSeal,
@@ -65,7 +41,6 @@ var All = []Capability{
 	AccessManage,
 }
 
-// Valid reports whether c is a known capability.
 func (c Capability) Valid() bool {
 	for _, known := range All {
 		if c == known {
@@ -75,13 +50,11 @@ func (c Capability) Valid() bool {
 	return false
 }
 
-// Role is a named bundle of capabilities.
 type Role struct {
 	Name         string
 	Capabilities []Capability
 }
 
-// Built-in roles per kubeseal-ui design.
 var (
 	RoleViewer = Role{
 		Name: "viewer",
@@ -107,11 +80,9 @@ var (
 		},
 	}
 
-	// Delivery roles are deliberately separate from the editing roles: a
-	// namespace's fixed mode names the capability it needs, and neither
-	// bundle carries seal or decrypt. Holding gitops:push lets a user
-	// deliver a manifest someone else sealed; it does not let them read
-	// plaintext or create secrets.
+	// Delivery roles are deliberately separate from the editing roles: neither bundle
+	// carries seal or decrypt. Holding gitops:push lets a user deliver a manifest someone
+	// else sealed; it does not let them read plaintext or create secrets.
 	RoleReleaseProposer = Role{
 		Name: "release-proposer",
 		Capabilities: []Capability{
@@ -147,7 +118,6 @@ var (
 	}
 )
 
-// BuiltInRoleNames returns the names of all built-in roles.
 func BuiltInRoleNames() []string {
 	names := make([]string, len(BuiltInRoles))
 	for i, r := range BuiltInRoles {
@@ -156,7 +126,6 @@ func BuiltInRoleNames() []string {
 	return names
 }
 
-// IsBuiltInRole reports whether the name is a built-in role.
 func IsBuiltInRole(name string) bool {
 	for _, r := range BuiltInRoles {
 		if r.Name == name {
@@ -166,7 +135,6 @@ func IsBuiltInRole(name string) bool {
 	return false
 }
 
-// GetBuiltInRole returns a built-in role by name.
 func GetBuiltInRole(name string) (Role, bool) {
 	for _, r := range BuiltInRoles {
 		if r.Name == name {
@@ -176,8 +144,7 @@ func GetBuiltInRole(name string) (Role, bool) {
 	return Role{}, false
 }
 
-// NewCustomRole creates a custom role with the given capabilities.
-// Unknown capabilities are rejected.
+// NewCustomRole rejects unknown capabilities and names that collide with a built-in.
 func NewCustomRole(name string, caps []Capability) (Role, error) {
 	if IsBuiltInRole(name) {
 		return Role{}, fmt.Errorf("role name %q conflicts with built-in role", name)
@@ -203,10 +170,11 @@ type Identity struct {
 	Name     string
 	Username string
 	Groups   []string
-	Roles    []string // Role names assigned to this identity
+	// Roles are the role names assigned to this identity.
+	Roles []string
 }
 
-// Capabilities returns the additive union of capabilities from all roles.
+// Capabilities is the additive union of the capabilities of the built-in roles in Roles.
 func (i Identity) Capabilities() []Capability {
 	seen := map[Capability]bool{}
 	for _, roleName := range i.Roles {
@@ -214,9 +182,7 @@ func (i Identity) Capabilities() []Capability {
 			for _, c := range role.Capabilities {
 				seen[c] = true
 			}
-			continue
 		}
-		// Could also check custom roles from policy store
 	}
 	caps := make([]Capability, 0, len(seen))
 	for c := range seen {
@@ -225,7 +191,6 @@ func (i Identity) Capabilities() []Capability {
 	return caps
 }
 
-// Has reports whether the identity has the given capability.
 func (i Identity) Has(c Capability) bool {
 	for _, cap := range i.Capabilities() {
 		if cap == c {
@@ -235,35 +200,31 @@ func (i Identity) Has(c Capability) bool {
 	return false
 }
 
-// GitDeliveryMode represents how sealed secrets are delivered to Git.
+// GitDeliveryMode is how sealed secrets reach Git.
 type GitDeliveryMode string
 
 const (
-	GitDeliveryDirect   GitDeliveryMode = "direct"   // Push directly to repo
-	GitDeliveryProposal GitDeliveryMode = "proposal" // Create PR
+	GitDeliveryDirect   GitDeliveryMode = "direct"
+	GitDeliveryProposal GitDeliveryMode = "proposal"
 )
 
-// GitMapping defines the Git target for a namespace.
 type GitMapping struct {
 	Namespace    string
-	Repository   string // e.g., "org/repo"
-	Branch       string // e.g., "main"
-	PathTemplate string // e.g., "clusters/prod/{namespace}/{name}.yaml"
-	AuthRef      string // Reference to auth secret/credentials
+	Repository   string
+	Branch       string
+	PathTemplate string // e.g. "clusters/prod/{namespace}/{name}.yaml"
+	AuthRef      string
 	Mode         GitDeliveryMode
-	// ProposalAdapter is required when Mode is proposal. Instance wiring
-	// (tests, programmatic setup) populates the adapter; values-driven
-	// seeding populates ProposalAdapterName instead.
+	// ProposalAdapter is required when Mode is proposal. Instance wiring (tests,
+	// programmatic setup) populates the adapter; values-driven seeding populates
+	// ProposalAdapterName instead.
 	ProposalAdapter     gitops.ProposalProvider
 	ProposalAdapterName string
-	// AllowedPaths is an optional list of directory prefixes (relative to repo root)
-	// that users may select as the target directory for new sealed secrets.
-	// If empty, only the rendered PathTemplate is allowed.
-	// Example: ["cluster/sealed-secrets/", "cluster/kubeseal-ui/"]
+	// AllowedPaths optionally lists directory prefixes (relative to the repo root) users may
+	// target for new sealed secrets; empty means only the rendered PathTemplate is allowed.
 	AllowedPaths []string
 }
 
-// Validate checks the GitMapping for required fields.
 func (g GitMapping) Validate() error {
 	if g.Namespace == "" {
 		return errors.New("namespace is required")
@@ -313,20 +274,16 @@ type PolicyStore struct {
 	GitMappings   map[string]GitMapping // namespace -> GitMapping
 	EnableDecrypt bool
 
-	// groupRules are the group-to-role grants, each scoped to the namespaces it
-	// names. Ordered as the document listed them; the union does not depend on
-	// order, but keeping it makes a store's state readable in a debugger.
+	// groupRules are the group-to-role grants, each scoped to the namespaces it names,
+	// ordered as the document listed them.
 	groupRules []GroupRule
-	// explicit records whether a policy document is in force. It is what turns
-	// off the legacy fallback, where an OIDC group named exactly after a role
-	// granted that role everywhere: a deployment with no policy file relies on
-	// that, and a deployment with one must be able to revoke a grant by leaving
-	// it out. Apply sets it; SetGroupRoles, which exists for programmatic setup
-	// and tests, does not.
+	// explicit records whether a policy document is in force, which is what turns off the
+	// legacy fallback where an OIDC group named exactly after a role granted that role
+	// everywhere: a deployment with a file must be able to revoke a grant by leaving it
+	// out. Apply sets it; SetGroupRoles, which exists for tests, does not.
 	explicit bool
 }
 
-// NewPolicyStore creates a new policy store.
 func NewPolicyStore() *PolicyStore {
 	return &PolicyStore{
 		CustomRoles: make(map[string]Role),
@@ -334,15 +291,10 @@ func NewPolicyStore() *PolicyStore {
 	}
 }
 
-// NamespaceGrants returns the capabilities an identity's groups grant in every
-// namespace, and the ones they grant only in the namespaces they name.
-//
-// The two are deliberately separate rather than pre-merged: a caller listing
-// namespaces needs to ask "in this one?" for namespaces it has not enumerated
-// yet, and the wildcard is what makes that answer yes without a rule per
-// namespace. A namespace absent from the scoped map has no grants of its own —
-// which is a different thing from a namespace that is denied, since the global
-// set still applies there.
+// NamespaceGrants returns the capabilities an identity's groups grant in every namespace,
+// and the ones they grant only in the namespaces they name. A namespace absent from the
+// scoped map has no grants of its own — which is a different thing from a namespace that is
+// denied, since the global set still applies there.
 func (s *PolicyStore) NamespaceGrants(groups []string) ([]Capability, map[string][]Capability) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -389,13 +341,9 @@ func (s *PolicyStore) NamespaceGrants(groups []string) ([]Capability, map[string
 	return orderedCapabilities(global), result
 }
 
-// CapabilitiesForGroups returns every capability the identity holds somewhere,
-// whichever namespace grants it. It answers "may this caller do X at all" —
-// the pre-filter for a request whose namespace is not known yet — and must not
-// be used to authorize a specific namespace, which is what NamespaceGrants and
-// Identity.CapabilitiesFor are for.
-//
-// Unknown groups and roles contribute nothing, preserving deny-by-default.
+// CapabilitiesForGroups returns every capability the identity holds somewhere, whichever
+// namespace grants it: the pre-filter for a request whose namespace is not known yet. It
+// must not authorize a specific namespace — that is what NamespaceGrants is for.
 func (s *PolicyStore) CapabilitiesForGroups(groups []string) []Capability {
 	global, scoped := s.NamespaceGrants(groups)
 	seen := make(map[Capability]bool, len(global))
@@ -406,7 +354,6 @@ func (s *PolicyStore) CapabilitiesForGroups(groups []string) []Capability {
 	return orderedCapabilities(seen)
 }
 
-// addCapabilities unions caps into seen.
 func addCapabilities(seen map[Capability]bool, caps []Capability) {
 	for _, capability := range caps {
 		seen[capability] = true
@@ -425,7 +372,6 @@ func orderedCapabilities(seen map[Capability]bool) []Capability {
 	return result
 }
 
-// AddCustomRole adds a custom role to the store.
 func (s *PolicyStore) AddCustomRole(role Role) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -439,7 +385,6 @@ func (s *PolicyStore) AddCustomRole(role Role) error {
 	return nil
 }
 
-// GetRole returns a role (built-in or custom) by name.
 func (s *PolicyStore) GetRole(name string) (Role, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -454,7 +399,6 @@ func (s *PolicyStore) getRole(name string) (Role, bool) {
 	return role, ok
 }
 
-// SetGitMapping sets the Git mapping for a namespace.
 func (s *PolicyStore) SetGitMapping(mapping GitMapping) error {
 	if err := mapping.Validate(); err != nil {
 		return err
@@ -465,8 +409,7 @@ func (s *PolicyStore) SetGitMapping(mapping GitMapping) error {
 	return nil
 }
 
-// GetGitMapping returns the Git mapping for a namespace.
-// If an exact match is not found, it falls back to a wildcard "*" mapping if configured.
+// GetGitMapping returns the namespace's mapping, falling back to a configured "*" wildcard.
 func (s *PolicyStore) GetGitMapping(namespace string) (GitMapping, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -481,11 +424,9 @@ func (s *PolicyStore) GetGitMapping(namespace string) (GitMapping, bool) {
 	return GitMapping{}, false
 }
 
-// SetGroupRoles atomically replaces a group's role mapping.
-//
-// The rules it writes apply in every namespace, which is the only thing an
-// unnamespaced group-to-role mapping can mean. A namespaced grant comes from a
-// policy document through Apply.
+// SetGroupRoles atomically replaces a group's role mapping. The rules it writes apply in
+// every namespace, which is the only thing an unnamespaced group-to-role mapping can mean;
+// a namespaced grant comes from a policy document through Apply.
 func (s *PolicyStore) SetGroupRoles(group string, roles []string) error {
 	if strings.TrimSpace(group) == "" {
 		return errors.New("group is required")
@@ -512,9 +453,8 @@ func (s *PolicyStore) SetGroupRoles(group string, roles []string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// A fresh slice rather than a compaction in place: a reader that took the
-	// slice under RLock must never observe this write through the array it is
-	// still walking.
+	// A fresh slice rather than a compaction in place: a reader that took the slice under
+	// RLock must never observe this write through the array it is still walking.
 	next := make([]GroupRule, 0, len(s.groupRules)+len(replacement))
 	for _, existing := range s.groupRules {
 		if existing.Name != group {
@@ -525,7 +465,7 @@ func (s *PolicyStore) SetGroupRoles(group string, roles []string) error {
 	return nil
 }
 
-// ConfigureGitMappings atomically replaces all mappings after validation.
+// ConfigureGitMappings atomically replaces all mappings after validating them.
 func (s *PolicyStore) ConfigureGitMappings(mappings []GitMapping) error {
 	next := make(map[string]GitMapping, len(mappings))
 	for _, mapping := range mappings {
@@ -543,11 +483,9 @@ func (s *PolicyStore) ConfigureGitMappings(mappings []GitMapping) error {
 	return nil
 }
 
-// GetAllMappings returns a copy of all Git mappings.
 func (s *PolicyStore) GetAllMappings() map[string]GitMapping {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// Return a copy to avoid external mutation
 	result := make(map[string]GitMapping, len(s.GitMappings))
 	for k, v := range s.GitMappings {
 		result[k] = v
@@ -555,9 +493,9 @@ func (s *PolicyStore) GetAllMappings() map[string]GitMapping {
 	return result
 }
 
-// GitMappingSpec is the values-driven mapping definition. It mirrors
-// GitMapping with the proposal adapter referenced by registry name
-// instead of by instance, so configuration never carries code.
+// GitMappingSpec is the values-driven mapping definition: GitMapping with the proposal
+// adapter referenced by registry name instead of by instance, so configuration carries no
+// code.
 type GitMappingSpec struct {
 	Namespace           string
 	Repository          string
@@ -566,16 +504,13 @@ type GitMappingSpec struct {
 	AuthRef             string
 	Mode                GitDeliveryMode
 	ProposalAdapterName string
-	// AllowedPaths is an optional list of directory prefixes that users
-	// may select as the target directory for new sealed secrets.
-	// If empty, only the rendered PathTemplate is allowed.
+	// AllowedPaths optionally lists directory prefixes users may target; empty means only
+	// the rendered PathTemplate is allowed.
 	AllowedPaths []string
 }
 
-// SeedGitMappings atomically replaces all mappings from specs. Each
-// proposal-mode spec resolves its adapter from the registry; an unknown
-// name is a configuration error, never an implicit nil adapter.
-// Direct-mode specs must not name an adapter.
+// SeedGitMappings atomically replaces all mappings from specs, resolving each proposal-mode
+// adapter from the registry: an unknown name is a configuration error, never a nil adapter.
 func (s *PolicyStore) SeedGitMappings(specs []GitMappingSpec, adapters map[string]gitops.ProposalProvider) error {
 	mappings := make([]GitMapping, 0, len(specs))
 	for _, spec := range specs {
@@ -610,7 +545,6 @@ func (s *PolicyStore) ResolveGitMapping(namespace string) (GitMapping, error) {
 	return m, nil
 }
 
-// RequiredCapabilitiesForOperation returns the capabilities required for an operation.
 func RequiredCapabilitiesForOperation(op string) []Capability {
 	switch op {
 	case "list_namespaces", "get_sealedsecret", "list_sealedsecrets":
@@ -633,6 +567,7 @@ func RequiredCapabilitiesForOperation(op string) []Capability {
 }
 
 // CheckAuthorization checks if an identity has all required capabilities for an operation.
+// Decrypt and reseal additionally require ENABLE_DECRYPT, which the handler enforces.
 func CheckAuthorization(identity Identity, operation string) error {
 	required := RequiredCapabilitiesForOperation(operation)
 	if required == nil {
@@ -643,11 +578,9 @@ func CheckAuthorization(identity Identity, operation string) error {
 			return fmt.Errorf("missing capability %q for operation %q", cap, operation)
 		}
 	}
-	// Special check: decrypt/reseal require ENABLE_DECRYPT=true (validated by handler)
 	return nil
 }
 
-// GitOpsCapabilityRequired returns the capability required for a GitOps mode.
 func GitOpsCapabilityRequired(mode GitDeliveryMode) Capability {
 	switch mode {
 	case GitDeliveryDirect:
@@ -659,7 +592,6 @@ func GitOpsCapabilityRequired(mode GitDeliveryMode) Capability {
 	}
 }
 
-// RenderPath renders the path template with namespace and name.
 func (g GitMapping) RenderPath(namespace, name string) string {
 	if !safePathComponent(namespace) || !safePathComponent(name) {
 		return ""
@@ -673,35 +605,28 @@ func (g GitMapping) RenderPath(namespace, name string) string {
 	return clean
 }
 
-// IsPathAllowed checks if a target path is allowed by this GitMapping's AllowedPaths.
-// If AllowedPaths is empty, only the exact RenderPath for the given namespace/name is allowed.
-// If AllowedPaths is set, the target path must be under one of the allowed directory prefixes.
+// IsPathAllowed reports whether targetPath may be written here. With AllowedPaths empty only
+// the exact RenderPath for this namespace/name is allowed; otherwise the target must sit
+// under one of the allowed directory prefixes.
 func (g GitMapping) IsPathAllowed(targetPath, namespace, name string) bool {
-	// Render the default path for this namespace/name
 	defaultPath := g.RenderPath(namespace, name)
 	if defaultPath == "" {
 		return false
 	}
-	
-	// If no AllowedPaths configured, only the exact default path is allowed
 	if len(g.AllowedPaths) == 0 {
 		return targetPath == defaultPath
 	}
-	
-	// Check if targetPath is under one of the allowed directory prefixes
 	for _, allowed := range g.AllowedPaths {
-		// Normalize: support dynamic {namespace} in allowed path prefix
+		// An allowed prefix may itself carry {namespace}.
 		prefix := strings.ReplaceAll(allowed, "{namespace}", namespace)
 		if !strings.HasSuffix(prefix, "/") {
 			prefix += "/"
 		}
 		if strings.HasPrefix(targetPath, prefix) {
-			// Also validate the target path itself is safe
 			clean := pathpkg.Clean(targetPath)
 			if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." || strings.HasPrefix(clean, "/") {
 				return false
 			}
-			// Ensure it's a valid file path (not just a directory)
 			return clean != "" && clean != "."
 		}
 	}

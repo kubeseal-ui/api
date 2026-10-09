@@ -1,4 +1,3 @@
-// Package oidc tests - RED-GREEN-REFACTOR per test-driven-development skill.
 package oidc
 
 import (
@@ -12,7 +11,6 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
-// testConfig returns a minimal test configuration.
 func testConfig() Config {
 	return Config{
 		IssuerURL:          "https://auth.example.com",
@@ -22,13 +20,12 @@ func testConfig() Config {
 		Scopes:             []string{"openid", "profile", "email", "groups"},
 		GroupsClaim:        "groups",
 		UsernameClaim:      "preferred_username",
-		CookieSecure:       false, // Tests don't use HTTPS
+		CookieSecure:       false,
 		CookieDomain:       "",
 		CSRFTrustedOrigins: []string{"https://app.example.com"},
 	}
 }
 
-// mockProvider implements a minimal OIDC provider for testing.
 type mockProvider struct {
 	server    *httptest.Server
 	issuerURL string
@@ -40,7 +37,6 @@ func newMockProvider(t *testing.T) *mockProvider {
 	mux := http.NewServeMux()
 	server := httptest.NewServer(mux)
 
-	// In real tests, we'd use a proper JWKS. For now, we'll test the flow logic.
 	return &mockProvider{
 		server:    server,
 		issuerURL: server.URL,
@@ -52,19 +48,13 @@ func (m *mockProvider) close() {
 	m.server.Close()
 }
 
-// TestLoadConfigMissingRequired verifies config validation fails when required fields are missing.
 func TestLoadConfigMissingRequired(t *testing.T) {
-	// Set minimal env
 	t.Setenv("OIDC_ISSUER_URL", "")
 	t.Setenv("OIDC_CLIENT_ID", "")
 	t.Setenv("OIDC_CLIENT_SECRET", "")
 	t.Setenv("OIDC_REDIRECT_URL", "")
-
-	// This would fail validation - in real impl we'd test the actual LoadConfig
-	// For now, this documents the expected behavior
 }
 
-// TestNewFlowStateGeneratesValidState verifies flow state has all required fields.
 func TestNewFlowStateGeneratesValidState(t *testing.T) {
 	flow, err := NewFlowState()
 	if err != nil {
@@ -85,7 +75,6 @@ func TestNewFlowStateGeneratesValidState(t *testing.T) {
 	}
 }
 
-// TestFlowStateValidatePassesWhenFresh verifies fresh flow state passes validation.
 func TestFlowStateValidatePassesWhenFresh(t *testing.T) {
 	flow, err := NewFlowState()
 	if err != nil {
@@ -97,7 +86,6 @@ func TestFlowStateValidatePassesWhenFresh(t *testing.T) {
 	}
 }
 
-// TestFlowStateValidateFailsWhenExpired verifies expired flow state fails validation.
 func TestFlowStateValidateFailsWhenExpired(t *testing.T) {
 	flow := &FlowState{
 		State:        "test-state",
@@ -111,7 +99,6 @@ func TestFlowStateValidateFailsWhenExpired(t *testing.T) {
 	}
 }
 
-// TestPKCEVerifierGeneratesValidPair verifies PKCE verifier is generated.
 func TestPKCEVerifierGeneratesValidPair(t *testing.T) {
 	verifier, err := PKCEVerifier()
 	if err != nil {
@@ -123,14 +110,10 @@ func TestPKCEVerifierGeneratesValidPair(t *testing.T) {
 	}
 }
 
-// TestLoginURLBuildsValidAuthorizationURL verifies login URL contains required params.
 func TestLoginURLBuildsValidAuthorizationURL(t *testing.T) {
-	// This test requires a real provider - skip for unit test
-	// Integration tests would verify the full URL structure
 	t.Skip("Requires OIDC provider - integration test")
 }
 
-// TestCSRFTokenGeneratesValidToken verifies CSRF token generation.
 func TestCSRFTokenGeneratesValidToken(t *testing.T) {
 	token, err := CSRFToken()
 	if err != nil {
@@ -142,27 +125,22 @@ func TestCSRFTokenGeneratesValidToken(t *testing.T) {
 	}
 }
 
-// TestCookieOptionsReturnsCorrectFlags verifies cookie options have correct flags.
 func TestCookieOptionsReturnsCorrectFlags(t *testing.T) {
 	t.Skip("Requires OIDC provider - integration test")
 }
 
-// TestVerifyIDTokenRejectsWrongIssuer verifies issuer validation.
 func TestVerifyIDTokenRejectsWrongIssuer(t *testing.T) {
 	t.Skip("Requires OIDC provider with test keys - integration test")
 }
 
-// TestVerifyIDTokenRejectsWrongAudience verifies audience validation.
 func TestVerifyIDTokenRejectsWrongAudience(t *testing.T) {
 	t.Skip("Requires OIDC provider with test keys - integration test")
 }
 
-// TestVerifyIDTokenRejectsExpiredToken verifies expiry validation.
 func TestVerifyIDTokenRejectsExpiredToken(t *testing.T) {
 	t.Skip("Requires OIDC provider with test keys - integration test")
 }
 
-// TestSessionDataJSONRoundTrip verifies SessionData serializes correctly.
 func TestSessionDataJSONRoundTrip(t *testing.T) {
 	data := SessionData{
 		Subject:  "user-123",
@@ -196,7 +174,6 @@ func TestSessionDataJSONRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSplitCSVHandlesVariousInputs verifies CSV splitting.
 func TestSplitCSVHandlesVariousInputs(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -224,25 +201,20 @@ func TestSplitCSVHandlesVariousInputs(t *testing.T) {
 	}
 }
 
-// mockVerifier is a test helper that mimics oidc.IDTokenVerifier behavior.
 type mockVerifier struct{}
 
 func (m *mockVerifier) Verify(ctx context.Context, rawIDToken string) (*oidc.IDToken, error) {
-	// In real tests, use a proper test key set
 	return nil, nil
 }
 
-// TestExchangeCodeCallsTokenEndpoint verifies token exchange flow.
 func TestExchangeCodeCallsTokenEndpoint(t *testing.T) {
 	t.Skip("Requires OIDC provider - integration test")
 }
 
-// TestRefreshTokensCallsTokenEndpoint verifies refresh flow.
 func TestRefreshTokensCallsTokenEndpoint(t *testing.T) {
 	t.Skip("Requires OIDC provider - integration test")
 }
 
-// TestVerifiedIDTokenHasRequiredFields verifies VerifiedIDToken structure.
 func TestVerifiedIDTokenHasRequiredFields(t *testing.T) {
 	tok := VerifiedIDToken{
 		Subject:  "sub-123",

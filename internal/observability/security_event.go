@@ -1,13 +1,6 @@
-// Stdout JSON security-event sink.
-//
-// The doc contract (architecture/git-delivery.md, architecture/api.md)
-// requires every reveal, patch, direct delivery, and proposal attempt to
-// write one JSON security event per attempt to stdout. Events carry
-// authorized identity and resource fields but exclude plaintext,
-// ciphertext, tokens, cookies, raw URLs with credentials, and diff
-// bodies. The sink writes through the redacting slog handler so any
-// attribute whose key matches a sensitive marker is dropped to
-// [REDACTED] before it reaches the log stream.
+// Every reveal, patch, direct delivery and proposal attempt writes one JSON security event
+// to stdout, carrying the authorized identity and resource but never plaintext, ciphertext,
+// tokens, cookies or URLs with credentials. It goes through the redacting handler.
 package observability
 
 import (
@@ -15,16 +8,9 @@ import (
 	"os"
 )
 
-// SecurityEvent is one bounded audit record for a sensitive operation.
-// The fields mirror the handlers.SecurityEventSink contract; key values
-// and diff bodies never appear here by construction.
-//
-// Secret is the SealedSecret *name*, not secret material. It is emitted
-// under the attribute key "resource" rather than "secret" on purpose:
-// the redacting handler's "secret" marker matches attribute keys by
-// substring, so an attribute literally named "secret" would have every
-// audit record's resource name replaced with [REDACTED] — leaving the
-// event unable to say which secret was touched.
+// SecurityEvent is one bounded audit record for a sensitive operation. Secret is the
+// SealedSecret name, emitted under the attribute key "resource" and never "secret": the
+// redactor matches keys by substring, so a key named "secret" would blank every record.
 type SecurityEvent struct {
 	Operation string
 	Subject   string
@@ -36,9 +22,8 @@ type SecurityEvent struct {
 	RequestID string
 }
 
-// eventAttrs renders the event as slog attributes with a stable JSON
-// envelope (kubeseal_security_event) so Loki-derived consumers can index
-// by JSON path without missing-field warnings.
+// eventAttrs renders the event under the stable kubeseal_security_event envelope, which
+// Loki-derived consumers index by JSON path.
 func (e SecurityEvent) eventAttrs() []any {
 	return []any{
 		slog.String("event", "kubeseal_security_event"),
@@ -53,24 +38,19 @@ func (e SecurityEvent) eventAttrs() []any {
 	}
 }
 
-// StdoutSecurityEventSink writes security events to stdout through the
-// redacting JSON handler. It is the production implementation of the
-// handlers.SecurityEventSink contract.
 type StdoutSecurityEventSink struct {
 	logger *slog.Logger
 }
 
-// NewStdoutSecurityEventSink builds the sink over stdout. The redacting
-// handler is reused so the [REDACTED] sentinel contract stays in one
-// place; the level is forced to Info because security events must emit
-// at every outcome regardless of the application log level.
+// NewStdoutSecurityEventSink builds the production handlers.SecurityEventSink over stdout.
+// The level is forced to Info because a security event must emit at every outcome,
+// whatever the application log level happens to be.
 func NewStdoutSecurityEventSink() *StdoutSecurityEventSink {
 	return &StdoutSecurityEventSink{logger: slog.New(RedactingJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))}
 }
 
-// EmitSecurityEvent writes one event. It never panics and never returns
-// an error: a broken stdout drops the record rather than failing the
-// request that produced it.
+// EmitSecurityEvent never panics and never returns an error: a broken stdout drops the
+// record rather than failing the request that produced it.
 func (s *StdoutSecurityEventSink) EmitSecurityEvent(operation, subject, namespace, secret, key, mode, result, requestID string) {
 	if s == nil || s.logger == nil {
 		return

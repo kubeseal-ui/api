@@ -1,12 +1,11 @@
-// Package oidc: AuthProvider is the contract the auth HTTP handlers depend on.
-// The production *Provider satisfies it; tests can substitute a fake.
 package oidc
 
 import (
 	"context"
 )
 
-// AuthProvider is the handler-facing contract. *Provider implements it.
+// AuthProvider is the contract the auth HTTP handlers depend on: *Provider implements it,
+// and tests substitute a fake.
 type AuthProvider interface {
 	LoginURL(flow *FlowState) (string, error)
 	ExchangeCode(ctx context.Context, code, pkceVerifier string) (*TokenResponse, error)

@@ -17,17 +17,13 @@ func testHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// TestRequestIDMiddlewareSetsHeader verifies a generated ID is set on
-// the response and an inbound ID is preserved.
 func TestRequestIDMiddlewareSetsHeader(t *testing.T) {
-	// Generated
 	rec := httptest.NewRecorder()
 	RequestID(http.HandlerFunc(testHandler)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Header().Get("X-Request-Id") == "" {
 		t.Fatal("expected generated request id header")
 	}
 
-	// Preserved inbound
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-Request-Id", "inbound-42")
 	rec2 := httptest.NewRecorder()
@@ -37,8 +33,6 @@ func TestRequestIDMiddlewareSetsHeader(t *testing.T) {
 	}
 }
 
-// TestRecoveryMiddlewareCatchesPanic verifies a panicking handler
-// yields 500 and does not crash the process.
 func TestRecoveryMiddlewareCatchesPanic(t *testing.T) {
 	panicHandler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
@@ -50,8 +44,6 @@ func TestRecoveryMiddlewareCatchesPanic(t *testing.T) {
 	}
 }
 
-// TestBodyLimitMiddlewareRejects verifies oversize bodies are
-// rejected by the reader (413 on write via MaxBytesReader).
 func TestBodyLimitMiddlewareRejects(t *testing.T) {
 	handler := BodyLimit(8)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -72,8 +64,6 @@ func TestBodyLimitMiddlewareRejects(t *testing.T) {
 	}
 }
 
-// TestAuthGateDeniesAll verifies the phase-1 boundary: every request
-// behind AuthGate is rejected.
 func TestAuthGateDeniesAll(t *testing.T) {
 	rec := httptest.NewRecorder()
 	AuthGate(http.HandlerFunc(testHandler)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -82,8 +72,6 @@ func TestAuthGateDeniesAll(t *testing.T) {
 	}
 }
 
-// TestRequestLoggerRedactsSecrets verifies the request logger never
-// writes body content and emits the request id.
 func TestRequestLoggerRedactsSecrets(t *testing.T) {
 	var buf bytes.Buffer
 	logger := observability.NewLogger(&buf, levelDebug())

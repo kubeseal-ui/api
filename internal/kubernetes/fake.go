@@ -15,12 +15,10 @@ type Fake struct {
 	keys       []Secret
 }
 
-// NewFake builds a Fake with the given fixtures.
 func NewFake(namespaces []Namespace, secrets []SealedSecret, keys []Secret) *Fake {
 	return &Fake{namespaces: namespaces, secrets: secrets, keys: keys}
 }
 
-// ListNamespaces returns a sorted copy of the fixture namespaces.
 func (f *Fake) ListNamespaces(_ context.Context) ([]Namespace, error) {
 	out := make([]Namespace, len(f.namespaces))
 	copy(out, f.namespaces)
@@ -28,8 +26,6 @@ func (f *Fake) ListNamespaces(_ context.Context) ([]Namespace, error) {
 	return out, nil
 }
 
-// ListSealedSecrets returns a sorted copy of the fixture secrets
-// filtered to one namespace.
 func (f *Fake) ListSealedSecrets(_ context.Context, namespace string) ([]SealedSecret, error) {
 	var out []SealedSecret
 	for _, s := range f.secrets {
@@ -41,7 +37,6 @@ func (f *Fake) ListSealedSecrets(_ context.Context, namespace string) ([]SealedS
 	return out, nil
 }
 
-// GetSealedSecret returns one fixture secret or ErrNotFound.
 func (f *Fake) GetSealedSecret(_ context.Context, namespace, name string) (SealedSecret, error) {
 	for _, s := range f.secrets {
 		if s.Namespace == namespace && s.Name == name {
@@ -51,13 +46,10 @@ func (f *Fake) GetSealedSecret(_ context.Context, namespace, name string) (Seale
 	return SealedSecret{}, ErrNotFound
 }
 
-// ErrNotFound is returned when a requested resource is absent.
 var ErrNotFound = errors.New("kubernetes: not found")
 
-// FindActiveControllerKey selects the active key deterministically:
-// valid entries only (tls.crt + tls.key), newest creationTimestamp
-// wins, name is the tie-breaker. Ambiguous or malformed state fails
-// closed. See kubernetes-client.md for the contract.
+// FindActiveControllerKey applies pickActive's rule to the fixture keys, failing closed
+// when none is valid.
 func (f *Fake) FindActiveControllerKey(_ context.Context) (ActiveKey, error) {
 	valid := f.validKeys()
 	if len(valid) == 0 {
@@ -66,7 +58,6 @@ func (f *Fake) FindActiveControllerKey(_ context.Context) (ActiveKey, error) {
 	return pickActive(valid)
 }
 
-// FindAllControllerKeys returns all valid fixture keys with tls.crt and tls.key.
 func (f *Fake) FindAllControllerKeys(_ context.Context) ([]ActiveKey, error) {
 	valid := f.validKeys()
 	if len(valid) == 0 {
@@ -79,7 +70,7 @@ func (f *Fake) FindAllControllerKeys(_ context.Context) ([]ActiveKey, error) {
 	return out, nil
 }
 
-// validKeys filters fixture Secrets to those with tls.crt and tls.key.
+// validKeys keeps only the fixture Secrets carrying both tls.crt and tls.key.
 func (f *Fake) validKeys() []Secret {
 	var out []Secret
 	for _, k := range f.keys {
@@ -94,10 +85,8 @@ func (f *Fake) validKeys() []Secret {
 	return out
 }
 
-// pickActive implements the selection rule over pre-validated keys:
-// newest creationTimestamp wins, name is the stable tie-breaker.
-// Two keys that tie on BOTH timestamp and name are indistinguishable
-// (ambiguous) and fail closed. See kubernetes-client.md.
+// pickActive picks the newest creationTimestamp, using the name as the stable
+// tie-breaker. Keys tying on both are indistinguishable (ambiguous) and fail closed.
 func pickActive(keys []Secret) (ActiveKey, error) {
 	if len(keys) == 0 {
 		return ActiveKey{}, fmt.Errorf("kubernetes: no valid active key found")

@@ -14,9 +14,8 @@ import (
 	"testing"
 )
 
-// fakeTransport is an in-process http.RoundTripper so adapter tests never
-// touch the loopback socket (the sandbox blocks loopback HTTP). It records
-// the request and returns a canned response.
+// fakeTransport is an in-process http.RoundTripper so adapter tests never touch the loopback
+// socket (the sandbox blocks loopback HTTP). It records the request and returns a canned response.
 type fakeTransport struct {
 	status  int
 	body    string
@@ -46,8 +45,8 @@ func (t *fakeTransport) lastRequest() *http.Request {
 	return v.(*http.Request)
 }
 
-// newFakeProviderWith builds a provider whose http.Client shares a
-// fakeTransport so tests can inspect lastReq and calls.
+// newFakeProviderWith builds a provider whose http.Client records requests through tr, so tests
+// can inspect the last request and the call count.
 func newFakeProviderWith(t *testing.T, token string, tr *fakeTransport) *GitHubProposalProvider {
 	return &GitHubProposalProvider{
 		tokenFile: tokenFileFor(t, token),
@@ -93,7 +92,6 @@ func TestGitHubOpenProposalCreatesPullRequest(t *testing.T) {
 	if tr.calls.Load() != 1 {
 		t.Errorf("api calls = %d, want 1", tr.calls.Load())
 	}
-	// Verify request shape against GitHub REST contract.
 	sent := tr.lastRequest()
 	if sent == nil {
 		t.Fatal("no request captured")
@@ -119,8 +117,7 @@ func TestGitHubOpenProposalCreatesPullRequest(t *testing.T) {
 	}
 }
 
-// Retry with the same branch/commit still yields a result; the adapter is
-// stateless and does not dedupe, so the retry hits the API again.
+// The adapter is stateless and does not dedupe, so a retry hits the API again.
 func TestGitHubOpenProposalRetrySucceeds(t *testing.T) {
 	body := `{"html_url":"https://github.com/org/platform/pull/99"}`
 	tr := &fakeTransport{status: http.StatusOK, body: body}

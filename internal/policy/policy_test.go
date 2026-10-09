@@ -1,4 +1,3 @@
-// Package policy tests - RED-GREEN-REFACTOR per test-driven-development skill.
 package policy
 
 import (
@@ -6,7 +5,6 @@ import (
 	"testing"
 )
 
-// TestBuiltInRolesHaveExpectedCapabilities verifies built-in roles have correct capabilities.
 func TestBuiltInRolesHaveExpectedCapabilities(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -66,7 +64,6 @@ func TestBuiltInRolesHaveExpectedCapabilities(t *testing.T) {
 	}
 }
 
-// TestPlatformAdminHasNoImplicitDecrypt verifies platform-admin does not have secret:decrypt.
 func TestPlatformAdminHasNoImplicitDecrypt(t *testing.T) {
 	for _, cap := range RolePlatformAdmin.Capabilities {
 		if cap == SecretDecrypt {
@@ -75,7 +72,6 @@ func TestPlatformAdminHasNoImplicitDecrypt(t *testing.T) {
 	}
 }
 
-// TestPlatformAdminHasNoImplicitGitPush verifies platform-admin does not have gitops:push.
 func TestPlatformAdminHasNoImplicitGitPush(t *testing.T) {
 	for _, cap := range RolePlatformAdmin.Capabilities {
 		if cap == GitOpsPush {
@@ -87,7 +83,6 @@ func TestPlatformAdminHasNoImplicitGitPush(t *testing.T) {
 	}
 }
 
-// TestCustomRoleValidatesUnknownCapabilityRejected verifies unknown capabilities are rejected.
 func TestCustomRoleValidatesUnknownCapabilityRejected(t *testing.T) {
 	_, err := NewCustomRole("custom-role", []Capability{MetadataRead, "unknown:cap"})
 	if err == nil {
@@ -98,7 +93,6 @@ func TestCustomRoleValidatesUnknownCapabilityRejected(t *testing.T) {
 	}
 }
 
-// TestCustomRoleValidatesBuiltInNameRejected verifies custom role can't use built-in name.
 func TestCustomRoleValidatesBuiltInNameRejected(t *testing.T) {
 	_, err := NewCustomRole("viewer", []Capability{MetadataRead})
 	if err == nil {
@@ -109,7 +103,6 @@ func TestCustomRoleValidatesBuiltInNameRejected(t *testing.T) {
 	}
 }
 
-// TestIdentityCapabilitiesAreAdditiveUnion verifies identity gets union of role capabilities.
 func TestIdentityCapabilitiesAreAdditiveUnion(t *testing.T) {
 	identity := Identity{
 		Subject: "user-123",
@@ -137,7 +130,6 @@ func TestIdentityCapabilitiesAreAdditiveUnion(t *testing.T) {
 	}
 }
 
-// TestDefaultDeny verifies identity with no roles has no capabilities.
 func TestDefaultDeny(t *testing.T) {
 	identity := Identity{
 		Subject: "user-123",
@@ -161,7 +153,6 @@ func TestDefaultDeny(t *testing.T) {
 	}
 }
 
-// TestIdentityHas reports whether Has works correctly.
 func TestIdentityHas(t *testing.T) {
 	identity := Identity{
 		Subject: "user-123",
@@ -185,7 +176,6 @@ func TestIdentityHas(t *testing.T) {
 	}
 }
 
-// TestNamespaceGitMappingRequired verifies GitMapping requires all fields.
 func TestNamespaceGitMappingRequired(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -273,14 +263,10 @@ func TestNamespaceGitMappingRequired(t *testing.T) {
 	}
 }
 
-// TestNamespaceGitMappingFailsClosedOnAmbiguous is a placeholder for the actual check.
 func TestNamespaceGitMappingFailsClosedOnAmbiguous(t *testing.T) {
-	// This test documents that ambiguous mappings should fail closed.
-	// The actual implementation would check for duplicate namespace mappings.
 	t.Skip("Implementation depends on policy store enforcement")
 }
 
-// TestGitDeliveryModeDirectRequiresGitOpsPush verifies direct mode requires gitops:push.
 func TestGitDeliveryModeDirectRequiresGitOpsPush(t *testing.T) {
 	mapping := GitMapping{
 		Namespace:    "default",
@@ -296,7 +282,6 @@ func TestGitDeliveryModeDirectRequiresGitOpsPush(t *testing.T) {
 	}
 }
 
-// TestGitDeliveryModeProposalRequiresGitOpsPropose verifies proposal mode requires gitops:propose.
 func TestGitDeliveryModeProposalRequiresGitOpsPropose(t *testing.T) {
 	mapping := GitMapping{
 		Namespace:    "default",
@@ -312,11 +297,9 @@ func TestGitDeliveryModeProposalRequiresGitOpsPropose(t *testing.T) {
 	}
 }
 
-// TestPolicyStoreCustomRoleManagement tests custom role add/get.
 func TestPolicyStoreCustomRoleManagement(t *testing.T) {
 	store := NewPolicyStore()
 
-	// Add custom role
 	role, err := NewCustomRole("custom-editor", []Capability{MetadataRead, SecretSeal})
 	if err != nil {
 		t.Fatalf("NewCustomRole: %v", err)
@@ -326,7 +309,6 @@ func TestPolicyStoreCustomRoleManagement(t *testing.T) {
 		t.Fatalf("AddCustomRole: %v", err)
 	}
 
-	// Get custom role
 	got, ok := store.GetRole("custom-editor")
 	if !ok {
 		t.Fatal("custom role not found")
@@ -335,19 +317,16 @@ func TestPolicyStoreCustomRoleManagement(t *testing.T) {
 		t.Errorf("role name mismatch: %q", got.Name)
 	}
 
-	// Try to add duplicate
 	if err := store.AddCustomRole(role); err == nil {
 		t.Error("expected error for duplicate custom role")
 	}
 
-	// Try to add with built-in name
 	builtinRole := Role{Name: "viewer", Capabilities: []Capability{MetadataRead}}
 	if err := store.AddCustomRole(builtinRole); err == nil {
 		t.Error("expected error for built-in name conflict")
 	}
 }
 
-// TestPolicyStoreGitMappingManagement tests Git mapping set/get.
 func TestPolicyStoreGitMappingManagement(t *testing.T) {
 	store := NewPolicyStore()
 
@@ -372,13 +351,11 @@ func TestPolicyStoreGitMappingManagement(t *testing.T) {
 		t.Errorf("repository mismatch: %q", got.Repository)
 	}
 
-	// Non-existent namespace without wildcard
 	_, ok = store.GetGitMapping("nonexistent")
 	if ok {
 		t.Error("expected non-existent namespace to return false")
 	}
 
-	// Wildcard mapping fallback
 	wildcardMapping := GitMapping{
 		Namespace:    "*",
 		Repository:   "org/wildcard-repo",
@@ -391,20 +368,17 @@ func TestPolicyStoreGitMappingManagement(t *testing.T) {
 		t.Fatalf("unexpected error setting wildcard mapping: %v", err)
 	}
 
-	// Exact match still takes precedence
 	gotDefault, ok := store.GetGitMapping("default")
 	if !ok || gotDefault.Repository != "org/repo" {
 		t.Errorf("expected exact match to take precedence, got %v, %v", ok, gotDefault)
 	}
 
-	// Any other namespace falls back to wildcard
 	gotOther, ok := store.GetGitMapping("monitoring")
 	if !ok || gotOther.Repository != "org/wildcard-repo" || gotOther.Namespace != "monitoring" {
 		t.Errorf("expected wildcard match for monitoring, got %v, %v", ok, gotOther)
 	}
 }
 
-// TestRequiredCapabilitiesForOperation verifies operation capability requirements.
 func TestRequiredCapabilitiesForOperation(t *testing.T) {
 	tests := []struct {
 		operation    string
@@ -443,7 +417,6 @@ func TestRequiredCapabilitiesForOperation(t *testing.T) {
 	}
 }
 
-// TestCheckAuthorization verifies authorization checks work correctly.
 func TestCheckAuthorization(t *testing.T) {
 	editorIdentity := Identity{
 		Subject: "user-123",
@@ -489,7 +462,6 @@ func TestCheckAuthorization(t *testing.T) {
 	}
 }
 
-// TestRenderPath verifies path template rendering.
 func TestRenderPath(t *testing.T) {
 	mapping := GitMapping{
 		Namespace:    "default",
@@ -507,7 +479,6 @@ func TestRenderPath(t *testing.T) {
 	}
 }
 
-// TestCapabilityValid verifies capability validation.
 func TestCapabilityValid(t *testing.T) {
 	tests := []struct {
 		cap           Capability

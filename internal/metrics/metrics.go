@@ -1,19 +1,8 @@
-// Package metrics defines the kubeseal-ui API's application metrics on
-// top of the OTel meter API. Every instrument uses bounded attributes
-// (handler, method, status code, operation, result): user identities,
-// namespaces, and secret names are excluded from metrics by construction
-// because they belong in the security events and logs, and unbounded
-// label values are the fastest way to explode Prometheus cardinality.
-//
-// Metric names follow the observability contract
-// (internal-docs/architecture/observability.md):
-//
-//	kubeseal_ui_http_requests_total{handler,method,code}
-//	kubeseal_ui_http_request_duration_seconds{handler,method}
-//	kubeseal_ui_sealed_secret_operations_total{operation,result}
-//	kubeseal_ui_gitops_delivery_total{mode,result}
-//	kubeseal_ui_openfga_check_total{result}
-//	kubeseal_ui_oidc_auth_total{result}
+// Package metrics defines the API's application metrics on the OTel meter API. Every
+// instrument carries bounded attributes (handler, method, code, operation, result):
+// identities, namespaces and secret names are excluded by construction, because they
+// belong in the security events and logs and unbounded labels explode cardinality.
+// The metric names follow internal-docs/architecture/observability.md.
 package metrics
 
 import (
@@ -42,10 +31,8 @@ var (
 	instrumentsReady   bool
 )
 
-// Instruments builds every counter and histogram once. It is safe to call
-// repeatedly; the first error is remembered and returned, and a failed
-// construction leaves every instrument nil so recording stays a no-op
-// instead of panicking.
+// Instruments builds every instrument once. Safe to call repeatedly; a failed construction
+// leaves the instruments nil, so recording stays a no-op instead of panicking.
 func Instruments() error {
 	instrumentsReadyMu.RLock()
 	if instrumentsReady {
@@ -94,9 +81,8 @@ func Instruments() error {
 	return instrumentsErr
 }
 
-// RecordHTTPRequest records one served request. handler is the route
-// pattern (bounded), never the raw path: paths contain namespace and
-// secret names and would explode cardinality.
+// RecordHTTPRequest records one served request. handler is the route pattern, never the raw
+// path: a path carries namespace and secret names and would explode cardinality.
 func RecordHTTPRequest(handler, method string, status int, duration time.Duration) {
 	if err := Instruments(); err != nil || httpRequests == nil {
 		return
@@ -113,13 +99,9 @@ func RecordHTTPRequest(handler, method string, status int, duration time.Duratio
 	))
 }
 
-// RecordSecretOperation records one seal, reveal, diff, or patch outcome.
-// operation is a fixed endpoint name (seal | reveal | diff | patch); result
-// is the bounded outcome the handler actually reached (success | denied |
-// disabled | invalid_request | not_found | conflict | failed), never a
-// constant placeholder — see the opResult* constants in the handlers
-// package. The CryptoFailures alert filters on result="failed", so a
-// caller that collapses outcomes into one value silently disables it.
+// RecordSecretOperation records one seal, reveal, diff or patch outcome. result must be the
+// bounded outcome the handler actually reached (see the opResult* constants), never a
+// placeholder: the CryptoFailures alert filters on result="failed".
 func RecordSecretOperation(operation, result string) {
 	if err := Instruments(); err != nil || secretOperations == nil {
 		return
@@ -130,10 +112,8 @@ func RecordSecretOperation(operation, result string) {
 	))
 }
 
-// RecordGitOpsDelivery records one delivery attempt. mode is the fixed
-// namespace policy mode (direct | proposal); result is the bounded
-// outcome (success | conflict | denied | failed | proposal_failed |
-// proposal_unavailable).
+// RecordGitOpsDelivery records one delivery attempt. mode is the namespace policy mode
+// (direct | proposal) and result the bounded outcome the delivery reached.
 func RecordGitOpsDelivery(mode, result string) {
 	if err := Instruments(); err != nil || gitopsDeliveries == nil {
 		return
@@ -144,7 +124,6 @@ func RecordGitOpsDelivery(mode, result string) {
 	))
 }
 
-// RecordOpenFGACheck records one authorization check outcome.
 func RecordOpenFGACheck(result string) {
 	if err := Instruments(); err != nil || openFGAChecks == nil {
 		return
@@ -152,8 +131,6 @@ func RecordOpenFGACheck(result string) {
 	openFGAChecks.Add(context.TODO(), 1, metric.WithAttributes(mustString("result", result)))
 }
 
-// RecordOIDCAuth records one authentication outcome (success | failed |
-// callback_error | refresh).
 func RecordOIDCAuth(result string) {
 	if err := Instruments(); err != nil || oidcAuths == nil {
 		return
@@ -161,8 +138,7 @@ func RecordOIDCAuth(result string) {
 	oidcAuths.Add(context.TODO(), 1, metric.WithAttributes(mustString("result", result)))
 }
 
-// mustString guards an attribute value: an empty label value is legal but
-// useless, so it becomes "unknown".
+// mustString turns an empty label value into "unknown": legal, but useless as a label.
 func mustString(key, value string) attribute.KeyValue {
 	if value == "" {
 		return attribute.String(key, "unknown")

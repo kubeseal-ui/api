@@ -4,8 +4,7 @@ import (
 	"testing"
 )
 
-// applyDoc is the shortest way to get a store into a known state: a document
-// via Apply, which is exactly what a mounted ConfigMap does.
+// applyDoc puts a store into a known state the way a mounted ConfigMap does: through Apply.
 func applyDoc(t *testing.T, doc string) *PolicyStore {
 	t.Helper()
 	parsed, err := ParseDocument([]byte(doc))
@@ -121,9 +120,9 @@ authz:
 	}
 }
 
-// The fallback is what a deployment with no policy file runs on. Once a file is
-// read, the file is the policy: a group that happens to be named after a role
-// must stop granting anything, or a grant could never be revoked.
+// The fallback is what a deployment with no policy file runs on. Once a file is read, the file
+// is the policy: a group named after a role must stop granting, or a grant could never be
+// revoked.
 func TestApplyTurnsOffTheGroupNameFallback(t *testing.T) {
 	store := NewPolicyStore()
 	if !has(store.CapabilitiesForGroups([]string{"secret-manager"}), SecretDecrypt) {
@@ -143,8 +142,7 @@ authz:
 	}
 }
 
-// SetGroupRoles is the programmatic path tests and setup code use. With no
-// namespaces to scope it, it can only mean everywhere.
+// With no namespaces to scope it, SetGroupRoles can only mean everywhere.
 func TestSetGroupRolesGrantsEverywhere(t *testing.T) {
 	store := NewPolicyStore()
 	if err := store.SetGroupRoles("team", []string{"editor"}); err != nil {
@@ -156,8 +154,7 @@ func TestSetGroupRolesGrantsEverywhere(t *testing.T) {
 	}
 }
 
-// Apply replaces the group rules wholesale, which is what makes a reload able
-// to revoke: a rule left out of the new document is gone.
+// Apply replaces the group rules wholesale, which is what lets a reload revoke a grant.
 func TestApplyReplacesRulesAndRoles(t *testing.T) {
 	store := applyDoc(t, `
 version: 1
@@ -189,9 +186,8 @@ authz:
 	}
 }
 
-// An applied document must leave Git mappings alone: they come from
-// GITOPS_NAMESPACES, and a policy reload that dropped them would take delivery
-// down as a side effect of editing authorization.
+// An applied document must leave Git mappings alone: a policy reload that dropped them would
+// take delivery down as a side effect of editing authorization.
 func TestApplyLeavesGitMappingsUntouched(t *testing.T) {
 	store := applyDoc(t, "version: 1\nauthz: {}\n")
 	if err := store.SetGitMapping(validMapping("payments")); err != nil {

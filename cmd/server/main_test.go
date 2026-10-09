@@ -24,8 +24,7 @@ import (
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 )
 
-// testLogger discards log output; individual middleware tests cover
-// log content.
+// testLogger discards log output; individual middleware tests cover log content.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -76,10 +75,6 @@ func TestRegisterProtectedRoutesMountsPhase3Routes(t *testing.T) {
 	r := chi.NewRouter()
 	protected := handlers.NewProtectedHandlers(testK8s(), testCrypto(), false)
 	registerProtectedRoutes(r, protected)
-	// The patch route names the values collection, not one key: a batch has no
-	// single key to put in the path. Diff, reveal, and patch are listed
-	// together because a stale path for any of them shows up here as a 404 —
-	// which is the failure this test exists to catch.
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/secrets/ns/name/diff"},
 		{http.MethodPost, "/secrets/ns/name/reveal"},
@@ -131,7 +126,6 @@ func TestRouterProtectedPhase3RoutesRequireAuthentication(t *testing.T) {
 	}
 }
 
-// TestRouterHealthzReturns200 verifies the liveness probe is mounted.
 func TestRouterProtectedRoutesAcceptValidSessionAndCSRF(t *testing.T) {
 	cfg := testConfig()
 	cfg.SessionSigningKey = "router-test-signing-key"
@@ -192,7 +186,6 @@ func TestRouterProtectedRoutesAcceptValidSessionAndCSRF(t *testing.T) {
 	}
 }
 
-// TestRouterHealthzReturns200 verifies the liveness probe is mounted.
 func TestRouterHealthzReturns200(t *testing.T) {
 	rr := httptest.NewRecorder()
 	mustRouter(t, routerOptions{logger: testLogger(), cfg: testConfig(), crypto: testCrypto(), k8s: testK8s()}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -209,8 +202,7 @@ func TestRouterHealthzReturns200(t *testing.T) {
 	}
 }
 
-// TestRouterReadyzReturns503WithoutConfig verifies readiness fails
-// closed when OIDC is unconfigured.
+// TestRouterReadyzReturns503WithoutConfig verifies readiness fails closed when OIDC is unconfigured.
 func TestRouterReadyzReturns503WithoutConfig(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "")
 	t.Setenv("OIDC_CLIENT_ID", "")
@@ -227,8 +219,8 @@ func TestRouterReadyzReturns503WithoutConfig(t *testing.T) {
 	}
 }
 
-// TestRouterReadyzReturns200WithConfig verifies readiness passes with
-// the required configuration present.
+// TestRouterReadyzReturns200WithConfig verifies readiness passes with the required configuration
+// present.
 func TestRouterReadyzReturns200WithConfig(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
@@ -241,8 +233,8 @@ func TestRouterReadyzReturns200WithConfig(t *testing.T) {
 	}
 }
 
-// TestRouterDoesNotExposeProtectedRoutes enforces the Phase-1
-// boundary: /api/v1 must not exist until auth is implemented.
+// TestRouterDoesNotExposeProtectedRoutes pins the fail-closed boot: with no OIDC provider configured,
+// /api/v1 must not exist at all.
 func TestRouterDoesNotExposeProtectedRoutes(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/auth/login",

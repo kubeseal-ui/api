@@ -40,13 +40,9 @@ func TestStdoutSecurityEventSinkEmitsBoundedJSON(t *testing.T) {
 	}
 }
 
-// TestStdoutSecurityEventSinkPreservesResourceName guards a collision
-// between the audit schema and the redactor: the redacting handler
-// matches *attribute keys* by substring against markers that include
-// "secret", so an event field literally named "secret" would ship as
-// [REDACTED]. The resource name is the SealedSecret name, which is
-// already public in the request path and in Kubernetes, and it is the
-// one field an operator needs to answer "what was touched".
+// The redactor matches attribute keys by substring against markers that include "secret",
+// so a field literally named "secret" would ship as [REDACTED]. The resource name stays
+// because it is what tells an operator which SealedSecret was touched.
 func TestStdoutSecurityEventSinkPreservesResourceName(t *testing.T) {
 	sink, out := newTestSink()
 
@@ -66,9 +62,7 @@ func TestStdoutSecurityEventSinkPreservesResourceName(t *testing.T) {
 	}
 }
 
-// TestStdoutSecurityEventSinkStillRedactsSensitiveAttrs keeps the
-// protection that matters: a caller that puts key material under a
-// marked attribute key still gets the sentinel.
+// A caller that puts key material under a marked attribute key still gets the sentinel.
 func TestStdoutSecurityEventSinkStillRedactsSensitiveAttrs(t *testing.T) {
 	sink, out := newTestSink()
 
@@ -87,7 +81,6 @@ func TestStdoutSecurityEventSinkStillRedactsSensitiveAttrs(t *testing.T) {
 			t.Fatalf("sensitive value %q leaked: %s", leak, emitted)
 		}
 	}
-	// Non-sensitive fields keep flowing, or the event would be useless.
 	if !strings.Contains(emitted, "req-2") {
 		t.Fatalf("non-sensitive field dropped: %s", emitted)
 	}

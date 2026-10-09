@@ -1,18 +1,7 @@
-// Package certprovider fetches and caches the public certificate the
-// api uses to seal client-side (or in-cluster) Sealed Secrets. Phase
-// 1 ships an HTTP implementation driven by KUBESEAL_CERT_URL.
-//
-// Design:
-//
-//   - Provider is an interface so Phase 2+ can swap the HTTP impl for
-//     a filesystem-on-startup read, a sidecar, or a mock without
-//     touching call sites.
-//   - Fetch is lazy (on first Get) and cached with a TTL so the
-//     kubeseal controller is not hammered on every encrypt request.
-//   - Rotation is handled by the TTL — once the cache entry is older
-//     than TTL, the next Get triggers a fresh HTTP fetch.
-//   - All network and parse errors surface to the caller; the api
-//     logs them and returns 503 to clients.
+// Package certprovider fetches and caches the controller's public certificate. The HTTP
+// implementation is driven by KUBESEAL_CERT_URL; fetching is lazy on the first Get and
+// re-fetched once the cached entry is older than the TTL, which is how key rotation is
+// picked up.
 package certprovider
 
 import (
@@ -26,47 +15,32 @@ import (
 	"time"
 )
 
-// Provider returns the active public certificate used to seal
-// SealedSecret resources. Implementations MUST be safe for concurrent
-// use by multiple goroutines.
+// Provider supplies the active public certificate. Implementations must be safe for
+// concurrent use.
 type Provider interface {
-	// Get returns the active public certificate. On cache miss or
-	// expiry it fetches, parses, validates, and caches. The returned
-	// pointer is safe to retain across calls — the implementation
-	// MUST NOT mutate it after handing it out.
+	// Get returns the cached certificate, fetching and validating it on a miss or expiry.
+	// The returned pointer must not be mutated after it is handed out.
 	Get(ctx context.Context) (*x509.Certificate, error)
 }
 
-// HTTPOptions configures NewHTTP. Zero-value fields fall back to
-// documented defaults. Validate() rejects invalid combinations at
-// construction time so misconfiguration fails fast at boot rather
-// than on the first encrypt request.
+// HTTPOptions configures NewHTTP; zero fields fall back to the defaults below.
 type HTTPOptions struct {
-	// URL is the absolute URL the GET request is issued against.
-	// Required. The MVP reads it from KUBESEAL_CERT_URL.
+	// URL is required; the api reads it from KUBESEAL_CERT_URL.
 	URL string
 
-	// TTL is how long a fetched cert stays cached. Default 5m.
-	TTL time.Duration
-
-	// Timeout is the per-fetch network timeout. Default 5s.
+	TTL     time.Duration
 	Timeout time.Duration
 
-	// MaxResponseBytes bounds the response body the server can return
-	// before we abort. Default 1 MiB — a real PEM cert is < 10 KiB;
-	// a runaway server that streams gigabytes of junk must not OOM
-	// the api pod.
+	// MaxResponseBytes bounds the response body; default 1 MiB. A real PEM cert is under
+	// 10 KiB, so a runaway upstream must not be able to OOM the pod.
 	MaxResponseBytes int64
 
-	// Client is the *http.Client used for fetches. Optional; when nil,
-	// a client built from Timeout is used. Tests inject a Client
-	// wrapping httptest.NewServer.
+	// Client is optional; nil builds one from Timeout.
 	Client *http.Client
 }
 
-// httpProvider is the production implementation. Fields are guarded
-// by mu: reads happen on every encrypt request, writes happen only
-// on cache miss / rotation.
+// httpProvider guards its fields with mu: reads happen on every encrypt request, writes
+// only on a cache miss or rotation.
 type httpProvider struct {
 	opts HTTPOptions
 	mu   sync.Mutex
@@ -75,8 +49,7 @@ type httpProvider struct {
 	now  func() time.Time // injectable for tests
 }
 
-// NewHTTP builds an HTTP-backed Provider. The provider performs no
-// network I/O at construction; the first Get() call fetches.
+// NewHTTP builds an HTTP-backed Provider; it performs no network I/O until the first Get.
 func NewHTTP(opts HTTPOptions) Provider {
 	if opts.TTL <= 0 {
 		opts.TTL = 5 * time.Minute
@@ -96,8 +69,8 @@ func NewHTTP(opts HTTPOptions) Provider {
 	}
 }
 
-// Get implements Provider. Cache hits return immediately. Cache miss
-// or expiry triggers a single fetch, parse, validate, and store.
+// Get implements Provider. A miss or expiry triggers a single fetch, parse, validate, and
+// store.
 func (p *httpProvider) Get(ctx context.Context) (*x509.Certificate, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -115,10 +88,8 @@ func (p *httpProvider) Get(ctx context.Context) (*x509.Certificate, error) {
 	return cert, nil
 }
 
-// fetch issues the GET, parses the PEM block, validates the cert,
-// and returns the *x509.Certificate. Body is bounded by
-// MaxResponseBytes — io.LimitReader aborts the read if the server
-// streams beyond that.
+// fetch issues the GET, parses and validates the PEM, and bounds the body with
+// io.LimitReader so a streaming server cannot exhaust memory.
 func (p *httpProvider) fetch(ctx context.Context) (*x509.Certificate, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.opts.URL, nil)
 	if err != nil {

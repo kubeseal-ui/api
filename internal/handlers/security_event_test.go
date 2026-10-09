@@ -53,10 +53,9 @@ func TestSensitiveHandlerEmitsBoundedSecurityEvent(t *testing.T) {
 	}
 }
 
-// TestRevealRecordsOutcomeNotAttempt pins that each exit path records what
-// actually happened. A constant result value (previously the literal
-// "attempt") made success, failure, self-service denial, and a rotated key
-// indistinguishable, so the CryptoFailures alert could never fire and the
+// TestRevealRecordsOutcomeNotAttempt pins that each exit path records what actually happened. A
+// constant result value (previously the literal "attempt") made success, failure, self-service
+// denial, and a rotated key indistinguishable, so the CryptoFailures alert could never fire and the
 // audit trail could not prove what a reveal did.
 func TestRevealRecordsOutcomeNotAttempt(t *testing.T) {
 	cases := []struct {
@@ -122,14 +121,11 @@ func TestRevealRecordsOutcomeNotAttempt(t *testing.T) {
 	}
 }
 
-// TestDiffEmitsSecurityEvent pins that the diff endpoint is audited. It
-// decrypts the complete Secret internally to produce the before/after pair,
-// so it belongs in the same event stream as reveal and patch even though it
-// returns ciphertext only.
-//
-// The event's key field carries every key the batch names, sorted, so one
-// reviewed change is one audit record that says exactly what it touched — and
-// says it the same way regardless of the order the client listed them in.
+// TestDiffEmitsSecurityEvent pins that the diff endpoint is audited: it decrypts the complete Secret
+// internally to produce the before/after pair, so it belongs in the same event stream as reveal and
+// patch even though it returns ciphertext only. The event's key field carries every key the batch
+// names, sorted, so one reviewed change is one audit record that says what it touched regardless of
+// the order the client listed it in.
 func TestDiffEmitsSecurityEvent(t *testing.T) {
 	sink := &eventSink{}
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
@@ -158,31 +154,28 @@ func TestDiffEmitsSecurityEvent(t *testing.T) {
 	if e.result != "not_found" {
 		t.Fatalf("result = %q, want not_found", e.result)
 	}
-	// The values are the sensitive half of the batch and must not reach the
-	// event through any field.
+	// The values are the sensitive half of the batch and must not reach the event through any field.
 	if strings.Contains(e.key, "plaintext-marker") || strings.Contains(e.secret, "plaintext-marker") {
 		t.Fatalf("event carries mutation values: %#v", e)
 	}
 }
 
-// TestSealRecordsOutcomeNotAttempt is the seal counterpart to
-// TestRevealRecordsOutcomeNotAttempt, and closes the gap it left: sealing was
-// the one sensitive operation with no audit record at all, while reveal, diff,
-// patch, and all three gitops operations emitted events. Creating a
-// SealedSecret is the write this product exists to perform, so an operator
-// could not prove from the event stream that one had happened.
+// TestSealRecordsOutcomeNotAttempt is the seal counterpart to TestRevealRecordsOutcomeNotAttempt, and
+// closes the gap it left: sealing was the one sensitive operation with no audit record at all, while
+// reveal, diff, patch, and all three gitops operations emitted events. Creating a SealedSecret is the
+// write this product exists to perform, so an operator could not prove from the event stream that one
+// had happened.
 //
-// The two cases that carry a resource name are the ones that get past the
-// decode; every refusal before that point records an event with no namespace
-// and no name, which is asserted rather than left implicit.
+// The cases that carry a resource name are the ones that get past the decode; every refusal before
+// that point records an event with no namespace and no name, asserted rather than left implicit.
 func TestSealRecordsOutcomeNotAttempt(t *testing.T) {
 	sealingCrypto, _, err := crypto.NewTestCrypto()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// A store whose single mapping renders clusters/ns/name.yaml and configures
-	// no AllowedPaths, so the default path is the only one it permits.
+	// A store whose single mapping renders clusters/ns/name.yaml with no AllowedPaths, so the
+	// default path is the only one it permits.
 	mappedStore := func() *policy.PolicyStore {
 		store := policy.NewPolicyStore()
 		if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
@@ -230,10 +223,9 @@ func TestSealRecordsOutcomeNotAttempt(t *testing.T) {
 			wantResult: "invalid_request",
 		},
 		{
-			// The response for this one is a 400, but the refusal is the
-			// mapping's policy and is recorded as a denial so an audit can tell
-			// it apart from malformed input. The manifest is a valid Secret, so
-			// the path is the only thing wrong with the request.
+			// A 400, but the refusal is the mapping's policy and is recorded as a denial so an audit
+			// can tell it apart from malformed input. The manifest is a valid Secret, so the path is
+			// the only thing wrong with the request.
 			name: "denied when target_path is outside the mapping",
 			build: func() *ProtectedHandlers {
 				return NewProtectedHandlersWithGitOps(mappedStore(), gitops.NewLocalTransport(), protectedK8s{}, &crypto.Wrapper{}, false)
@@ -290,9 +282,8 @@ func TestSealRecordsOutcomeNotAttempt(t *testing.T) {
 			if e.namespace != tc.wantNS || e.secret != tc.wantName {
 				t.Fatalf("event namespace/secret = %q/%q, want %q/%q", e.namespace, e.secret, tc.wantNS, tc.wantName)
 			}
-			// The submitted manifest is the sensitive half of a seal request.
-			// No field of the event may carry it, whatever the fields are
-			// called.
+			// The submitted manifest is the sensitive half of a seal request; no field of the event
+			// may carry it, whatever the fields are called.
 			if strings.Contains(e.secret, "plaintext-marker") || strings.Contains(e.key, "plaintext-marker") {
 				t.Fatalf("event carries manifest content: %#v", e)
 			}

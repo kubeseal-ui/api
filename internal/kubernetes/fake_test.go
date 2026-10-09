@@ -21,7 +21,6 @@ func keySecret(name string, created time.Time, withKey bool) Secret {
 	}
 }
 
-// TestFakeClientListNamespaces verifies sorted, deterministic output.
 func TestFakeClientListNamespaces(t *testing.T) {
 	f := NewFake(
 		[]Namespace{{Name: "db"}, {Name: "cluster"}, {Name: "apps"}},
@@ -42,7 +41,6 @@ func TestFakeClientListNamespaces(t *testing.T) {
 	}
 }
 
-// TestFakeClientGetSealedSecret verifies exact lookup and ErrNotFound.
 func TestFakeClientGetSealedSecret(t *testing.T) {
 	f := NewFake(nil, []SealedSecret{
 		{Name: "db-cred", Namespace: "db", Scope: "strict"},
@@ -61,7 +59,6 @@ func TestFakeClientGetSealedSecret(t *testing.T) {
 	}
 }
 
-// TestFakeClientListSealedSecrets verifies namespace filtering.
 func TestFakeClientListSealedSecrets(t *testing.T) {
 	f := NewFake(nil, []SealedSecret{
 		{Name: "a", Namespace: "db"},

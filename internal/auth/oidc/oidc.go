@@ -1,12 +1,6 @@
-// Package oidc implements the OIDC authorization code flow with PKCE
-// for the kubeseal-ui API.
-//
-// Flow per internal-docs/engineering/backend/auth-oidc.md:
-// 1. Login generates state, nonce, PKCE verifier; stores in HttpOnly cookie; redirects to provider
-// 2. Callback validates state, exchanges code with verifier, validates ID token
-// 3. Creates session cookie + refresh token cookie; clears flow cookies
-// 4. Middleware handles automatic refresh before session expiry
-// 5. Logout clears cookies, attempts provider revocation
+// Package oidc implements the OIDC authorization code flow with PKCE: login puts state,
+// nonce, and a PKCE verifier in an HttpOnly cookie, the callback exchanges the code and
+// validates the ID token, and the session and refresh cookies carry the result.
 package oidc
 
 import (
@@ -26,7 +20,6 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// Config holds OIDC configuration loaded from environment.
 type Config struct {
 	IssuerURL          string
 	ClientID           string
@@ -40,7 +33,6 @@ type Config struct {
 	CSRFTrustedOrigins []string
 }
 
-// LoadConfig reads OIDC configuration from environment variables.
 func LoadConfig() (Config, error) {
 	cfg := Config{
 		IssuerURL:          getEnv("OIDC_ISSUER_URL"),
@@ -96,7 +88,6 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// Provider wraps the OIDC provider and OAuth2 config.
 type Provider struct {
 	cfg       Config
 	provider  *oidc.Provider
@@ -104,7 +95,6 @@ type Provider struct {
 	oauth2Cfg oauth2.Config
 }
 
-// NewProvider discovers the OIDC provider and initializes the verifier.
 func NewProvider(ctx context.Context, cfg Config) (*Provider, error) {
 	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
 	if err != nil {
@@ -131,11 +121,9 @@ func NewProvider(ctx context.Context, cfg Config) (*Provider, error) {
 	}, nil
 }
 
-// PKCEChallengeMethod is the PKCE challenge method used (S256 per RFC 7636).
+// PKCEChallengeMethod is the PKCE challenge method (S256).
 const PKCEChallengeMethod = "S256"
 
-// PKCEVerifier generates a PKCE code verifier (RFC 7636).
-// The verifier is 32 random bytes base64url-encoded without padding.
 func PKCEVerifier() (verifier string, err error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
@@ -145,8 +133,6 @@ func PKCEVerifier() (verifier string, err error) {
 	return verifier, nil
 }
 
-// PKCEChallenge computes the S256 PKCE challenge from a verifier.
-// Per RFC 7636: BASE64URL-ENCODE(SHA256(ASCII(verifier)))
 func PKCEChallenge(verifier string) (string, error) {
 	if len(verifier) < 43 || len(verifier) > 128 {
 		return "", fmt.Errorf("pkce: verifier length must be 43-128, got %d", len(verifier))
@@ -155,7 +141,6 @@ func PKCEChallenge(verifier string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(h[:]), nil
 }
 
-// FlowState is the temporary state stored in the PKCE cookie.
 type FlowState struct {
 	State        string `json:"state"`
 	Nonce        string `json:"nonce"`
@@ -163,7 +148,6 @@ type FlowState struct {
 	CreatedAt    int64  `json:"created_at"`
 }
 
-// NewFlowState generates a fresh flow state for the login redirect.
 func NewFlowState() (*FlowState, error) {
 	stateBytes := make([]byte, 16)
 	if _, err := rand.Read(stateBytes); err != nil {
@@ -190,7 +174,6 @@ func NewFlowState() (*FlowState, error) {
 	}, nil
 }
 
-// Validate checks that the flow state is not expired (5 min TTL).
 func (f *FlowState) Validate() error {
 	if time.Now().Unix()-f.CreatedAt > 5*60 {
 		return fmt.Errorf("flow state expired")
@@ -198,7 +181,6 @@ func (f *FlowState) Validate() error {
 	return nil
 }
 
-// LoginURL builds the authorization URL for the redirect.
 func (p *Provider) LoginURL(flow *FlowState) (string, error) {
 	challenge, err := PKCEChallenge(flow.PKCEVerifier)
 	if err != nil {
@@ -216,7 +198,6 @@ func (p *Provider) LoginURL(flow *FlowState) (string, error) {
 	return p.oauth2Cfg.Endpoint.AuthURL + "?" + params.Encode(), nil
 }
 
-// TokenResponse holds the token endpoint response.
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
@@ -226,7 +207,6 @@ type TokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
-// ExchangeCode exchanges the authorization code for tokens using PKCE verifier.
 func (p *Provider) ExchangeCode(ctx context.Context, code, pkceVerifier string) (*TokenResponse, error) {
 	token, err := p.oauth2Cfg.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", pkceVerifier))
 	if err != nil {
@@ -270,7 +250,6 @@ func (a *audience) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// VerifiedIDToken holds the validated ID token claims.
 type VerifiedIDToken struct {
 	Subject  string
 	Email    string
@@ -284,7 +263,6 @@ type VerifiedIDToken struct {
 	Nonce    string
 }
 
-// VerifyIDToken validates the ID token and extracts normalized claims.
 func (p *Provider) VerifyIDToken(ctx context.Context, idToken, nonce string) (*VerifiedIDToken, error) {
 	tok, err := p.verifier.Verify(ctx, idToken)
 	if err != nil {
@@ -315,12 +293,10 @@ func (p *Provider) VerifyIDToken(ctx context.Context, idToken, nonce string) (*V
 		return nil, fmt.Errorf("ID token missing required claims")
 	}
 
-	// Validate issuer
 	if claims.Issuer != p.cfg.IssuerURL {
 		return nil, fmt.Errorf("issuer mismatch: expected %q, got %q", p.cfg.IssuerURL, claims.Issuer)
 	}
 
-	// Validate audience
 	audOK := false
 	for _, aud := range claims.Audience {
 		if aud == p.cfg.ClientID {
@@ -332,8 +308,8 @@ func (p *Provider) VerifyIDToken(ctx context.Context, idToken, nonce string) (*V
 		return nil, fmt.Errorf("audience mismatch: client_id %q not in aud %v", p.cfg.ClientID, claims.Audience)
 	}
 
-	// Extract groups and username from configured claims. The default claim
-	// names use the typed fields above; custom claims are decoded explicitly.
+	// The typed fields above cover the default claim names; a configured custom claim has
+	// to be decoded from the raw token map instead.
 	groups := claims.Groups
 	username := claims.Username
 	if p.cfg.GroupsClaim != "" && p.cfg.GroupsClaim != "groups" || p.cfg.UsernameClaim != "" && p.cfg.UsernameClaim != "preferred_username" {
@@ -369,7 +345,6 @@ func (p *Provider) VerifyIDToken(ctx context.Context, idToken, nonce string) (*V
 	}, nil
 }
 
-// RefreshTokens uses the refresh token to get new tokens.
 func (p *Provider) RefreshTokens(ctx context.Context, refreshToken string) (*TokenResponse, error) {
 	token, err := p.oauth2Cfg.TokenSource(ctx, &oauth2.Token{
 		RefreshToken: refreshToken,
@@ -401,18 +376,16 @@ func (p *Provider) RefreshTokens(ctx context.Context, refreshToken string) (*Tok
 	}, nil
 }
 
-// RevokeToken attempts to revoke the token at the provider (best effort).
+// RevokeToken is a best-effort stub: revocation is optional per RFC 7009, and the
+// revocation endpoint is not implemented.
 func (p *Provider) RevokeToken(ctx context.Context, token string) error {
-	// Token revocation is optional per RFC 7009; best effort
 	revokeURL := p.provider.Endpoint().TokenURL
 	if revokeURL == "" {
-		return nil // Not supported
+		return nil
 	}
-	// In real impl, POST to revocation endpoint
 	return nil
 }
 
-// Cookie names
 const (
 	CookiePKCE    = "kubeseal_pkce"
 	CookieSession = "kubeseal_session"
@@ -420,7 +393,6 @@ const (
 	CookieCSRF    = "kubeseal_csrf"
 )
 
-// SessionData is stored in the signed session cookie.
 type SessionData struct {
 	Subject  string   `json:"sub"`
 	Email    string   `json:"email"`
@@ -432,7 +404,6 @@ type SessionData struct {
 	CSRF     string   `json:"csrf"`
 }
 
-// CSRFToken generates a CSRF token for the SPA.
 func CSRFToken() (string, error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
@@ -441,7 +412,7 @@ func CSRFToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
-// getScopeFromToken extracts scope from token (oauth2.Token doesn't expose Scope field).
+// getScopeFromToken reads the scope off the token's extras: oauth2.Token has no Scope field.
 func getScopeFromToken(token *oauth2.Token) string {
 	if v, ok := token.Extra("scope").(string); ok {
 		return v
@@ -449,9 +420,8 @@ func getScopeFromToken(token *oauth2.Token) string {
 	return ""
 }
 
-// CookieOptions returns a cookie with secure defaults. Secure is always
-// true in the literal (gosec G124) and overridden post-construction for
-// non-production environments (tests with CookieSecure=false).
+// CookieOptions returns a cookie with secure defaults. Secure is set true in the literal
+// so gosec G124 stays quiet, then overridden for non-production setups.
 func (p *Provider) CookieOptions(path string, maxAge int) *http.Cookie {
 	cookie := &http.Cookie{
 		Path:     path,

@@ -4,9 +4,8 @@ import (
 	"testing"
 )
 
-// An identity's effective grant in a namespace is its global set unioned with
-// that namespace's own grants. Testing only the scoped list would drop a '*'
-// grant the moment a user also had one namespace scoped to them.
+// An identity's effective grant in a namespace is its global set unioned with that
+// namespace's own grants; testing only the scoped list would drop a '*' grant.
 func TestCapabilitiesForUnionsGlobalAndScoped(t *testing.T) {
 	identity := Identity{
 		Capabilities: []string{"metadata:read"},
@@ -25,8 +24,7 @@ func TestCapabilitiesForUnionsGlobalAndScoped(t *testing.T) {
 		t.Errorf("payments = %v, want exactly the union", payments)
 	}
 
-	// A namespace with no grants of its own still has the global set: absent
-	// from the map is not the same as denied.
+	// Absent from the map is not the same as denied: the global set still applies.
 	if got := identity.CapabilitiesFor("development"); len(got) != 1 || got[0] != "metadata:read" {
 		t.Errorf("development = %v, want the global set", got)
 	}
@@ -72,8 +70,7 @@ func TestHasCapabilityAnywhere(t *testing.T) {
 	}
 }
 
-// Nil in, nil out: an identity with no grants should not carry an allocated
-// empty slice through every request.
+// Nil in, nil out: an identity with no grants carries no allocated empty slice.
 func TestCapabilitiesForWithNoGrants(t *testing.T) {
 	var identity Identity
 	if got := identity.CapabilitiesFor("payments"); got != nil {

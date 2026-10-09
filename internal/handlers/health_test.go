@@ -9,9 +9,6 @@ import (
 	"testing"
 )
 
-// TestHealthzAlwaysOK documents the liveness probe contract: it returns
-// 200 with a JSON body as long as the process is up. Readiness is a
-// separate concern (see /readyz).
 func TestHealthzAlwaysOK(t *testing.T) {
 	rr := httptest.NewRecorder()
 	Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -31,10 +28,9 @@ func TestHealthzAlwaysOK(t *testing.T) {
 	}
 }
 
-// TestReadyzWithoutOIDCConfigReports503 documents that /readyz fails
-// fast when required configuration is absent. Kubelet must NOT route
-// traffic to a pod whose OIDC is unconfigured, because every
-// authenticated endpoint would return 500.
+// TestReadyzWithoutOIDCConfigReports503 documents that /readyz fails fast when required
+// configuration is absent: kubelet must not route traffic to a pod whose OIDC is unconfigured,
+// because every authenticated endpoint would return 500.
 func TestReadyzWithoutOIDCConfigReports503(t *testing.T) {
 	rr := httptest.NewRecorder()
 	Readyz(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -44,9 +40,6 @@ func TestReadyzWithoutOIDCConfigReports503(t *testing.T) {
 	}
 }
 
-// TestReadyzWithOIDCConfigReports200 confirms readiness flips to 200
-// once both OIDC values are configured. The probe reads readiness from
-// the config package so the contract is in one place.
 func TestReadyzWithOIDCConfigReports200(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
@@ -66,9 +59,8 @@ func TestReadyzWithOIDCConfigReports200(t *testing.T) {
 	}
 }
 
-// TestReadyzBodyIncludesReason documents the diagnostic contract: when
-// not ready, the response body explains why so operators can debug
-// without shelling into the pod.
+// TestReadyzBodyIncludesReason: the body explains why so operators can debug without shelling into
+// the pod.
 func TestReadyzBodyIncludesReason(t *testing.T) {
 	rr := httptest.NewRecorder()
 	Readyz(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -82,10 +74,9 @@ func TestReadyzBodyIncludesReason(t *testing.T) {
 	}
 }
 
-// TestReadyzWithCheckReportsADegradedReload: a policy document that failed to
-// reload keeps the last valid generation in force, which is right to serve but
-// not right to serve silently. Readiness is where that becomes visible to a
-// rollout, so a failing check must take the endpoint down with its reason.
+// TestReadyzWithCheckReportsADegradedReload: a policy document that failed to reload keeps the last
+// valid generation in force — right to serve, but not to serve silently. Readiness is where that
+// becomes visible to a rollout, so a failing check must take the endpoint down with its reason.
 func TestReadyzWithCheckReportsADegradedReload(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")

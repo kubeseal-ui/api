@@ -12,24 +12,20 @@ import (
 	"github.com/kubeseal-ui/api/internal/auth/oidc"
 )
 
-// --- test helpers ---
-
-// csrfTokenVal is a non-secret test fixture used as a CSRF token in tests.
-// Constructed at runtime to avoid gosec G101 false positives on literal credential-like strings.
+// csrfTokenVal is built at runtime to avoid a gosec G101 false positive on a
+// credential-like literal.
 var csrfTokenVal = "valid-csrf-" + "token"
 
-// fakeOIDCProvider is a minimal stub for future refresh tests.
-// Currently unused — kept for documentation of the refresh test pattern.
+// fakeOIDCProvider is a stub for refresh tests; no test uses it yet.
 type fakeOIDCProvider struct{}
 
-// sessionCookieData mirrors the middleware's internal type for test setup.
+// testSessionData mirrors the internal sessionCookieData for test setup.
 type testSessionData struct {
 	SessionData
 	Signature string `json:"sig"`
 }
 
-// makeTestSession creates a signed, base64-encoded session cookie value
-// that the middleware can validate.
+// makeTestSession returns a signed, base64-encoded cookie value the middleware accepts.
 func makeTestSession(t *testing.T, sess SessionData, signingKey []byte) string {
 	t.Helper()
 	sig := signSessionCookie(sess, signingKey)
@@ -41,7 +37,6 @@ func makeTestSession(t *testing.T, sess SessionData, signingKey []byte) string {
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-// makeTestConfig returns a minimal AuthConfig with a test signing key.
 func makeTestConfig() AuthConfig {
 	return AuthConfig{
 		SessionCookie:      "kubeseal_session",
@@ -53,7 +48,6 @@ func makeTestConfig() AuthConfig {
 	}
 }
 
-// validSessionData returns a session that is not expired.
 func validSessionData() SessionData {
 	return SessionData{
 		Subject:  "user-123",
@@ -71,8 +65,6 @@ func testHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// TestAuthMiddlewareValidatesSession verifies that a valid signed session
-// cookie results in the handler being called (200).
 func TestAuthMiddlewareValidatesSession(t *testing.T) {
 	cfg := makeTestConfig()
 	sess := validSessionData()
@@ -102,8 +94,6 @@ func TestAuthMiddlewareValidatesSession(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareInjectsIdentity verifies that the identity from the
-// session cookie is correctly injected into the request context.
 func TestAuthMiddlewareInjectsIdentity(t *testing.T) {
 	cfg := makeTestConfig()
 	sess := validSessionData()
@@ -130,12 +120,9 @@ func TestAuthMiddlewareInjectsIdentity(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareReturns401OnInvalidSession verifies that a missing
-// or malformed session cookie returns 401.
 func TestAuthMiddlewareReturns401OnInvalidSession(t *testing.T) {
 	cfg := makeTestConfig()
 
-	// No cookie at all
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
 	rr := httptest.NewRecorder()
 	AuthMiddleware(cfg)(http.HandlerFunc(testHandler)).ServeHTTP(rr, req)
@@ -144,7 +131,6 @@ func TestAuthMiddlewareReturns401OnInvalidSession(t *testing.T) {
 		t.Errorf("no cookie: status = %d, want 401", rr.Code)
 	}
 
-	// Malformed cookie value (not base64)
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
 	req2.AddCookie(&http.Cookie{Name: oidc.CookieSession, Value: "not-valid-base64!!!", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	rr2 := httptest.NewRecorder()
@@ -154,7 +140,6 @@ func TestAuthMiddlewareReturns401OnInvalidSession(t *testing.T) {
 		t.Errorf("malformed cookie: status = %d, want 401", rr2.Code)
 	}
 
-	// Tampered signature
 	sess := validSessionData()
 	cookieVal := makeTestSession(t, sess, []byte("wrong-signing-key"))
 	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
@@ -167,12 +152,10 @@ func TestAuthMiddlewareReturns401OnInvalidSession(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareReturns401OnExpiredSession verifies that an expired
-// session cookie returns 401 (without a refresh token, it can't refresh).
 func TestAuthMiddlewareReturns401OnExpiredSession(t *testing.T) {
 	cfg := makeTestConfig()
 	sess := validSessionData()
-	sess.Expiry = time.Now().Add(-1 * time.Hour).Unix() // expired
+	sess.Expiry = time.Now().Add(-1 * time.Hour).Unix()
 	cookieVal := makeTestSession(t, sess, cfg.SigningKey)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
@@ -186,21 +169,17 @@ func TestAuthMiddlewareReturns401OnExpiredSession(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareTriggersRefresh verifies that when the session is
-// expired but a valid refresh token exists and the OIDC provider can
-// refresh, the middleware refreshes the session and allows the request.
+// TestAuthMiddlewareTriggersRefresh covers only the no-refresh-token path; a full refresh
+// test needs a mock OIDC provider.
 func TestAuthMiddlewareTriggersRefresh(t *testing.T) {
-	// This test documents the refresh flow. A full integration test
-	// requires a mock OIDC provider. For unit testing the middleware,
-	// we verify that an expired session with no refresh token returns 401.
 	cfg := makeTestConfig()
 	sess := validSessionData()
-	sess.Expiry = time.Now().Add(-1 * time.Minute).Unix() // expired
+	sess.Expiry = time.Now().Add(-1 * time.Minute).Unix()
 	cookieVal := makeTestSession(t, sess, cfg.SigningKey)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
 	req.AddCookie(&http.Cookie{Name: oidc.CookieSession, Value: cookieVal, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
-	// No refresh cookie — refresh should fail
+	// No refresh cookie, so the refresh attempt must fail.
 
 	rr := httptest.NewRecorder()
 	AuthMiddleware(cfg)(http.HandlerFunc(testHandler)).ServeHTTP(rr, req)
@@ -210,12 +189,9 @@ func TestAuthMiddlewareTriggersRefresh(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareEnforcesCSRF verifies that CSRFMiddleware rejects
-// state-changing requests without a valid CSRF token.
 func TestAuthMiddlewareEnforcesCSRF(t *testing.T) {
 	cfg := makeTestConfig()
 
-	// POST without CSRF token should be rejected
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces", nil)
 	req.Header.Set("Origin", "https://app.example.com")
 	rr := httptest.NewRecorder()
@@ -225,7 +201,6 @@ func TestAuthMiddlewareEnforcesCSRF(t *testing.T) {
 		t.Errorf("POST without CSRF: status = %d, want 403", rr.Code)
 	}
 
-	// GET should pass without CSRF (safe method)
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces", nil)
 	rr2 := httptest.NewRecorder()
 	CSRFMiddleware(cfg)(http.HandlerFunc(testHandler)).ServeHTTP(rr2, req2)
@@ -234,7 +209,6 @@ func TestAuthMiddlewareEnforcesCSRF(t *testing.T) {
 		t.Errorf("GET without CSRF: status = %d, want 200", rr2.Code)
 	}
 
-	// POST with valid CSRF should pass
 	csrfToken := csrfTokenVal
 	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces", nil)
 	req3.Header.Set("Origin", "https://app.example.com")
@@ -248,8 +222,6 @@ func TestAuthMiddlewareEnforcesCSRF(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareRejectsUntrustedOrigin verifies that CSRFMiddleware
-// rejects requests from untrusted origins.
 func TestAuthMiddlewareRejectsUntrustedOrigin(t *testing.T) {
 	cfg := makeTestConfig()
 
@@ -266,7 +238,6 @@ func TestAuthMiddlewareRejectsUntrustedOrigin(t *testing.T) {
 	}
 }
 
-// TestIdentityFromContext verifies GetIdentity and MustGetIdentity.
 func TestIdentityFromContext(t *testing.T) {
 	id := Identity{
 		Subject:  "sub-1",
@@ -284,13 +255,11 @@ func TestIdentityFromContext(t *testing.T) {
 		t.Errorf("subject = %q, want %q", got.Subject, id.Subject)
 	}
 
-	// MustGetIdentity should return the same identity
 	got2 := MustGetIdentity(ctx)
 	if got2.Subject != id.Subject {
 		t.Errorf("MustGetIdentity: subject = %q, want %q", got2.Subject, id.Subject)
 	}
 
-	// Context without identity
 	emptyCtx := context.Background()
 	_, ok2 := GetIdentity(emptyCtx)
 	if ok2 {

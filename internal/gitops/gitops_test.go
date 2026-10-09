@@ -47,11 +47,9 @@ func TestLocalTransportPushRejectsStaleBaseWithoutForce(t *testing.T) {
 	}
 }
 
-// TestLocalTransportCreatesANewFileOnTheBranchHead pins the mock transport's
-// agreement with GoGitTransport on the new-file case. A vacant path is not a
-// conflict: the change is built on the branch head, so the head and not the
-// (absent) file's own commit is what BaseCommit is compared against. Without
-// this, mock mode could not create a first Secret in a namespace.
+// Pins the mock transport's agreement with GoGitTransport on the new-file case: a vacant path is
+// not a conflict, because BaseCommit is compared against the branch head and not the absent
+// file's own commit. Without this, mock mode could not create a first Secret in a namespace.
 func TestLocalTransportCreatesANewFileOnTheBranchHead(t *testing.T) {
 	transport := NewLocalTransport()
 	transport.Seed(Target{Repository: "platform", Branch: "main", Path: "clusters/other.yaml"}, "other", "abc")

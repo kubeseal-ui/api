@@ -13,22 +13,20 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// Target identifies a file on a repository branch.
 type Target struct {
 	Repository string
 	Branch     string
 	Path       string
 }
 
-// ManifestSnapshot is the content and commit observed at a target.
 type ManifestSnapshot struct {
 	Target  Target
 	Content []byte
 	Commit  string
 }
 
-// Change describes an edit based on BaseCommit. Branch is optional; when empty,
-// the target branch is used. Implementations must never force-push a change.
+// Change describes an edit based on BaseCommit. Branch is optional; when empty, the target
+// branch is used. Implementations must never force-push a change.
 type Change struct {
 	Target     Target
 	BaseCommit string
@@ -36,7 +34,7 @@ type Change struct {
 	Branch     string
 }
 
-// Diff is the result of a dry run. It contains no remote-side effects.
+// Diff is the result of a dry run; it has no remote-side effects.
 type Diff struct {
 	Target     Target
 	BaseCommit string
@@ -51,7 +49,6 @@ type PushResult struct {
 	Commit     string
 }
 
-// ProposalRequest is the provider-neutral input after a branch was pushed.
 type ProposalRequest struct {
 	Change Change
 	Push   PushResult
@@ -59,7 +56,6 @@ type ProposalRequest struct {
 	Body   string
 }
 
-// ProposalResult identifies the host review object.
 type ProposalResult struct {
 	URL        string
 	Repository string
@@ -67,10 +63,9 @@ type ProposalResult struct {
 	Commit     string
 }
 
-// GitTransport performs portable Git operations. It has no host-provider API.
-// authRef selects the typed credential for the target repository; the
-// resolver resolves it server-side. An empty authRef is valid only for
-// remotes that need no credentials.
+// GitTransport performs portable Git operations. It has no host-provider API. authRef selects
+// the typed credential for the target repository; the resolver resolves it server-side. An
+// empty authRef is valid only for remotes that need no credentials.
 type GitTransport interface {
 	ReadManifest(ctx context.Context, target Target, authRef string) (ManifestSnapshot, error)
 	SearchManifest(ctx context.Context, repository, branch, namespace, name, authRef string) (ManifestSnapshot, error)
@@ -83,14 +78,12 @@ type ProposalProvider interface {
 	OpenProposal(context.Context, ProposalRequest) (ProposalResult, error)
 }
 
-// BaseCommitError indicates the caller edited an obsolete base.
 type BaseCommitError struct{ Expected, Actual string }
 
 func (e *BaseCommitError) Error() string {
 	return fmt.Sprintf("base commit mismatch: expected %q, actual %q", e.Expected, e.Actual)
 }
 
-// ConflictError indicates a non-fast-forward/conflicting push.
 type ConflictError struct{ Expected, Actual string }
 
 func (e *ConflictError) Error() string {
@@ -113,10 +106,9 @@ func branchKey(repository, branch string) string {
 type LocalTransport struct {
 	mu      sync.RWMutex
 	entries map[Target]localEntry
-	// heads tracks a branch head per repository+branch, which is what a
-	// BaseCommit is compared against. Without it there would be no way to
-	// report a base commit for a file that does not exist yet, and mock mode
-	// could not exercise the new-secret flow at all.
+	// heads tracks a branch head per repository+branch, which is what a BaseCommit is compared
+	// against. Without it there would be no way to report a base commit for a file that does
+	// not exist yet, and mock mode could not exercise the new-secret flow at all.
 	heads map[string]string
 }
 
@@ -124,8 +116,8 @@ func NewLocalTransport() *LocalTransport {
 	return &LocalTransport{entries: make(map[Target]localEntry), heads: make(map[string]string)}
 }
 
-// Seed initializes a target, useful for tests. Seeding a file also moves the
-// branch it lives on to that commit, standing in for the real remote's head.
+// Seed initializes a target; seeding a file also moves its branch head to that commit,
+// standing in for the real remote's head.
 func (t *LocalTransport) Seed(target Target, content, commit string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -135,13 +127,10 @@ func (t *LocalTransport) Seed(target Target, content, commit string) {
 
 // ReadManifest returns the entry at target. A vacant path is ErrNotFound.
 //
-// As with GoGitTransport, the error path is not a zero snapshot: it carries the
-// branch head, which is the value a new file is built on and the value a later
-// BaseCommit check compares against. A branch nothing has been seeded on has no
-// head, so the commit is empty — a caller then has no base commit to report for
-// a file that does not exist yet, which is the same answer an unmapped namespace
-// gets and which the new-secret flow surfaces rather than sending an empty base
-// commit to endpoints that reject it.
+// The error path is not a zero snapshot: it carries the branch head, which is the value a new
+// file is built on and the value a later BaseCommit check compares against. A branch nothing
+// has been seeded on has no head, so the commit is empty — the new-secret flow surfaces that
+// rather than sending an empty base commit to endpoints that reject it.
 func (t *LocalTransport) ReadManifest(_ context.Context, target Target, _ string) (ManifestSnapshot, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -167,8 +156,8 @@ type partialSealedSecret struct {
 	} `yaml:"spec"`
 }
 
-// MatchesSealedSecret inspects raw YAML content (single or multi-doc)
-// to check if it represents a SealedSecret matching the given name and namespace.
+// MatchesSealedSecret reports whether raw YAML content (single or multi-doc) holds a
+// SealedSecret matching the given name and namespace.
 func MatchesSealedSecret(content []byte, namespace, name string) bool {
 	docs := bytes.Split(content, []byte("\n---"))
 	for _, docBytes := range docs {
@@ -227,11 +216,9 @@ func (t *LocalTransport) PushBranch(_ context.Context, change Change, _ string) 
 	target.Branch = branch
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// BaseCommit is checked against the head of the branch being built on, as
-	// GoGitTransport does, and not against the file's own last commit. The two
-	// differ in exactly the new-file case: the file has no commit yet, and the
-	// change is legitimately built on the current head. Comparing against the
-	// file would refuse every creation.
+	// BaseCommit is checked against the head of the branch being built on, not against the
+	// file's own last commit. The two differ in exactly the new-file case: the file has no
+	// commit yet, and the change is legitimately built on the current head.
 	head := t.heads[branchKey(change.Target.Repository, change.Target.Branch)]
 	if change.BaseCommit != "" && change.BaseCommit != head {
 		return PushResult{}, &ConflictError{change.BaseCommit, head}

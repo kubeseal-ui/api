@@ -45,9 +45,8 @@ func TestNewLoaderAppliesTheFile(t *testing.T) {
 	}
 }
 
-// At boot there is no previous generation, so a broken or missing file is an
-// error rather than a warning: the alternative is serving a policy the operator
-// did not write.
+// At boot there is no previous generation, so a broken or missing file is an error rather
+// than a warning: the alternative is serving a policy the operator did not write.
 func TestNewLoaderFailsOnAnUnusableFile(t *testing.T) {
 	dir := t.TempDir()
 	for name, content := range map[string]string{
@@ -84,9 +83,8 @@ func TestReloadPicksUpAnEdit(t *testing.T) {
 	}
 }
 
-// A failed reload keeps the last valid generation in force. The alternative —
-// falling back to no policy, or to a half-applied one — would turn a file being
-// edited into a lockout at the worst possible moment.
+// A failed reload keeps the last valid generation in force: falling back to no policy would
+// turn a file being edited into a lockout at the worst possible moment.
 func TestFailedReloadKeepsTheLastValidGeneration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.yaml")
 	writePolicy(t, path, loaderDocument)
@@ -107,8 +105,8 @@ func TestFailedReloadKeepsTheLastValidGeneration(t *testing.T) {
 		t.Fatal("a failed reload discarded the generation it could not replace")
 	}
 
-	// A later good reload clears the failure, or the process would stay unready
-	// forever after one bad edit.
+	// A later good reload clears the failure, or the process would stay unready forever
+	// after one bad edit.
 	writePolicy(t, path, loaderDocument)
 	if err := loader.Reload(); err != nil {
 		t.Fatalf("Reload after the fix: %v", err)
@@ -118,8 +116,8 @@ func TestFailedReloadKeepsTheLastValidGeneration(t *testing.T) {
 	}
 }
 
-// The property the additive design could not have: removing a grant from the
-// file removes it from the store.
+// Removing a grant from the file removes it from the store — the property an additive design
+// could not have.
 func TestReloadRevokesARemovedGrant(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acl.yaml")
 	writePolicy(t, path, loaderDocument)

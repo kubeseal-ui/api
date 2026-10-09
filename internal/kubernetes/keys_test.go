@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-// TestFakeClientFindActiveKeyNewestTimestamp verifies the newest
-// valid key wins.
 func TestFakeClientFindActiveKeyNewestTimestamp(t *testing.T) {
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -29,8 +27,6 @@ func TestFakeClientFindActiveKeyNewestTimestamp(t *testing.T) {
 	}
 }
 
-// TestFakeClientFindActiveKeyNameTieBreaker verifies that with equal
-// timestamps the lexicographically smaller name wins deterministically.
 func TestFakeClientFindActiveKeyNameTieBreaker(t *testing.T) {
 	same := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 
@@ -48,9 +44,6 @@ func TestFakeClientFindActiveKeyNameTieBreaker(t *testing.T) {
 	}
 }
 
-// TestFakeClientFindActiveKeyMalformedFailsClosed verifies that
-// entries missing tls.crt or tls.key are rejected, and no valid key
-// at all fails closed.
 func TestFakeClientFindActiveKeyMalformedFailsClosed(t *testing.T) {
 	f := NewFake(nil, nil, []Secret{
 		keySecret("no-key", time.Now(), false), // tls.crt only
@@ -65,8 +58,6 @@ func TestFakeClientFindActiveKeyMalformedFailsClosed(t *testing.T) {
 	}
 }
 
-// TestFakeClientFindActiveKeyMissingTLSField verifies that a key
-// missing tls.key is filtered out even when a valid newer one exists.
 func TestFakeClientFindActiveKeyMissingTLSField(t *testing.T) {
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -85,9 +76,6 @@ func TestFakeClientFindActiveKeyMissingTLSField(t *testing.T) {
 	}
 }
 
-// TestFakeClientFindActiveKeyAmbiguousFailsClosed verifies that two
-// keys with the SAME name AND timestamp are indistinguishable and
-// fail closed rather than silently picking one.
 func TestFakeClientFindActiveKeyAmbiguousFailsClosed(t *testing.T) {
 	same := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 
@@ -101,10 +89,8 @@ func TestFakeClientFindActiveKeyAmbiguousFailsClosed(t *testing.T) {
 	}
 }
 
-// TestFakeClientFindAllKeysReturnsEveryRetainedKey verifies that
-// decryption can reach every key the controller still holds, not just
-// the active one. This is the property that lets a SealedSecret sealed
-// before a key rotation still be decrypted.
+// Decryption must reach every key the controller still holds, not just the active one:
+// that is what lets a SealedSecret sealed before a key rotation still be decrypted.
 func TestFakeClientFindAllKeysReturnsEveryRetainedKey(t *testing.T) {
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -136,9 +122,6 @@ func TestFakeClientFindAllKeysReturnsEveryRetainedKey(t *testing.T) {
 	}
 }
 
-// TestFakeClientFindAllKeysFailsClosed verifies that a controller with
-// no usable key reports an error rather than handing the decrypt path
-// an empty set.
 func TestFakeClientFindAllKeysFailsClosed(t *testing.T) {
 	empty := NewFake(nil, nil, nil)
 	if _, err := empty.FindAllControllerKeys(context.Background()); err == nil {

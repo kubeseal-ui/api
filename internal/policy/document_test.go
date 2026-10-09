@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// validDocument is the schema's own example, reduced to the authz half. It is
-// the shape an operator copies out of internal-docs, so parsing it is the test
-// that matters most: a document the docs call valid that the loader rejects
-// would send every reader of those docs down a dead end.
+// validDocument is the schema's own example, reduced to the authz half: the shape an operator
+// copies out of internal-docs, so parsing it is the test that matters most.
 const validDocument = `
 version: 1
 
@@ -66,9 +64,8 @@ func TestParseDocumentAcceptsTheSchemaExample(t *testing.T) {
 	}
 }
 
-// A built-in role listed with exactly its canonical bundle is how a document
-// stays self-describing; a document that redefines one is how a ConfigMap
-// quietly changes what platform-admin means. Only the first is allowed.
+// Redeclaring a built-in with a different bundle is how a ConfigMap quietly changes what
+// platform-admin means; listing it canonically is how a document stays self-describing.
 func TestParseDocumentBuiltInRoleRedeclaration(t *testing.T) {
 	canonical := `
 version: 1
@@ -118,9 +115,8 @@ func TestParseDocumentRejections(t *testing.T) {
 			wantSub: "version",
 		},
 		{
-			// A singular slip on a plural field is the realistic case this
-			// guards: it is unknown, so the document is refused rather than
-			// read as a section that grants nothing.
+			// A singular slip on a plural field is the realistic case this guards: it is
+			// unknown, so the document is refused rather than read as granting nothing.
 			name:    "unknown field",
 			doc:     "version: 1\nauthz:\n  capability:\n    - metadata:read\n",
 			wantSub: "capability",
@@ -199,9 +195,8 @@ func TestParseDocumentRejectsEmptyInput(t *testing.T) {
 	}
 }
 
-// A document written to the published schema carries a git: section. Refusing
-// it would make the documented file unusable, so it is read past — but only
-// past: nothing in it may influence authorization.
+// A document written to the published schema carries a git: section. Refusing it would make
+// the documented file unusable, so it is read past — but only past.
 func TestParseDocumentIgnoresTheGitSection(t *testing.T) {
 	doc := `
 version: 1
@@ -229,17 +224,13 @@ git:
 	if err := store.Apply(parsed); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	// The git half must not have created a mapping: mappings come from
-	// GITOPS_NAMESPACES, and a namespace appearing here because of an unread
-	// section would be authorization the operator never configured.
+	// The git half must not have created a mapping: a namespace appearing here because of an
+	// unread section would be authorization the operator never configured.
 	if _, ok := store.GetGitMapping("payments"); ok {
 		t.Error("the git section created a namespace mapping")
 	}
 }
 
-// The git half being inert is a property of the loader, which is where the
-// warning about it is emitted — but Apply is what the loader calls, so this
-// pins that a git-only document still applies its (empty) authorization.
 func TestParseDocumentAcceptsAnAuthzOnlyDocument(t *testing.T) {
 	doc, err := ParseDocument([]byte("version: 1\nauthz: {}\n"))
 	if err != nil {
@@ -250,8 +241,8 @@ func TestParseDocumentAcceptsAnAuthzOnlyDocument(t *testing.T) {
 	}
 }
 
-// Validate collects every problem rather than stopping at the first, so an
-// operator fixing a ConfigMap learns the whole list in one pass.
+// Validate collects every problem rather than stopping at the first, so one pass over a broken
+// ConfigMap teaches the whole list.
 func TestValidateReportsEveryProblem(t *testing.T) {
 	doc := Document{
 		Version: 7,

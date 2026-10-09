@@ -1,6 +1,4 @@
-// Package main wires the kubeseal-ui api server.
-//
-// The server exposes health endpoints and authenticated Phase 2 API routes.
+// Package main wires the kubeseal-ui api server: health endpoints and the authenticated API routes.
 package main
 
 import (
@@ -32,9 +30,8 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// devPrivProvider is a development-only PrivateKeyProvider that returns
-// a fixed RSA key for local testing when ENABLE_DECRYPT=true.
-// Production uses the Kubernetes-backed provider.
+// devPrivProvider is a development-only PrivateKeyProvider returning a fixed RSA key for local
+// testing when ENABLE_DECRYPT=true. Production uses the Kubernetes-backed provider.
 type devPrivProvider struct {
 	key *rsa.PrivateKey
 }
@@ -43,9 +40,8 @@ func (d *devPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, err
 	return []*rsa.PrivateKey{d.key}, nil
 }
 
-// discoverOIDC performs provider discovery when the OIDC environment is
-// complete; incomplete or absent configuration returns nil and the router
-// stays fail-closed.
+// discoverOIDC performs provider discovery when the OIDC environment is complete; incomplete or
+// absent configuration returns nil and the router stays fail-closed.
 func discoverOIDC(cfg *config.Config) *oidc.Provider {
 	if cfg.OIDCIssuer == "" || cfg.OIDCClientID == "" {
 		if cfg.OIDCIssuer != "" || cfg.OIDCClientID != "" {
@@ -85,10 +81,9 @@ func discoverOIDC(cfg *config.Config) *oidc.Provider {
 	return provider
 }
 
-// gitopsTransport builds the production go-git transport and typed
-// credential resolver from configuration. Returns nils when GitOps is
-// disabled — the serving path then has no Git-backed editing, matching
-// the fail-closed contract.
+// gitopsTransport builds the production go-git transport and typed credential resolver from
+// configuration. Both are nil when GitOps is disabled, leaving the serving path with no Git-backed
+// editing — the fail-closed contract.
 func gitopsTransport(cfg *config.Config) (gitops.GitTransport, error) {
 	if !cfg.GitOpsEnabled {
 		return nil, nil
@@ -113,9 +108,8 @@ func gitopsTransport(cfg *config.Config) (gitops.GitTransport, error) {
 	return transport, nil
 }
 
-// parseCredentialRefs parses the comma-separated typed credential list.
-// Each entry is auth_ref:mode:username:token_file; empty usernames are
-// allowed (the transport defaults them).
+// parseCredentialRefs parses the comma-separated typed credential list, each entry being
+// auth_ref:mode:username:token_file; empty usernames are allowed (the transport defaults them).
 func parseCredentialRefs(raw string) []gitops.FileCredential {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -138,10 +132,9 @@ func parseCredentialRefs(raw string) []gitops.FileCredential {
 	return refs
 }
 
-// parseMappingSpecs parses the comma-separated namespace mapping list.
-// Each entry is namespace:repo:branch:path_template:auth_ref:mode with an
-// optional :adapter_name suffix for proposal mode; path templates use '-'
-// in place of '/'.
+// parseMappingSpecs parses the comma-separated namespace mapping list, each entry being
+// namespace:repo:branch:path_template:auth_ref:mode with an optional :adapter_name suffix for
+// proposal mode; path templates use '-' in place of '/'.
 func parseMappingSpecs(raw string) []policy.GitMappingSpec {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -203,10 +196,9 @@ type proposalAdapterSpec struct {
 	BaseURL   string
 }
 
-// parseProposalAdapterSpecs parses the comma-separated proposal adapter
-// list. Each entry is name:type:token_file[:base_url]. Parsing fails
-// closed: a malformed entry, a missing name/type/token file, or a
-// duplicate name is an error rather than a silently ignored adapter.
+// parseProposalAdapterSpecs parses the comma-separated proposal adapter list, each entry being
+// name:type:token_file[:base_url]. Parsing fails closed: a malformed entry, a missing name/type/token
+// file, or a duplicate name is an error rather than a silently ignored adapter.
 func parseProposalAdapterSpecs(raw string) ([]proposalAdapterSpec, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
@@ -218,8 +210,7 @@ func parseProposalAdapterSpecs(raw string) ([]proposalAdapterSpec, error) {
 		if entry == "" {
 			continue
 		}
-		// SplitN with a limit of 4 keeps colons inside the base URL
-		// (https://host/path) intact.
+		// SplitN with a limit of 4 keeps colons inside the base URL (https://host/path) intact.
 		parts := strings.SplitN(entry, ":", 4)
 		if len(parts) < 3 {
 			return nil, fmt.Errorf("proposal adapter %q must be name:type:token_file[:base_url]", entry)
@@ -240,15 +231,13 @@ func parseProposalAdapterSpecs(raw string) ([]proposalAdapterSpec, error) {
 	return specs, nil
 }
 
-// proposalAdapters returns the named host adapters available to
-// values-driven seeding. The registry grows as concrete host adapters
-// land; platform-agnostic delivery requires none.
+// proposalAdapters returns the named host adapters available to values-driven seeding. The registry
+// grows as concrete host adapters land; platform-agnostic delivery requires none.
 //
-// "github" opens pull requests via the GitHub REST API using a
-// fine-grained PAT read from a Secret-mounted file per call. A namespace
-// that references an adapter name this registry does not hold makes
-// PolicyStore.SeedGitMappings fail at boot (fail-closed), so an
-// unconfigured adapter can never serve proposal deliveries.
+// "github" opens pull requests via the GitHub REST API using a fine-grained PAT read from a
+// Secret-mounted file per call. A namespace referencing an adapter name this registry does not hold
+// makes SeedGitMappings fail at boot (fail-closed), so an unconfigured adapter can never serve
+// proposal deliveries.
 func proposalAdapters(cfg *config.Config) (map[string]gitops.ProposalProvider, error) {
 	specs, err := parseProposalAdapterSpecs(cfg.GitOpsProposalAdapters)
 	if err != nil {
@@ -273,11 +262,9 @@ func proposalAdapters(cfg *config.Config) (map[string]gitops.ProposalProvider, e
 	return adapters, nil
 }
 
-// setupTelemetryFromConfig derives the telemetry options from the
-// configuration and mounts the SDK. Optional: no endpoint keeps /metrics
-// at 503 and logging plain, so local and test boots never make network
-// calls. A setup failure disables telemetry with a warning rather than
-// taking the API down.
+// setupTelemetryFromConfig derives the telemetry options from the configuration and mounts the SDK.
+// Optional: no endpoint keeps /metrics at 503 and logging plain, so local and test boots never make
+// network calls. A setup failure disables telemetry with a warning rather than taking the API down.
 func setupTelemetryFromConfig(cfg *config.Config, logger *slog.Logger) *observability.Telemetry {
 	version := cfg.OTelServiceVersion
 	if version == "" {
@@ -337,11 +324,6 @@ func main() {
 	}
 	telemetry := setupTelemetryFromConfig(&cfg, logger)
 
-	// Phase 1: construct all providers and services but DO NOT wire
-	// protected routes. The chi router only exposes /healthz and /readyz.
-	// Protected handlers are compiled and unit-tested but remain unreachable
-	// until Phase 2 adds the auth middleware.
-
 	// Certificate provider (lazy fetch + TTL cache)
 	var certProvider certprovider.Provider
 	if cfg.KubeSealCertURL != "" {
@@ -350,7 +332,7 @@ func main() {
 		})
 	} else {
 		slog.Warn("KUBESEAL_CERT_URL not set; encryption will fail until configured")
-		certProvider = &staticCertProvider{} // placeholder that returns error
+		certProvider = &staticCertProvider{}
 	}
 
 	// Kubernetes client (fake in explicit fake mode; production client otherwise)
@@ -384,8 +366,7 @@ func main() {
 	}
 	cryptoWrapper := crypto.New(certProvider, privProvider)
 
-	// Router with production middleware chain (request ID, recovery, timeout, logging)
-	// OIDC discovery is injected by the server startup path.
+	// Router with production middleware chain (request ID, recovery, timeout, logging).
 	oidcProvider := discoverOIDC(&cfg)
 	if cfg.OIDCIssuer != "" && cfg.SessionSigningKey == "" {
 		slog.Error("SESSION_SIGNING_KEY is not configured while OIDC is enabled; /api/v1 routes will fail closed")
@@ -405,17 +386,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The policy store is built here rather than inside newRouter so that the
-	// loader below, which re-reads the document on SIGHUP, mutates the store the
-	// serving path reads from.
+	// The policy store is built here rather than inside newRouter so that the loader below, which
+	// re-reads the document on SIGHUP, mutates the store the serving path reads from.
 	policyStore := policy.NewPolicyStore()
 	var policyLoader *policy.Loader
 	if cfg.ConfigPath != "" {
 		policyLoader, err = policy.NewLoader(cfg.ConfigPath, policyStore)
 		if err != nil {
-			// No previous generation exists at boot, so there is nothing valid
-			// to fall back to: refuse to start rather than serve a policy the
-			// operator did not write.
+			// No previous generation exists at boot, so there is nothing valid to fall back to:
+			// refuse to start rather than serve a policy the operator did not write.
 			slog.Error("authorization policy load failed", "path", cfg.ConfigPath, "error", err)
 			os.Exit(1)
 		}
@@ -484,17 +463,16 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
-	// Flush metrics, traces, and buffered logs before exit so a
-	// rolling restart loses no in-flight signal.
+	// Flush metrics, traces, and buffered logs before exit so a rolling restart loses no in-flight
+	// signal.
 	telemetry.Shutdown(shutdownCtx)
 }
 
 // watchPolicyReloads re-reads the policy document on SIGHUP until ctx ends.
 //
-// A failed reload is logged and the previous generation stays in force — the
-// alternative, falling back to no policy, would turn a file being edited into a
-// lockout. The failure also reaches /readyz through the loader, which is what
-// makes a bad ConfigMap rollout visible rather than merely logged.
+// A failed reload is logged and the previous generation stays in force — falling back to no policy
+// would turn a file being edited into a lockout. The failure also reaches /readyz through the loader,
+// which makes a bad ConfigMap rollout visible rather than merely logged.
 func watchPolicyReloads(ctx context.Context, loader *policy.Loader) {
 	reloads := make(chan os.Signal, 1)
 	signal.Notify(reloads, syscall.SIGHUP)
@@ -514,8 +492,7 @@ func watchPolicyReloads(ctx context.Context, loader *policy.Loader) {
 	}
 }
 
-// staticCertProvider is a placeholder that returns an error.
-// Used when KUBESEAL_CERT_URL is not configured.
+// staticCertProvider is the placeholder used when KUBESEAL_CERT_URL is not configured.
 type staticCertProvider struct{}
 
 func (s *staticCertProvider) Get(_ context.Context) (*x509.Certificate, error) {
@@ -547,11 +524,8 @@ func printStartupBanner(version string, port int) {
 	fmt.Printf("Kubeseal UI API Server  •  Version: %s  •  Port: :%d\n\n", version, port)
 }
 
-// devPrivateKey generates a deterministic RSA key for local development.
-// NOT for production use.
+// devPrivateKey generates an RSA key for local development. NOT for production use.
 func devPrivateKey() *rsa.PrivateKey {
-	// This is a placeholder; Phase 2 will use the real controller key from K8s.
-	// For Phase 1 dev we just need a valid key object to satisfy the interface.
 	key, err := rsa.GenerateKey(nil, 2048)
 	if err != nil {
 		panic(fmt.Sprintf("devPrivateKey: generate key: %v", err))

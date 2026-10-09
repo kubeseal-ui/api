@@ -36,8 +36,8 @@ func capabilityNames(caps []policy.Capability) []string {
 	return names
 }
 
-// A grant scoped to one namespace authorizes that namespace and nothing else.
-// This is the property that makes the whole namespace dimension worth having.
+// A grant scoped to one namespace authorizes that namespace and nothing else — the property that
+// makes the namespace dimension worth having.
 func TestScopedGrantAuthorizesOnlyItsNamespace(t *testing.T) {
 	k8s := protectedK8s{
 		secrets: []kubernetes.SealedSecret{
@@ -62,8 +62,8 @@ func TestScopedGrantAuthorizesOnlyItsNamespace(t *testing.T) {
 	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied", "")
 }
 
-// The namespace listing is filtered rather than gatekept: a caller with a grant
-// in one namespace sees that one, not a 403 and not everything.
+// The namespace listing is filtered rather than gatekept: a caller with a grant in one namespace
+// sees that one, not a 403 and not everything.
 func TestNamespacesHandlerListsOnlyGrantedNamespaces(t *testing.T) {
 	k8s := protectedK8s{namespaces: []kubernetes.Namespace{{Name: "payments"}, {Name: "development"}}}
 	h := NewProtectedHandlers(k8s, nil, false)
@@ -83,15 +83,14 @@ func TestNamespacesHandlerListsOnlyGrantedNamespaces(t *testing.T) {
 	if len(body.Namespaces) != 1 || body.Namespaces[0].Name != "payments" {
 		t.Fatalf("namespaces = %+v, want just payments", body.Namespaces)
 	}
-	// The per-namespace capabilities travel with the namespace so the UI does
-	// not have to probe each endpoint for a 403.
+	// The per-namespace capabilities travel with the namespace so the UI need not probe for a 403.
 	if got := body.Namespaces[0].Capabilities; len(got) != 2 {
 		t.Fatalf("capabilities = %v, want metadata:read and secret:seal", got)
 	}
 }
 
-// An unscoped listing is the one place a caller can ask about namespaces it
-// cannot name, so the results — not just the gate — have to be filtered.
+// An unscoped listing is the one place a caller can ask about namespaces it cannot name, so the
+// results — not just the gate — have to be filtered.
 func TestSecretsHandlerFiltersAnUnscopedListing(t *testing.T) {
 	k8s := protectedK8s{
 		secrets: []kubernetes.SealedSecret{
@@ -124,8 +123,8 @@ func TestSecretsHandlerFiltersAnUnscopedListing(t *testing.T) {
 	}
 }
 
-// A caller with no grant anywhere is refused before the listing, rather than
-// being handed an empty one that looks like "nothing exists".
+// A caller with no grant anywhere is refused before the listing, rather than handed an empty one
+// that looks like "nothing exists".
 func TestUnscopedListingRequiresAGrantSomewhere(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "api", Namespace: "payments"}}}, nil, false)
 	rr := httptest.NewRecorder()
@@ -135,8 +134,8 @@ func TestUnscopedListingRequiresAGrantSomewhere(t *testing.T) {
 	}
 }
 
-// The path picker offers destinations. A namespace the caller cannot read is
-// not a destination, whatever the Git mapping says about it.
+// The path picker offers destinations: a namespace the caller cannot read is not a destination,
+// whatever the Git mapping says about it.
 func TestGitPathsHandlerOffersOnlyGrantedNamespaces(t *testing.T) {
 	store := policy.NewPolicyStore()
 	for _, namespace := range []string{"payments", "development"} {
@@ -169,12 +168,10 @@ func TestGitPathsHandlerOffersOnlyGrantedNamespaces(t *testing.T) {
 	}
 }
 
-// The wildcard mapping is not a namespace, so the namespace filter does not
-// apply to it: it is the mapping every unmapped namespace falls back to (see
-// PolicyStore.GetGitMapping), and the client resolves it by the same fallback.
-// A deployment configured with a single wildcard mapping — the common shape —
-// therefore must still see it, or the delivery panel has no mode to name, while
-// a real namespace the caller cannot read stays hidden.
+// The wildcard mapping is not a namespace, so the namespace filter does not apply to it: it is the
+// mapping every unmapped namespace falls back to, and the client resolves it by the same fallback. A
+// deployment configured with a single wildcard mapping — the common shape — must still see it, or the
+// delivery panel has no mode to name; a real namespace the caller cannot read stays hidden.
 func TestGitPathsHandlerKeepsTheWildcardMapping(t *testing.T) {
 	store := policy.NewPolicyStore()
 	for _, namespace := range []string{policy.AnyNamespace, "payments", "development"} {
@@ -218,10 +215,9 @@ func TestGitPathsHandlerKeepsTheWildcardMapping(t *testing.T) {
 	}
 }
 
-// The seal gate fires before the body is read, so a caller who holds secret:seal
-// nowhere is refused without their manifest being parsed. A body that is not
-// even valid JSON is the proof: 403 means the decode never ran, 400 would mean
-// it did.
+// The seal gate fires before the body is read, so a caller who holds secret:seal nowhere is refused
+// without their manifest being parsed. A body that is not even valid JSON is the proof: 403 means the
+// decode never ran, 400 would mean it did.
 func TestEncryptRefusesBeforeDecodingForACallerWhoCanSealNowhere(t *testing.T) {
 	h := NewProtectedHandlers(nil, nil, false)
 	rr := httptest.NewRecorder()
@@ -231,11 +227,11 @@ func TestEncryptRefusesBeforeDecodingForACallerWhoCanSealNowhere(t *testing.T) {
 	}
 }
 
-// Holding secret:seal somewhere is not an answer to "may this caller seal here".
-// The second gate asks the namespace question once the body names it.
+// Holding secret:seal somewhere is not an answer to "may this caller seal here"; the second gate
+// asks the namespace question once the body names it.
 func TestEncryptRequiresSealCapabilityInTheTargetNamespace(t *testing.T) {
-	// A crypto wrapper, not nil: the refusal must come from the namespace
-	// check rather than from the earlier "crypto unavailable" branch.
+	// A crypto wrapper, not nil: the refusal must come from the namespace check, not the earlier
+	// "crypto unavailable" branch.
 	h := NewProtectedHandlers(nil, crypto.New(protectedCertProvider{}, nil), false)
 	identity := scopedIdentity(nil, map[string][]policy.Capability{"payments": {policy.SecretSeal}})
 	body := `{"namespace":"development","name":"api","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: api\n  namespace: development\n"}`
@@ -247,9 +243,9 @@ func TestEncryptRequiresSealCapabilityInTheTargetNamespace(t *testing.T) {
 	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied", "")
 }
 
-// Delivery is an act in the namespace the mapping resolved to, so the grant has
-// to be there — this is the support case the whole change exists for: a group
-// mapped to platform-admin plus a delivery role scoped to one namespace.
+// Delivery is an act in the namespace the mapping resolved to, so the grant has to be there — the
+// support case the whole change exists for: a group mapped to platform-admin plus a delivery role
+// scoped to one namespace.
 func TestGitOpsDeliverRequiresCapabilityInTheMappedNamespace(t *testing.T) {
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{

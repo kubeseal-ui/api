@@ -15,9 +15,9 @@ import (
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
-// gitChangeBody builds a GitOps request body carrying a manifest as the client
-// sends it. Both endpoints verify that the payload is the SealedSecret the
-// request names, so a placeholder word is not a valid request.
+// gitChangeBody builds a GitOps request body carrying a manifest as the client sends it. Both
+// endpoints verify that the payload is the SealedSecret the request names, so a placeholder word is
+// not a valid request.
 func gitChangeBody(t *testing.T, namespace, name, manifest, baseCommit string) string {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"namespace": namespace, "name": name, "yaml": manifest, "base_commit": baseCommit})
@@ -27,8 +27,8 @@ func gitChangeBody(t *testing.T, namespace, name, manifest, baseCommit string) s
 	return string(body)
 }
 
-// sealedManifest is a minimal SealedSecret manifest for one identity, which is
-// the only shape either GitOps endpoint accepts.
+// sealedManifest is a minimal SealedSecret manifest for one identity, the only shape either GitOps
+// endpoint accepts.
 func sealedManifest(namespace, name string) string {
 	return "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: " + name +
 		"\n  namespace: " + namespace + "\nspec:\n  encryptedData:\n    key: ciphertext\n"
@@ -69,11 +69,10 @@ func TestGitOpsDryRunResolvesMappingAndReturnsEncryptedDiff(t *testing.T) {
 	}
 }
 
-// The dry run echoes the reviewed ciphertext back as manifest text. The client
-// stores `after` and posts it straight back to /gitops/deliver, so an encoded
-// echo — base64 is what encoding/json does to a []byte — would be committed to
-// the repository instead of the manifest, and the file would be unreadable to
-// the sealed-secrets controller.
+// The dry run echoes the reviewed ciphertext back as manifest text. The client stores `after` and
+// posts it straight back to /gitops/deliver, so an encoded echo — base64 is what encoding/json does
+// to a []byte — would be committed to the repository instead of the manifest, and the file would be
+// unreadable to the sealed-secrets controller.
 func TestGitOpsDryRunReturnsManifestTextNotBase64(t *testing.T) {
 	manifest := sealedManifest("payments", "api")
 	transport := gitops.NewLocalTransport()
@@ -105,9 +104,8 @@ func TestGitOpsDryRunReturnsManifestTextNotBase64(t *testing.T) {
 	}
 }
 
-// An encoded payload is refused before anything is written. Accepting it is how
-// a repository ends up holding a file that is valid base64 of a SealedSecret and
-// nothing any consumer can read.
+// An encoded payload is refused before anything is written: accepting it is how a repository ends up
+// holding a file that is valid base64 of a SealedSecret and nothing any consumer can read.
 func TestGitOpsDeliveryRejectsAnEncodedManifest(t *testing.T) {
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old-ciphertext", "abc")
@@ -194,9 +192,8 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 		t.Fatal("direct branch content changed by a proposal push")
 	}
 
-	// The retry reconciles by idempotency key and branch rather than
-	// creating duplicates: the same content lands on the same branch and
-	// the successful adapter returns exactly one review URL.
+	// The retry reconciles by idempotency key and branch rather than creating duplicates: the same
+	// content lands on the same branch and the successful adapter returns exactly one review URL.
 	mapping.ProposalAdapter = localProposalAdapter{}
 	if err := store.SetGitMapping(mapping); err != nil {
 		t.Fatal(err)
@@ -220,17 +217,16 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 	if result.ProposalURL != "https://review.test/1" || result.ArgoVerified {
 		t.Fatalf("unexpected retry result: %+v", result)
 	}
-	// The proposal branch names the secret's identity, not the repository or
-	// the file path, so both proposal endpoints and every retry land on one
-	// branch. Deriving it from the path instead produced a different branch
-	// per rendered path and broke retry reconciliation.
+	// The proposal branch names the secret's identity, not the repository or the file path, so both
+	// proposal endpoints and every retry land on one branch. Deriving it from the path instead
+	// produced a different branch per rendered path and broke retry reconciliation.
 	if result.Branch != "kubeseal-ui/payments-api" {
 		t.Fatalf("branch = %q, want kubeseal-ui/payments-api", result.Branch)
 	}
 }
 
 func TestGitOpsSyncStatusOptionADiscovery(t *testing.T) {
-	// Seed a secret in Git located in an arbitrary subfolder (not at default pathTemplate)
+	// A secret in Git in an arbitrary subfolder, not at the default pathTemplate.
 	gitYAML := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: secret-value\n"
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{
@@ -324,7 +320,7 @@ func TestGitOpsSyncExecuteLiveToGit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verifies target path used the Option A discovered path
+	// The sync targeted the discovered path, not the rendered template.
 	if res["file_path"] != "custom/apps/secrets/kubeseal-cred.yaml" {
 		t.Fatalf("expected sync to target discovered path, got %v", res["file_path"])
 	}
@@ -332,7 +328,6 @@ func TestGitOpsSyncExecuteLiveToGit(t *testing.T) {
 		t.Fatalf("expected argocd_sync_verified to be false")
 	}
 
-	// Verify content pushed to Git matches the live YAML
 	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{
 		Repository: "platform",
 		Branch:     "main",
@@ -346,16 +341,11 @@ func TestGitOpsSyncExecuteLiveToGit(t *testing.T) {
 	}
 }
 
-// TestGitOpsSyncRefusesALiveObjectThatIsNotASealedSecret covers the sync write
-// path's share of the manifest guard.
-//
-// Sync reads its payload from Kubernetes rather than from the request, so the
-// payload is a SealedSecret for this identity by construction and the guard
-// cannot fire today. It is pinned anyway because the guard is what makes
-// "nothing but a manifest this mapping owns is committed" a property of the
-// product rather than of two of its three write paths — and a write path that
-// is exempt only because it currently cannot be reached is a hole waiting for
-// the next call site.
+// TestGitOpsSyncRefusesALiveObjectThatIsNotASealedSecret covers the sync write path's share of the
+// manifest guard. Sync reads its payload from Kubernetes rather than the request, so the payload is a
+// SealedSecret for this identity by construction and the guard cannot fire today; it is pinned anyway
+// because the guard is what makes "nothing but a manifest this mapping owns is committed" a property
+// of the product rather than of two of its three write paths.
 func TestGitOpsSyncRefusesALiveObjectThatIsNotASealedSecret(t *testing.T) {
 	const existing = "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nspec:\n  encryptedData:\n    key: old-cipher\n"
 	const path = "custom/apps/secrets/kubeseal-cred.yaml"
@@ -371,9 +361,8 @@ func TestGitOpsSyncRefusesALiveObjectThatIsNotASealedSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A live object that is not a SealedSecret: the identity it is stored under
-	// says nothing about the manifest inside it, which is exactly the gap the
-	// guard closes.
+	// A live object that is not a SealedSecret: the identity it is stored under says nothing about
+	// the manifest inside it, which is exactly the gap the guard closes.
 	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{
 		{Name: "kubeseal-cred", Namespace: "cluster", YAML: "apiVersion: v1\nkind: Secret\nmetadata:\n  name: kubeseal-cred\n  namespace: cluster\nstringData:\n  password: plaintext\n"},
 	}}
@@ -400,21 +389,18 @@ func TestGitOpsSyncRefusesALiveObjectThatIsNotASealedSecret(t *testing.T) {
 	}
 }
 
-// deliveryManifest is a SealedSecret for one identity with a distinguishable
-// ciphertext, so a test can tell which content a repository file holds.
+// deliveryManifest is a SealedSecret for one identity with a distinguishable ciphertext, so a test
+// can tell which content a repository file holds.
 func deliveryManifest(namespace, name, ciphertext string) string {
 	return strings.Replace(sealedManifest(namespace, name), "ciphertext", ciphertext, 1)
 }
 
-// renderedPath returns the destination the store's mapping renders for one
-// identity, which is where a delivery resolves when the client names no path.
+// renderedPath returns the destination the store's mapping renders for one identity, which is where a
+// delivery resolves when the client names no path.
 //
-// A test that names a path back to the endpoints derives it here rather than
-// writing out a literal: the literal is what the mapping renders for *some*
-// identity, and one that has drifted from the identity under test is a path
-// this mapping does not render here at all. The endpoint then refuses it — a
-// 400 that is correct for the request and reads as a failure of the rule the
-// test meant to pin.
+// A test that names a path back to the endpoints derives it here rather than writing a literal: a
+// literal that has drifted from the identity under test is a path this mapping does not render, and
+// the endpoint then refuses it with a 400 that reads as a failure of the rule the test meant to pin.
 func renderedPath(t *testing.T, store *policy.PolicyStore, namespace, name string) string {
 	t.Helper()
 	mapping, ok := store.GetGitMapping(namespace)
@@ -428,19 +414,15 @@ func renderedPath(t *testing.T, store *policy.PolicyStore, namespace, name strin
 	return path
 }
 
-// TestGitOpsDeliverResolvesTheDiscoveredPathWithoutBeingTold covers the write
-// side of source discovery.
+// TestGitOpsDeliverResolvesTheDiscoveredPathWithoutBeingTold covers the write side of source
+// discovery. The mapping's template is the *default* file, not necessarily the one the manifest lives
+// in: when a Secret is kept in an application subdirectory the templated path is vacant, and a
+// delivery that assumed the template would create a second file claiming an identity that already has
+// one — leaving the application to read the stale ciphertext from the file nothing updated.
 //
-// The mapping's template is the *default* file, not necessarily the one the
-// manifest lives in: when a Secret is kept in an application subdirectory the
-// templated path is vacant, and a delivery that assumed the template would
-// create a second file claiming an identity that already has one — leaving the
-// application to read the stale ciphertext from the file nothing updated.
-//
-// The mapping here has no AllowedPaths on purpose: that is the configuration
-// in which the mapping's own rule admits nothing but the template, so a client
-// cannot name the discovered file and only the server's own discovery can put
-// the change where it belongs.
+// The mapping has no AllowedPaths on purpose: its own rule then admits nothing but the template, so a
+// client cannot name the discovered file and only the server's own discovery can put the change where
+// it belongs.
 func TestGitOpsDeliverResolvesTheDiscoveredPathWithoutBeingTold(t *testing.T) {
 	const discovered = "custom/apps/secrets/api.yaml"
 	const templated = "clusters/payments/api.yaml"
@@ -477,21 +459,19 @@ func TestGitOpsDeliverResolvesTheDiscoveredPathWithoutBeingTold(t *testing.T) {
 	if string(snapshot.Content) != updated {
 		t.Fatalf("reviewed file not updated: %q", string(snapshot.Content))
 	}
-	// ...and the template is still vacant, which is what says no second file
-	// was created for this identity.
+	// ...and the template is still vacant, which is what says no second file was created.
 	if _, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: templated}, ""); !errors.Is(err, gitops.ErrNotFound) {
 		t.Fatalf("a second file was created at the templated path %s (err=%v)", templated, err)
 	}
 }
 
-// TestGitOpsDeliverRefusesAPathThatIsNotThisSecrets is the other half of that
-// rule: the client may choose among files that already belong to this
-// SealedSecret, and refusing is what it gets for choosing any other.
+// TestGitOpsDeliverRefusesAPathThatIsNotThisSecrets is the other half of that rule: the client may
+// choose among files that already belong to this SealedSecret, and refusing is what it gets for
+// choosing any other.
 //
-// The mapping admits only its template, and the manifest is there — so a client
-// naming a different file is asking to write somewhere this identity has no
-// manifest, which is a bad request rather than a silent redirect to a file the
-// operator never reviewed.
+// The mapping admits only its template and the manifest is there, so a client naming a different file
+// is asking to write somewhere this identity has no manifest — a bad request rather than a silent
+// redirect to a file the operator never reviewed.
 func TestGitOpsDeliverRefusesAPathThatIsNotThisSecrets(t *testing.T) {
 	const templated = "clusters/payments/api.yaml"
 	const elsewhere = "clusters/payments/other.yaml"
@@ -535,15 +515,14 @@ func TestGitOpsDeliverRefusesAPathThatIsNotThisSecrets(t *testing.T) {
 	}
 }
 
-// TestGitOpsDeliverRefusesADifferentAllowedPathWhenTheFileExists is the case
-// the allowlist alone would let through: the client names a path the mapping
-// permits, but this identity's manifest is somewhere else.
+// TestGitOpsDeliverRefusesADifferentAllowedPathWhenTheFileExists is the case the allowlist alone
+// would let through: the client names a path the mapping permits, but this identity's manifest is
+// somewhere else.
 //
-// Honouring the name would write the reviewed ciphertext to a second file and
-// leave the application reading the first, which is the duplicate this whole
-// rule exists to prevent — and it would do it under a grant, so no policy check
-// would ever flag it. The allowlist decides where a *new* manifest may go; it
-// does not let a caller move one that already exists.
+// Honouring the name would write the reviewed ciphertext to a second file and leave the application
+// reading the first — the duplicate this rule exists to prevent — and it would do it under a grant,
+// so no policy check would flag it. The allowlist decides where a *new* manifest may go; it does not
+// let a caller move one that already exists.
 func TestGitOpsDeliverRefusesADifferentAllowedPathWhenTheFileExists(t *testing.T) {
 	const templated = "clusters/payments/api.yaml"
 	const allowed = "custom/apps/api.yaml"
@@ -585,25 +564,19 @@ func TestGitOpsDeliverRefusesADifferentAllowedPathWhenTheFileExists(t *testing.T
 	}
 }
 
-// TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet pins the
-// default destination against the allowlist.
-//
-// An allowlist that does not cover the template — allowed directories elsewhere
-// in the repository, which is the common shape — would otherwise make the
-// mapping's own default an invalid destination. That is the path
-// /secrets/encrypt echoes back for a create the operator chose no path for, so
-// the create would be handed a target_path the delivery endpoints then refuse,
-// and the failure would land on the last step of a flow that had already
-// sealed the Secret.
+// TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet pins the default destination against
+// the allowlist. An allowlist that does not cover the template — allowed directories elsewhere in the
+// repository, the common shape — would otherwise make the mapping's own default an invalid
+// destination. That is exactly the path /secrets/encrypt echoes back for a create the operator chose no
+// path for, so the create would be handed a target_path the delivery endpoints then refuse, and the
+// failure would land on the last step of a flow that had already sealed the Secret.
 func TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet(t *testing.T) {
 	const namespace = "payments"
-	// No file for this name anywhere on the branch, which is what makes this
-	// the create flow: with no target directory chosen, the destination is the
-	// mapping's own default.
+	// No file for this name anywhere on the branch: this is the create flow, and with no target
+	// directory chosen the destination is the mapping's own default.
 	const name = "new"
 
-	// Another file on the same branch, so the vacant destination is built on a
-	// head.
+	// Another file on the same branch, so the vacant destination is built on a head.
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/other.yaml"}, "other", "abc")
 
@@ -645,12 +618,10 @@ func TestGitOpsDeliverAcceptsTheMappingsTemplateWhenAnAllowlistIsSet(t *testing.
 	}
 }
 
-// TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew is the
-// control for the refusals above: a manifest with no file yet is exactly the
-// case the allowlist is for, so the named path is honoured here.
-//
-// Without this the duplicate fix could pass by refusing every named path, which
-// would take the create flow's target-directory selection away with it.
+// TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew is the control for the refusals
+// above: a manifest with no file yet is exactly the case the allowlist is for, so the named path is
+// honoured here. Without this the duplicate fix could pass by refusing every named path, taking the
+// create flow's target-directory selection away with it.
 func TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew(t *testing.T) {
 	const namespace = "payments"
 	const name = "new"
@@ -700,20 +671,17 @@ func TestGitOpsDeliverCreatesAtANamedAllowedPathWhenTheIdentityIsNew(t *testing.
 	}
 }
 
-// TestGitOpsSyncStatusReportsTheHeadForALiveOnlySecret covers the drift the sync
-// control exists for: a Secret that is live in the cluster and has no manifest
-// in Git at all.
+// TestGitOpsSyncStatusReportsTheHeadForALiveOnlySecret covers the drift the sync control exists for: a
+// Secret that is live in the cluster and has no manifest in Git at all.
 //
-// The head is what the client has to send back with the sync, and the sync
-// endpoint refuses an empty base commit. A git state that reports this drift
-// without one tells the client it can sync while handing it nothing to sync
-// with, so the status is read here for the head and the sync is then performed
-// with what the status reported rather than with a value the test already knew.
+// The head is what the client has to send back with the sync, and the sync endpoint refuses an empty
+// base commit. A git state that reports this drift without one tells the client it can sync while
+// handing it nothing to sync with, so the status is read here for the head and the sync is then
+// performed with what the status reported rather than with a value the test already knew.
 func TestGitOpsSyncStatusReportsTheHeadForALiveOnlySecret(t *testing.T) {
 	const head = "head-live-only"
-	// Git holds a different SealedSecret, so the branch has a head and the tree
-	// walk has something to search — this identity is genuinely absent from the
-	// repository rather than absent because the repository could not be read.
+	// Git holds a different SealedSecret, so the branch has a head and the tree walk has something to
+	// search — this identity is genuinely absent rather than absent because Git could not be read.
 	transport := gitops.NewLocalTransport()
 	transport.Seed(
 		gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/secrets/other.yaml"},
@@ -752,8 +720,7 @@ func TestGitOpsSyncStatusReportsTheHeadForALiveOnlySecret(t *testing.T) {
 	if status["drift_status"] != "live_only" {
 		t.Fatalf("drift_status = %v, want live_only", status["drift_status"])
 	}
-	// The two fields have to agree: can_sync is only an offer the client can
-	// take up if a base commit came with it.
+	// The two fields have to agree: can_sync is only an offer the client can take up with a head.
 	if status["can_sync"] != true {
 		t.Fatalf("can_sync = %v, want true", status["can_sync"])
 	}
@@ -774,8 +741,8 @@ func TestGitOpsSyncStatusReportsTheHeadForALiveOnlySecret(t *testing.T) {
 		t.Fatalf("sync status = %d, want 200: %s", rr.Code, rr.Body.String())
 	}
 
-	// The live Secret is in Git now, at the mapping's rendered path: there was no
-	// file for this identity to be discovered at.
+	// The live Secret is in Git now, at the mapping's rendered path: there was no file for this
+	// identity to be discovered at.
 	const path = "cluster/sealed-secrets/cluster/kubeseal-cred.yaml"
 	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: path}, "")
 	if err != nil {

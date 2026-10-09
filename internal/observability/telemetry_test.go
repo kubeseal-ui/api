@@ -21,8 +21,6 @@ func TestSetupTelemetryWithoutEndpointDisablesEverything(t *testing.T) {
 	if tel.MetricsEnabled {
 		t.Fatal("metrics enabled without an endpoint")
 	}
-	// /metrics must return 503 so ServiceMonitor marks the target down
-	// instead of scraping an empty page silently.
 	rec := httptest.NewRecorder()
 	tel.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -31,10 +29,8 @@ func TestSetupTelemetryWithoutEndpointDisablesEverything(t *testing.T) {
 }
 
 func TestSetupTelemetryMountsPrometheusExposition(t *testing.T) {
-	// The Prometheus exporter registers on the default registry; the
-	// metrics handler serves the exposition without any OTLP endpoint
-	// reachable in tests (the endpoint only affects the OTLP push
-	// exporter's construction, which succeeds without dialing).
+	// The endpoint only affects the OTLP push exporter's construction, which succeeds
+	// without dialing, so this mounts with no collector reachable.
 	tel, err := SetupTelemetry(TelemetryOptions{
 		Endpoint:         "localhost:14399",
 		ServiceName:      "kubeseal-ui-api",
@@ -59,8 +55,6 @@ func TestSetupTelemetryMountsPrometheusExposition(t *testing.T) {
 	if !tel.MetricsEnabled {
 		t.Fatal("metrics not enabled")
 	}
-	// Record one sample through the global meter, then serve /metrics and
-	// confirm the exposition is Prometheus text.
 	rec := httptest.NewRecorder()
 	tel.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusOK {
@@ -79,9 +73,6 @@ func TestTelemetryShutdownIsNilSafe(t *testing.T) {
 }
 
 func TestTelemetryOptionsDefaults(t *testing.T) {
-	// The default service name is applied inside SetupTelemetry, so the
-	// empty-options path must carry it; verify with the full setup (no
-	// endpoint, so nothing dials).
 	tel, err := SetupTelemetry(TelemetryOptions{ServiceName: "", Environment: ""})
 	if err != nil {
 		t.Fatal(err)

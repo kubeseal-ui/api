@@ -13,9 +13,8 @@ import (
 
 type kubePrivateKeyProvider struct{ client kubernetes.Client }
 
-// PrivateKeys returns every controller key the cluster still holds, not
-// just the active one. The sealed-secrets controller rotates its sealing
-// key on a schedule and retains the old keys so it can still decrypt
+// PrivateKeys returns every controller key the cluster still holds, not just the active one. The
+// controller rotates its sealing key on a schedule and retains the old keys so it can still decrypt
 // previously sealed secrets; decryption here has the same requirement.
 func (p kubePrivateKeyProvider) PrivateKeys(ctx context.Context) ([]*rsa.PrivateKey, error) {
 	keys, err := p.client.FindAllControllerKeys(ctx)
@@ -26,8 +25,7 @@ func (p kubePrivateKeyProvider) PrivateKeys(ctx context.Context) ([]*rsa.Private
 	for _, key := range keys {
 		parsed, err := parseRSAPrivateKeyPEM(key.Key)
 		if err != nil {
-			// One unreadable key must not disable decryption for the
-			// secrets the remaining keys can still open.
+			// One unreadable key must not disable decryption for the secrets the others can open.
 			slog.Warn("skipping unreadable controller key", "key", key.Name, "error", err)
 			continue
 		}

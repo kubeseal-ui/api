@@ -1,22 +1,11 @@
-// GitHub proposal adapter: opens a pull request for an already-pushed
-// proposal branch via the GitHub REST API.
+// GitHub proposal adapter: opens a pull request for an already-pushed proposal branch via the
+// GitHub REST API. The push itself is GoGitTransport's; this adapter runs after PushBranch
+// succeeds and only creates the host review object.
 //
-// Phase 5 deliverable. The push itself is performed by GoGitTransport;
-// this adapter only creates the host review object, so it is invoked after
-// PushBranch succeeds. It is wired behind the "github-pr" adapter name
-// chosen in Helm values (policy.GitMappingSpec.ProposalAdapterName) and
-// constructed from env vars at boot.
-//
-// Token handling: GITOPS_PROPOSAL_GITHUB_TOKEN_FILE points at a
-// Secret-mounted file (fine-grained PAT with Contents: Read+Write,
-// Metadata: Read). The token is read on every OpenProposal call so a
-// rotated Secret takes effect without a restart; tokens never appear in
-// configuration. GITOPS_PROPOSAL_GITHUB_BASE_URL overrides the API root
-// for GitHub Enterprise Server (empty = api.github.com).
-//
-// Fail-closed: an unknown repository shape, a missing token, or a
-// non-2xx response aborts before returning a result, so a misconfigured
-// adapter never surfaces a misleading "success".
+// The token is read from a Secret-mounted file on every call, so a rotated Secret takes effect
+// without a restart, and never appears in configuration. An unknown repository shape, a missing
+// token, or a non-2xx response aborts before returning a result, so a misconfigured adapter
+// never surfaces a misleading "success".
 package gitops
 
 import (
@@ -37,16 +26,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// otelTracer returns the tracer used for client spans. It reads the
-// global provider per call (late binding): spans start recording once
-// SetupTelemetry installs the SDK provider, so instrumentation is safe to
-// mount unconditionally.
+// otelTracer returns the tracer used for client spans. It reads the global provider per call
+// (late binding), so instrumentation is safe to mount before SetupTelemetry installs the SDK.
 func otelTracer() trace.Tracer {
 	return otel.Tracer("github.com/kubeseal-ui/api")
 }
 
-// propagationHeaderCarrier adapts http.Header to the OTel TextMapCarrier
-// for outgoing requests.
+// propagationHeaderCarrier adapts http.Header to the OTel TextMapCarrier for outgoing requests.
 type propagationHeaderCarrier struct{ header http.Header }
 
 func (c propagationHeaderCarrier) Get(key string) string { return c.header.Get(key) }
@@ -59,37 +45,32 @@ func (c propagationHeaderCarrier) Keys() []string {
 	return keys
 }
 
-// githubAPIBase is the default GitHub REST endpoint.
 const githubAPIBase = "https://api.github.com"
 
-// maxGitHubResponseBody bounds the PR creation response read into memory.
-// The html_url we consume is a few hundred bytes; the limit only stops an
-// unexpected multi-megabyte body from being buffered whole.
+// maxGitHubResponseBody bounds the PR creation response read into memory; the html_url we
+// consume is a few hundred bytes, so the limit only stops an unexpected multi-megabyte body
+// from being buffered whole.
 const maxGitHubResponseBody = 1 << 20
 
-// GitHubProposalOptions configures the GitHub proposal adapter.
 type GitHubProposalOptions struct {
-	// TokenFile is the path to a Secret-mounted file holding a
-	// fine-grained personal access token. Required.
+	// TokenFile is a Secret-mounted file holding a fine-grained personal access token.
 	TokenFile string
 	// BaseURL overrides the GitHub API root for GHES. Empty = api.github.com.
 	BaseURL string
-	// Client is the HTTP client used for API calls. May be nil to use
-	// a default 30s-timeout client. Tests inject an httptest server URL.
+	// Client is the HTTP client for API calls. Nil uses a default 30s-timeout client; tests
+	// inject an httptest server URL.
 	Client *http.Client
 }
 
 // GitHubProposalProvider opens GitHub pull requests for pushed branches.
-// Implements the ProposalProvider interface.
 type GitHubProposalProvider struct {
 	tokenFile string
 	baseURL   string
 	client    *http.Client
 }
 
-// NewGitHubProposalProvider builds the adapter and validates configuration.
-// A missing token file is a construction error: the API fails closed if
-// proposal mode cannot be satisfied.
+// NewGitHubProposalProvider builds the adapter and validates configuration. A missing token
+// file is a construction error: the API fails closed if proposal mode cannot be satisfied.
 func NewGitHubProposalProvider(opts GitHubProposalOptions) (*GitHubProposalProvider, error) {
 	if opts.TokenFile == "" {
 		return nil, errors.New("github proposal provider requires a token file")
@@ -105,9 +86,8 @@ func NewGitHubProposalProvider(opts GitHubProposalOptions) (*GitHubProposalProvi
 	return &GitHubProposalProvider{tokenFile: opts.TokenFile, baseURL: strings.TrimRight(baseURL, "/"), client: client}, nil
 }
 
-// OpenProposal opens a pull request on the already-pushed proposal branch.
-// The push commit must exist on the remote because PushBranch succeeded
-// before this call.
+// OpenProposal opens a pull request on the already-pushed proposal branch, so the push commit
+// exists on the remote by the time this runs.
 func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request ProposalRequest) (ProposalResult, error) {
 	if request.Push.Branch == "" || request.Push.Commit == "" {
 		return ProposalResult{}, errors.New("proposal requires a pushed branch and commit")
@@ -139,10 +119,9 @@ func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request Propo
 		return ProposalResult{}, fmt.Errorf("encode github pr request: %w", err)
 	}
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls", p.baseURL, owner, repo)
-	// The span is a client span (SpanKindClient) named per the
-	// observability contract; the W3C traceparent is injected into the
-	// outgoing request, so the host call correlates into the delivery
-	// trace. The token never lands in span attributes.
+	// A client span named per the observability contract, with the W3C traceparent injected
+	// below so the host call correlates into the delivery trace. The token never lands in
+	// span attributes.
 	ctx, span := otelTracer().Start(ctx, "GitHub.CreatePullRequest",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -193,8 +172,8 @@ func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request Propo
 	}, nil
 }
 
-// splitRepository splits "owner/repo" into its parts. A GitHub repository
-// reference is exactly two path segments; anything else is a config error.
+// splitRepository splits "owner/repo". A GitHub repository reference is exactly two path
+// segments; anything else is a config error.
 func splitRepository(repository string) (string, string, error) {
 	repository = strings.TrimSpace(repository)
 	if repository == "" {
@@ -207,11 +186,9 @@ func splitRepository(repository string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-// readTokenFile reads a pat file per call so Secret rotation takes effect
-// without a restart. Leading/trailing whitespace (including newlines) is
-// trimmed. An empty token is an error. The path is server-side policy: a
-// Secret mount path from configuration, never client input, so the gosec
-// G304 finding is accepted at the call site.
+// readTokenFile re-reads the PAT per call so Secret rotation needs no restart. The path is
+// server-side policy from a Secret mount, never client input, which is why the gosec G304
+// finding is accepted here.
 func readTokenFile(path string) (string, error) { // #nosec G304
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -224,8 +201,6 @@ func readTokenFile(path string) (string, error) { // #nosec G304
 	return token, nil
 }
 
-// defaultProposalTitle builds a human-readable PR title from the sealed
-// secret path when the caller did not supply one.
 func defaultProposalTitle(path string) string {
 	return fmt.Sprintf("[kubeseal-ui] sealed secret update at %s", path)
 }
@@ -245,7 +220,7 @@ type githubPullRequest struct {
 	Body  string `json:"body"`
 }
 
-// githubPullRequestResponse is the subset of the GitHub PR response we use.
+// githubPullRequestResponse is the subset of the GitHub PR response we use: html_url.
 type githubPullRequestResponse struct {
 	HTMLURL string `json:"html_url"`
 }

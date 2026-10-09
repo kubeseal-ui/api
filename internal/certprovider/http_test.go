@@ -1,6 +1,3 @@
-// Package certprovider tests — RED-GREEN-REFACTOR per the
-// test-driven-development skill. One test at a time, watched fail,
-// then minimum implementation.
 package certprovider
 
 import (
@@ -20,9 +17,8 @@ import (
 	"time"
 )
 
-// testCertPEM generates a real self-signed EC certificate as PEM bytes
-// and returns it along with a cleanup. Real PEM parsing is what the
-// implementation must do, so tests use real PEM bytes, not fake strings.
+// testCertPEM returns a real self-signed EC certificate as PEM bytes; the implementation
+// must parse real PEM, so the tests do not use fake strings.
 func testCertPEM(t *testing.T) string {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -45,17 +41,9 @@ func testCertPEM(t *testing.T) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
-// TestHTTPProviderCaching is the first tracer bullet. A Provider
-// driven by an HTTP server must:
-//   - fetch the cert on first call
-//   - return the same parsed cert on subsequent calls within TTL
-//   - NOT re-hit the upstream while the cache is fresh
-//
-// We assert both correctness (same certificate returned) AND the
-// upstream-call count (the only way to prove caching actually
-// happened — returning a cached value without checking the call
-// count would still pass if the impl happened to return the same
-// cert twice by accident).
+// TestHTTPProviderCaching asserts the upstream call count as well as the returned
+// certificate: returning a cached value without it would still pass if the impl happened
+// to return the same cert twice by accident.
 func TestHTTPProviderCaching(t *testing.T) {
 	var calls atomic.Int32
 	pemBytes := testCertPEM(t)
@@ -92,9 +80,7 @@ func TestHTTPProviderCaching(t *testing.T) {
 	}
 }
 
-// TestHTTPProviderTimeout documents that a slow upstream is bounded
-// by the configured Timeout. The Provider MUST NOT hang forever —
-// a stuck controller cert endpoint would stall every encrypt request.
+// A stuck controller cert endpoint must not stall every encrypt request.
 func TestHTTPProviderTimeout(t *testing.T) {
 	pemBytes := testCertPEM(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -118,16 +104,12 @@ func TestHTTPProviderTimeout(t *testing.T) {
 	}
 }
 
-// TestHTTPProviderResponseSizeLimit documents that an oversized
-// response body is rejected. A runaway upstream must not OOM the
-// api pod. The implementation uses io.LimitReader; the test
-// verifies the boundary: a body at exactly MaxResponseBytes is
-// accepted, one just above is rejected.
+// An oversized response must be rejected rather than OOM the pod; the boundary is read
+// through io.LimitReader.
 func TestHTTPProviderResponseSizeLimit(t *testing.T) {
 	pemBytes := testCertPEM(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// Prefix the valid PEM with garbage to push past the size limit.
-		// MaxResponseBytes is 1024 (tiny) so the small PEM + padding exceeds it.
+		// Garbage ahead of the PEM pushes the body past the 1024-byte limit.
 		padding := strings.Repeat("A", 1024)
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		_, _ = w.Write([]byte(padding + pemBytes))
@@ -148,9 +130,8 @@ func TestHTTPProviderResponseSizeLimit(t *testing.T) {
 	}
 }
 
-// TestHTTPProviderInvalidPEM documents that a response with valid
-// HTTP status but non-PEM content is rejected. The caller must never
-// receive a nil cert or a partially-parsed result.
+// A valid HTTP status with non-PEM content must fail rather than hand the caller a nil or
+// partially-parsed cert.
 func TestHTTPProviderInvalidPEM(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -173,11 +154,7 @@ func TestHTTPProviderInvalidPEM(t *testing.T) {
 	}
 }
 
-// TestHTTPProviderRotation documents that after the TTL expires,
-// the Provider re-fetches from the upstream. The test uses a
-// controllable now-function by relying on a short TTL and real
-// wall-clock time, asserting the upstream call count increments
-// after the cache window closes.
+// Past the TTL the next Get must re-fetch, which is how rotation is picked up.
 func TestHTTPProviderRotation(t *testing.T) {
 	var calls atomic.Int32
 	pemBytes := testCertPEM(t)
@@ -194,7 +171,6 @@ func TestHTTPProviderRotation(t *testing.T) {
 		Client: &http.Client{Timeout: 5 * time.Second},
 	})
 
-	// First call: fetch
 	if _, err := p.Get(t.Context()); err != nil {
 		t.Fatalf("first Get: %v", err)
 	}
@@ -202,7 +178,6 @@ func TestHTTPProviderRotation(t *testing.T) {
 		t.Fatalf("after first Get: upstream calls=%d, want 1", got)
 	}
 
-	// Second call within TTL: cache hit
 	if _, err := p.Get(t.Context()); err != nil {
 		t.Fatalf("second Get: %v", err)
 	}
@@ -210,7 +185,6 @@ func TestHTTPProviderRotation(t *testing.T) {
 		t.Fatalf("within TTL: upstream calls=%d, want 1 (cached)", got)
 	}
 
-	// Wait past TTL, then third call: must re-fetch
 	time.Sleep(150 * time.Millisecond)
 	if _, err := p.Get(t.Context()); err != nil {
 		t.Fatalf("third Get: %v", err)

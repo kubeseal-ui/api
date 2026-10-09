@@ -13,9 +13,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// newTestReader builds a manual reader, swaps the global meter for a test
-// meter, and resets the construction state so the test meter is picked up.
-// It returns the reader for collection.
+// newTestReader swaps the global meter for a test meter and resets the package's
+// construction state, so the instruments are rebuilt against it.
 func newTestReader(t *testing.T) *sdkmetric.ManualReader {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
@@ -31,7 +30,6 @@ func newTestReader(t *testing.T) *sdkmetric.ManualReader {
 	return reader
 }
 
-// collect gathers the recorded metrics into a lookup by name.
 func collect(t *testing.T, reader *sdkmetric.ManualReader) map[string]metricdata.Metrics {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -123,9 +121,7 @@ func TestEmptyLabelValuesBecomeUnknown(t *testing.T) {
 	}
 }
 
-// TestNoIdentityOrResourceLabels pins the bounded-cardinality contract:
-// every recorded attribute key must be in the allow-list, so a namespace
-// or secret name can never become a label.
+// Pins the bounded-cardinality contract: a namespace or secret name must never become a label.
 func TestNoIdentityOrResourceLabels(t *testing.T) {
 	reader := newTestReader(t)
 	if err := Instruments(); err != nil {
@@ -162,8 +158,8 @@ func TestNoIdentityOrResourceLabels(t *testing.T) {
 	}
 }
 
-// TestTraceCorrelationGuard makes sure the package compiles against the
-// trace API used by the middleware bridge without importing a provider.
+// Keeps the package compiling against the trace API the middleware bridge uses, without
+// importing a provider.
 func TestTraceCorrelationGuard(t *testing.T) {
 	var _ trace.Tracer = trace.NewNoopTracerProvider().Tracer("test")
 	if !strings.Contains("trace_id span_id", "trace_id") {

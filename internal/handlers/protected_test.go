@@ -26,9 +26,8 @@ type protectedCertProvider struct{}
 
 func (protectedCertProvider) Get(context.Context) (*x509.Certificate, error) { return nil, nil }
 
-// errorCertProvider fails every encryption request. It exists so a test
-// can tell "rejected by an authorization check" (403) apart from
-// "authorized, then failed downstream" (502).
+// errorCertProvider fails every encryption request, so a test can tell "rejected by an authorization
+// check" (403) apart from "authorized, then failed downstream" (502).
 type errorCertProvider struct{}
 
 func (errorCertProvider) Get(context.Context) (*x509.Certificate, error) {
@@ -213,15 +212,13 @@ func TestDecryptRequiresBaseCommit(t *testing.T) {
 	assertErrorEnvelope(t, rr, "INVALID_REQUEST", "Invalid request", "")
 }
 
-// mutation renders one entry of a diff/patch request body.
 func mutation(key, operation, value string) map[string]string {
 	return map[string]string{"key": key, "operation": operation, "value": value}
 }
 
-// batchRequest builds a diff/patch request body for any number of mutations.
-// It marshals a struct rather than concatenating a string so the test does not
-// have to hand-escape JSON, and so a body with several entries cannot be
-// accidentally malformed into something that tests a different code path.
+// batchRequest marshals a struct rather than concatenating a string, so the test need not hand-escape
+// JSON and a body with several entries cannot be accidentally malformed into one that tests a
+// different code path.
 func batchRequest(t *testing.T, baseCommit string, mutations ...map[string]string) string {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"mutations": mutations, "base_commit": baseCommit})
@@ -231,10 +228,8 @@ func batchRequest(t *testing.T, baseCommit string, mutations ...map[string]strin
 	return string(body)
 }
 
-// resealResponse is the diff/patch response. It is a struct rather than a
-// map[string]string because the response carries the mutation summary — the
-// keys and operations that changed, without their values — alongside the
-// manifests.
+// resealResponse is a struct rather than a map because the response carries the mutation summary —
+// the keys and operations that changed, without their values — alongside the manifests.
 type resealResponse struct {
 	YAML       string `json:"yaml"`
 	Checksum   string `json:"checksum"`
@@ -243,10 +238,8 @@ type resealResponse struct {
 	DiffBefore string `json:"diff_before"`
 	DiffAfter  string `json:"diff_after"`
 	BaseCommit string `json:"base_commit"`
-	// TargetPath is carried by the diff response only: it names the file the
-	// manifest was found in, which is not always the path the mapping's
-	// template renders. The patch response has no use for it, because nothing
-	// downstream of the patch reads a path.
+	// TargetPath is carried by the diff response only: it names the file the manifest was found in,
+	// which is not always the path the template renders. Nothing downstream of the patch reads a path.
 	TargetPath string `json:"target_path"`
 	Mutations  []struct {
 		Key       string `json:"key"`
@@ -264,9 +257,8 @@ func TestResealRequiresIdempotencyKey(t *testing.T) {
 	assertErrorEnvelope(t, rr, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key", "")
 }
 
-// TestResealResponseIncludesEncryptedDiff covers the batch patch: three
-// mutations of different kinds in one request produce one resealed manifest,
-// and the response reports what changed without echoing the new values.
+// TestResealResponseIncludesEncryptedDiff covers the batch patch: three mutations of different kinds
+// in one request produce one resealed manifest, reported without echoing the new values.
 func TestResealResponseIncludesEncryptedDiff(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
@@ -293,8 +285,8 @@ stringData:
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", YAML: live}}}, w, true)
 	rr := httptest.NewRecorder()
-	// Replace, add, and delete together: the batch has to land as one change,
-	// which is the point of the endpoint taking an array.
+	// Replace, add, and delete together: the batch has to land as one change, which is the point of
+	// the endpoint taking an array.
 	body := batchRequest(t, "abc",
 		mutation("password", "replace", "new-value"),
 		mutation("added", "add", "added-value"),
@@ -323,9 +315,8 @@ stringData:
 	if resp.DiffBefore != live || resp.DiffAfter != resp.YAML || resp.DiffBefore == resp.DiffAfter {
 		t.Fatalf("unexpected patch diff: %s", rr.Body.String())
 	}
-	// The response names the keys it changed so the UI can confirm the batch,
-	// but it must not carry the values back: the caller already has them, and
-	// plaintext has no business in a response body.
+	// The response names the keys it changed so the UI can confirm the batch, but it must not carry
+	// the values back: the caller already has them, and plaintext has no business in a response body.
 	if len(resp.Mutations) != 3 {
 		t.Fatalf("mutation summary = %v, want three entries", resp.Mutations)
 	}
@@ -340,10 +331,9 @@ stringData:
 	}
 }
 
-// TestResealRejectsAnInvalidBatch verifies that a mutation the crypto layer
-// refuses reaches the caller as a 400 naming the request, not as a 502 blaming
-// the backend. Whether a key exists is only knowable after decryption, so this
-// is the path that carries that refusal out of the crypto layer.
+// TestResealRejectsAnInvalidBatch verifies that a mutation the crypto layer refuses reaches the caller
+// as a 400 naming the request, not as a 502 blaming the backend. Whether a key exists is only knowable
+// after decryption, so this is the path that carries that refusal out of the crypto layer.
 func TestResealRejectsAnInvalidBatch(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
@@ -379,16 +369,13 @@ stringData:
 	assertErrorEnvelope(t, rr, "INVALID_MUTATION", "Invalid mutation", "")
 }
 
-// TestResealInvalidBatchDoesNotSpendTheIdempotencyKey verifies the ordering
-// inside the handler: a batch refused from the body alone — here an operation
-// that is not one of the three — is refused before the key is claimed, so a
-// corrected retry can reuse the key the client chose rather than being told the
-// request was already processed.
+// TestResealInvalidBatchDoesNotSpendTheIdempotencyKey verifies the ordering inside the handler: a
+// batch refused from the body alone — here an operation that is not one of the three — is refused
+// before the key is claimed, so a corrected retry can reuse the key the client chose.
 //
-// This holds for body-only refusals and not for rule violations: whether a key
-// exists is only knowable after decryption, which is after the claim (see
-// TestResealRejectsAnInvalidBatch). Claiming early is the deliberate trade —
-// the claim is what stops a duplicate from paying for a second decrypt.
+// This holds for body-only refusals, not for rule violations: whether a key exists is only knowable
+// after decryption, which is after the claim. Claiming early is the deliberate trade — the claim is
+// what stops a duplicate from paying for a second decrypt.
 func TestResealInvalidBatchDoesNotSpendTheIdempotencyKey(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
 	// Refused while parsing: the operation is not one of the three.
@@ -490,15 +477,13 @@ stringData:
 	}
 }
 
-// TestDiffHandlerReportsTheDiscoveredTargetPath pins the path contract of an
-// edit: the diff names the file the manifest was actually found in, not the
-// path the mapping's template renders.
+// TestDiffHandlerReportsTheDiscoveredTargetPath pins the path contract of an edit: the diff names the
+// file the manifest was actually found in, not the path the mapping's template renders.
 //
-// The client hands that name back to the delivery endpoints. Without it they
-// fall back to the template, and a Secret kept in an application subdirectory —
-// found here by the tree walk, because the templated path is vacant — would be
-// written a second time at the templated path instead of updated where it
-// lives. Two files would then claim the same SealedSecret identity.
+// The client hands that name back to the delivery endpoints. Without it they fall back to the
+// template, and a Secret kept in an application subdirectory — found here by the tree walk, because
+// the templated path is vacant — would be written a second time at the templated path. Two files
+// would then claim the same SealedSecret identity.
 func TestDiffHandlerReportsTheDiscoveredTargetPath(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
@@ -515,8 +500,8 @@ stringData:
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The mapping renders clusters/ns/name.yaml. The manifest lives somewhere
-	// else entirely, so tier 1 is vacant and only the tree walk finds it.
+	// The mapping renders clusters/ns/name.yaml; the manifest lives elsewhere, so tier 1 is vacant
+	// and only the tree walk finds it.
 	const discovered = "custom/apps/secrets/name.yaml"
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: discovered}, live, "abc")
@@ -594,15 +579,14 @@ func TestEncryptRejectsOversizedBody(t *testing.T) {
 	}
 }
 
-// TestEncryptClusterWideRequiresAccessManage verifies that asking for a
-// cluster-wide scope needs access:manage on top of secret:seal. A
-// cluster-wide SealedSecret can be unsealed in any namespace, so
+// TestEncryptClusterWideRequiresAccessManage verifies that asking for a cluster-wide scope needs
+// access:manage on top of secret:seal: such a SealedSecret can be unsealed in any namespace, so
 // secret:seal alone must not be enough to produce one.
 func TestEncryptClusterWideRequiresAccessManage(t *testing.T) {
 	body := `{"namespace":"ns","name":"name","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: name\n","scope":"cluster-wide"}`
 
-	// errorCertProvider makes encryption fail *after* authorization, so a
-	// 403 below can only come from the capability check.
+	// errorCertProvider makes encryption fail *after* authorization, so a 403 below can only come
+	// from the capability check.
 	h := NewProtectedHandlers(protectedK8s{}, crypto.New(errorCertProvider{}, nil), false)
 
 	denied := httptest.NewRecorder()
@@ -619,8 +603,8 @@ func TestEncryptClusterWideRequiresAccessManage(t *testing.T) {
 	}
 }
 
-// TestEncryptNamespaceScopedDoesNotRequireAccessManage is the control:
-// strict and namespace-wide scopes stay reachable with secret:seal alone.
+// TestEncryptNamespaceScopedDoesNotRequireAccessManage is the control: strict and namespace-wide
+// scopes stay reachable with secret:seal alone.
 func TestEncryptNamespaceScopedDoesNotRequireAccessManage(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{}, crypto.New(errorCertProvider{}, nil), false)
 	for _, scope := range []string{"strict", "namespace-wide"} {
@@ -633,13 +617,11 @@ func TestEncryptNamespaceScopedDoesNotRequireAccessManage(t *testing.T) {
 	}
 }
 
-// TestEncryptRefusesToOverwriteAnOccupiedMappedPath pins the documented
-// "mapped target vacant" gate. A create whose name resolves onto a manifest
-// that already exists would replace it silently, which is the outcome the
-// separate create and edit flows exist to prevent.
+// TestEncryptRefusesToOverwriteAnOccupiedMappedPath pins the documented "mapped target vacant" gate:
+// a create whose name resolves onto a manifest that already exists would replace it silently, the
+// outcome the separate create and edit flows exist to prevent.
 //
-// The crypto wrapper is deliberately broken: a 409 can then only come from the
-// vacancy gate, not from encryption failing.
+// The crypto wrapper is deliberately broken, so a 409 can only come from the vacancy gate.
 func TestEncryptRefusesToOverwriteAnOccupiedMappedPath(t *testing.T) {
 	transport := gitops.NewLocalTransport()
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, "existing", "abc")
@@ -658,19 +640,18 @@ func TestEncryptRefusesToOverwriteAnOccupiedMappedPath(t *testing.T) {
 	assertErrorEnvelope(t, rr, "PATH_OCCUPIED", "A manifest for this Secret already exists at the mapped path", "")
 }
 
-// TestEncryptReturnsTheBranchHeadForAVacantMappedPath covers the other half of
-// the gate: alongside the ciphertext the response carries the head the vacant
-// path was checked against, so a client can deliver the new Secret without
-// borrowing a base commit from some other Secret. No other endpoint reports a
-// head for a namespace that has no secrets yet.
+// TestEncryptReturnsTheBranchHeadForAVacantMappedPath covers the other half of the gate: alongside
+// the ciphertext the response carries the head the vacant path was checked against, so a client can
+// deliver the new Secret without borrowing a base commit from some other Secret. No other endpoint
+// reports a head for a namespace that has no secrets yet.
 func TestEncryptReturnsTheBranchHeadForAVacantMappedPath(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
 		t.Fatal(err)
 	}
 	transport := gitops.NewLocalTransport()
-	// A different file on the same repository and branch: this is what gives
-	// the mock transport a head to report.
+	// A different file on the same repository and branch: this is what gives the mock transport a
+	// head to report.
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/other.yaml"}, "other", "head-1")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
@@ -700,22 +681,21 @@ func TestEncryptReturnsTheBranchHeadForAVacantMappedPath(t *testing.T) {
 	}
 }
 
-// TestEncryptEchoesThePathTheVacancyGateRead covers a create whose operator
-// picked a path other than the mapping's default: the response names the file
-// the gate actually checked, so the client delivers to that file rather than
-// back to the rendered path, whose occupancy was never read.
+// TestEncryptEchoesThePathTheVacancyGateRead covers a create whose operator picked a path other than
+// the mapping's default: the response names the file the gate actually checked, so the client
+// delivers to that file rather than back to the rendered path, whose occupancy was never read.
 //
-// AllowedPaths is what lets a path other than the template be requested at all,
-// and the echo is unconditional — an unmapped namespace answers with an empty
-// string rather than a path nobody checked.
+// AllowedPaths is what lets a path other than the template be requested at all, and the echo is
+// unconditional — an unmapped namespace answers with an empty string rather than a path nobody
+// checked.
 func TestEncryptEchoesThePathTheVacancyGateRead(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
 		t.Fatal(err)
 	}
 	transport := gitops.NewLocalTransport()
-	// A different file on the same branch: this is what gives the mock
-	// transport a head for the vacant target to be built on.
+	// A different file on the same branch: this is what gives the mock transport a head for the
+	// vacant target to be built on.
 	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "custom/apps/other.yaml"}, "other", "head-1")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{
@@ -757,9 +737,8 @@ func TestEncryptEchoesThePathTheVacancyGateRead(t *testing.T) {
 	}
 }
 
-// TestEncryptWithoutGitMappingSkipsTheVacancyGate is the control. A namespace
-// with no mapping has no mapped path that could be occupied, and encrypting a
-// manifest for it must not start demanding Git access.
+// TestEncryptWithoutGitMappingSkipsTheVacancyGate is the control: a namespace with no mapping has no
+// mapped path that could be occupied, so encrypting for it must not start demanding Git access.
 func TestEncryptWithoutGitMappingSkipsTheVacancyGate(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
@@ -852,9 +831,9 @@ status:
 	}
 }
 
-// liveSecretManifest is what `kubectl get secret -o yaml` hands back for a live
-// Secret: the desired state plus everything the API server attached to that one
-// object, and the apply annotations that record how it got there.
+// liveSecretManifest is what `kubectl get secret -o yaml` hands back for a live Secret: the desired
+// state plus everything the API server attached to that one object, and the apply annotations that
+// record how it got there.
 const liveSecretManifest = `apiVersion: v1
 kind: Secret
 metadata:
@@ -888,8 +867,8 @@ status:
   something: live-only
 `
 
-// TestNormalizeSecretYAMLStripsEverythingButDesiredState covers the normalizer
-// directly, so each rule is pinned rather than inferred from a sealed output.
+// TestNormalizeSecretYAMLStripsEverythingButDesiredState covers the normalizer directly, so each
+// rule is pinned rather than inferred from a sealed output.
 func TestNormalizeSecretYAMLStripsEverythingButDesiredState(t *testing.T) {
 	normalized, err := normalizeSecretYAML(liveSecretManifest, "ns", "adopted")
 	if err != nil {
@@ -902,8 +881,8 @@ func TestNormalizeSecretYAMLStripsEverythingButDesiredState(t *testing.T) {
 			t.Errorf("normalized manifest dropped %q:\n%s", want, normalized)
 		}
 	}
-	// Dropped: everything that describes the live object's life rather than its
-	// content, including the apply annotation that embeds the whole object.
+	// Dropped: everything describing the live object's life rather than its content, including the
+	// apply annotation that embeds the whole object.
 	for _, unwanted := range []string{
 		"uid:", "resourceVersion", "generation", "creationTimestamp", "selfLink", "managedFields",
 		"ownerReferences", "status", "last-applied-configuration", "argocd.argoproj.io/",
@@ -915,10 +894,9 @@ func TestNormalizeSecretYAMLStripsEverythingButDesiredState(t *testing.T) {
 	}
 }
 
-// TestNormalizeSecretYAMLRefusesTheWrongDocument pins the refusals. A copy-paste
-// flow's likeliest mistake is pasting the wrong manifest, and sealing one
-// Secret's content under another's name is a silent failure with no error to
-// find afterwards.
+// TestNormalizeSecretYAMLRefusesTheWrongDocument pins the refusals: a copy-paste flow's likeliest
+// mistake is pasting the wrong manifest, and sealing one Secret's content under another's name is a
+// silent failure with no error to find afterwards.
 func TestNormalizeSecretYAMLRefusesTheWrongDocument(t *testing.T) {
 	const secretFor = `apiVersion: v1
 kind: Secret
@@ -953,11 +931,10 @@ stringData:
 	}
 }
 
-// TestEncryptSealsAnAdoptedManifest pins the end-to-end adopt path: a pasted
-// live Secret is sealed through the ordinary create endpoint, and the ciphertext
-// carries the content while dropping the live object's bookkeeping. No new
-// Kubernetes permission is involved — the operator's own kubectl read the Secret
-// — which is the whole reason this is a paste rather than a server-side lookup.
+// TestEncryptSealsAnAdoptedManifest pins the end-to-end adopt path: a pasted live Secret is sealed
+// through the ordinary create endpoint, and the ciphertext carries the content while dropping the
+// live object's bookkeeping. No new Kubernetes permission is involved — the operator's own kubectl
+// read the Secret — which is the whole reason this is a paste rather than a server-side lookup.
 func TestEncryptSealsAnAdoptedManifest(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
@@ -982,17 +959,15 @@ func TestEncryptSealsAnAdoptedManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The manifest is decoded, not substring-matched: it is encoded by the
-	// Kubernetes legacy codec, which emits JSON — so a YAML-shaped assertion
-	// like "app: payments-api" would fail against a payload that carries the
-	// label perfectly well as "app":"payments-api". Asserting on the decoded
-	// object also survives the encoder changing its serialization.
+	// The manifest is decoded, not substring-matched: the Kubernetes legacy codec emits JSON, so a
+	// YAML-shaped assertion like "app: payments-api" would fail against a payload that carries the
+	// label perfectly well as "app":"payments-api". Asserting on the decoded object also survives the
+	// encoder changing its serialization.
 	var sealed ssv1alpha1.SealedSecret
 	if err := yaml.Unmarshal([]byte(response.YAML), &sealed); err != nil {
 		t.Fatalf("sealed manifest is not a SealedSecret: %v\n%s", err, response.YAML)
 	}
-	// The type, labels, and the Secret's own annotation survive into the
-	// manifest's template.
+	// The type, labels, and the Secret's own annotation survive into the manifest's template.
 	if sealed.Spec.Template.Type != corev1.SecretTypeTLS {
 		t.Errorf("template type = %q, want %q", sealed.Spec.Template.Type, corev1.SecretTypeTLS)
 	}
@@ -1018,9 +993,9 @@ func TestEncryptSealsAnAdoptedManifest(t *testing.T) {
 	}
 }
 
-// TestEncryptRefusesAManifestForAnotherSecret covers the refusal at the endpoint
-// rather than in the normalizer: the operator is told which resource they pasted
-// instead of being handed a manifest sealed under the wrong name.
+// TestEncryptRefusesAManifestForAnotherSecret covers the refusal at the endpoint rather than in the
+// normalizer: the operator is told which resource they pasted instead of being handed a manifest
+// sealed under the wrong name.
 func TestEncryptRefusesAManifestForAnotherSecret(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, false)
 	body := `{"namespace":"ns","name":"adopted","yaml":"apiVersion: v1\nkind: Secret\nmetadata:\n  name: something-else\n  namespace: ns\nstringData:\n  password: x\n"}`
@@ -1030,8 +1005,8 @@ func TestEncryptRefusesAManifestForAnotherSecret(t *testing.T) {
 		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
 	}
 	assertErrorEnvelope(t, rr, "INVALID_MANIFEST", "Manifest is not a Kubernetes Secret for this name and namespace", "")
-	// The refusal names no field of the submitted manifest: the message is
-	// bounded, and the manifest is not echoed back into an error body.
+	// The refusal names no field of the submitted manifest: the message is bounded, and the manifest
+	// is not echoed back into an error body.
 	if strings.Contains(rr.Body.String(), "something-else") {
 		t.Fatalf("error body echoed the submitted manifest: %s", rr.Body.String())
 	}

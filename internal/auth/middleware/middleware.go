@@ -1,10 +1,6 @@
-// Package middleware provides the authentication middleware for the kubeseal-ui API.
-//
-// The middleware:
-// 1. Validates the session cookie and extracts identity
-// 2. Injects identity into request context
-// 3. Handles automatic token refresh before session expiry
-// 4. Enforces CSRF validation on state-changing requests
+// Package middleware provides the authentication middleware: it validates the session
+// cookie, injects the identity into the request context, refreshes near-expiry sessions,
+// and enforces CSRF on state-changing requests.
 package middleware
 
 import (
@@ -21,23 +17,20 @@ import (
 	"github.com/kubeseal-ui/api/internal/auth/oidc"
 )
 
-// Context keys
 type ctxKey int
 
 const (
 	identityKey ctxKey = iota
 )
 
-// CapabilityGrants is an identity's resolved capabilities: Global applies in
-// every namespace, Scoped only in the namespaces it names. A namespace absent
-// from Scoped has no grants of its own — which is not the same as being denied,
-// because the global set still applies there.
+// CapabilityGrants is an identity's resolved capabilities: Global applies in every
+// namespace, Scoped only in the namespaces it names. A namespace absent from Scoped is not
+// denied — the global set still applies there.
 type CapabilityGrants struct {
 	Global []string
 	Scoped map[string][]string
 }
 
-// Identity represents the authenticated user identity.
 type Identity struct {
 	Subject      string
 	Email        string
@@ -47,31 +40,23 @@ type Identity struct {
 	Expiry       time.Time
 	CSRF         string
 	Capabilities []string
-	// NamespaceCapabilities are the grants scoped to a namespace, keyed by
-	// namespace. Read them through CapabilitiesFor rather than directly: the
+	// NamespaceCapabilities is keyed by namespace. Read it through CapabilitiesFor: the
 	// effective set in a namespace is the scoped one unioned with the global.
 	NamespaceCapabilities map[string][]string
 }
 
-// CapabilitiesFor returns the capabilities the identity holds in one namespace:
-// its global grants plus the ones scoped to that namespace.
+// CapabilitiesFor returns the global grants plus the ones scoped to that namespace.
 func (i Identity) CapabilitiesFor(namespace string) []string {
 	return unionCapabilities(i.Capabilities, i.NamespaceCapabilities[namespace])
 }
 
-// HasCapabilityIn reports whether the identity holds a capability in a
-// namespace.
 func (i Identity) HasCapabilityIn(namespace, capability string) bool {
 	return containsCapability(i.CapabilitiesFor(namespace), capability)
 }
 
-// HasCapabilityAnywhere reports whether the identity holds a capability
-// somewhere, in any namespace.
-//
-// It is the pre-filter for a request whose namespace is not known yet — a body
-// that has not been parsed, or a listing spanning every namespace — and it must
-// never authorize a specific namespace: "holds secret:seal in payments" is not
-// an answer to "may this caller seal in development".
+// HasCapabilityAnywhere reports whether the identity holds a capability anywhere. It is a
+// pre-filter for requests whose namespace is not known yet, and must never authorize a
+// specific namespace: "holds secret:seal in payments" does not answer for development.
 func (i Identity) HasCapabilityAnywhere(capability string) bool {
 	if containsCapability(i.Capabilities, capability) {
 		return true
@@ -84,9 +69,8 @@ func (i Identity) HasCapabilityAnywhere(capability string) bool {
 	return false
 }
 
-// unionCapabilities returns the union of two capability lists, preserving order
-// and dropping duplicates. Nil in, nil out: an identity with no grants at all
-// should not carry an allocated empty slice through every request.
+// unionCapabilities unions the lists in order, dropping duplicates. Nil in, nil out: an
+// identity with no grants carries no allocated empty slice through every request.
 func unionCapabilities(lists ...[]string) []string {
 	var result []string
 	seen := map[string]bool{}
@@ -112,13 +96,11 @@ func containsCapability(capabilities []string, capability string) bool {
 }
 
 // WithIdentity adds an authenticated identity to a request context.
-// It is used by the router after session validation and by focused handler tests.
 func WithIdentity(r *http.Request, id Identity) *http.Request {
 	ctx := context.WithValue(r.Context(), identityKey, id)
 	return r.WithContext(ctx)
 }
 
-// GetIdentity retrieves the identity from the request context.
 func GetIdentity(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(identityKey).(Identity)
 	return id, ok
@@ -133,7 +115,6 @@ func MustGetIdentity(ctx context.Context) Identity {
 	return id
 }
 
-// AuthConfig holds configuration for the auth middleware.
 type AuthConfig struct {
 	OIDCProvider       oidc.AuthProvider
 	SessionCookie      string
@@ -142,13 +123,12 @@ type AuthConfig struct {
 	CookieSecure       bool
 	CookieDomain       string
 	CSRFTrustedOrigins []string
-	// SigningKey is the HMAC key used to sign/verify session cookies.
-	SigningKey []byte
+	SigningKey         []byte
 	// ResolveCapabilities maps normalized OIDC groups to effective capabilities.
 	ResolveCapabilities func([]string) CapabilityGrants
 }
 
-// DefaultAuthConfig returns a default auth config for testing.
+// DefaultAuthConfig returns a config for tests.
 func DefaultAuthConfig(provider oidc.AuthProvider) AuthConfig {
 	return AuthConfig{
 		OIDCProvider:       provider,
@@ -162,13 +142,12 @@ func DefaultAuthConfig(provider oidc.AuthProvider) AuthConfig {
 	}
 }
 
-// sessionCookieData is the decoded session cookie.
 type sessionCookieData struct {
 	SessionData
 	Signature string `json:"sig"`
 }
 
-// SessionData mirrors oidc.SessionData but with Expiry as time.Time for internal use.
+// SessionData is the JSON payload of the session cookie.
 type SessionData struct {
 	Subject  string   `json:"sub"`
 	Email    string   `json:"email"`
@@ -180,11 +159,9 @@ type SessionData struct {
 	CSRF     string   `json:"csrf"`
 }
 
-// signSessionCookie creates an HMAC signature for the session cookie.
 func signSessionCookie(data SessionData, secret []byte) string {
 	raw, err := json.Marshal(data)
 	if err != nil {
-		// This should never fail for our struct, but handle it.
 		return ""
 	}
 	mac := hmac.New(sha256.New, secret)
@@ -192,7 +169,6 @@ func signSessionCookie(data SessionData, secret []byte) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// verifySessionCookie verifies the HMAC signature and expiry.
 func verifySessionCookie(data SessionData, sig string, secret []byte) error {
 	expected := signSessionCookie(data, secret)
 	if !hmac.Equal([]byte(sig), []byte(expected)) {
@@ -204,7 +180,6 @@ func verifySessionCookie(data SessionData, sig string, secret []byte) error {
 	return nil
 }
 
-// AuthMiddleware returns middleware that validates the session cookie.
 func AuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	signingKey := cfg.SigningKey
 	if len(signingKey) == 0 {
@@ -220,20 +195,16 @@ func AuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 			scheduleAsyncRefresh(r, cookieData.Expiry, cfg, signingKey)
 
-			// Build identity
 			identity := buildIdentity(cookieData, cfg.ResolveCapabilities)
 
-			// Add identity to context
 			ctx := context.WithValue(r.Context(), identityKey, identity)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
-// extractAndValidateSession extracts and validates the session cookie.
-// Returns the cookie data and true if valid, or writes error response and returns false.
+// extractAndValidateSession returns the cookie data, or writes 401 and returns false.
 func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte) (sessionCookieData, bool) {
-	// Try to get session cookie
 	sessionCookie, err := r.Cookie(cfg.SessionCookie)
 	if err != nil {
 		slog.Debug("auth: no session cookie", "error", err)
@@ -241,7 +212,6 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 		return sessionCookieData{}, false
 	}
 
-	// Decode base64-encoded signed session cookie
 	raw, err := base64.RawURLEncoding.DecodeString(sessionCookie.Value)
 	if err != nil {
 		slog.Debug("auth: invalid session cookie encoding", "error", err)
@@ -249,7 +219,6 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 		return sessionCookieData{}, false
 	}
 
-	// Parse session cookie (JSON with signature)
 	var cookieData sessionCookieData
 	if err := json.Unmarshal(raw, &cookieData); err != nil {
 		slog.Debug("auth: invalid session cookie format", "error", err)
@@ -257,10 +226,8 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 		return sessionCookieData{}, false
 	}
 
-	// Verify signature and expiry
 	if err := verifySessionCookie(cookieData.SessionData, cookieData.Signature, signingKey); err != nil {
 		slog.Debug("auth: session verification failed", "error", err)
-		// Check if session expired — attempt refresh
 		if err.Error() == "session expired" {
 			if refreshed, ok := attemptRefresh(w, r, cfg, signingKey); ok {
 				return refreshed, true
@@ -273,7 +240,6 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 	return cookieData, true
 }
 
-// attemptRefresh tries to refresh the session using the refresh token.
 func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte) (sessionCookieData, bool) {
 	if cfg.OIDCProvider == nil || len(signingKey) == 0 {
 		if w != nil {
@@ -290,18 +256,14 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	tokens, err := cfg.OIDCProvider.RefreshTokens(ctx, refreshCookie.Value)
 	if err != nil {
 		slog.Debug("auth: token refresh failed", "error", err)
-		// Clear cookies on refresh failure
 		if w != nil {
 			clearAuthCookies(w, cfg)
 		}
 		return sessionCookieData{}, false
 	}
 
-	// Verify new ID token
-	// A refreshed ID token must still pass the provider's normal issuer,
-	// audience, signature, expiry, and claim validation. Refresh responses do
-	// not carry the original login nonce, so nonce validation is performed by
-	// the provider only when a nonce is supplied.
+	// A refreshed ID token still passes issuer, audience, signature, expiry, and claim
+	// validation; refresh responses carry no login nonce, so nonce checking is skipped.
 	verified, err := cfg.OIDCProvider.VerifyIDToken(ctx, tokens.IDToken, "")
 	if err != nil {
 		slog.Debug("auth: refreshed ID token verification failed", "error", err)
@@ -311,7 +273,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 		return sessionCookieData{}, false
 	}
 
-	// Get existing CSRF from session cookie to preserve it
+	// Preserve the existing CSRF token across the refresh.
 	existingCSRF := ""
 	if sc, cerr := r.Cookie(cfg.SessionCookie); cerr == nil {
 		raw, decErr := base64.RawURLEncoding.DecodeString(sc.Value)
@@ -323,7 +285,6 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 		}
 	}
 
-	// Create new session data
 	newSession := SessionData{
 		Subject:  verified.Subject,
 		Email:    verified.Email,
@@ -332,10 +293,9 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 		Groups:   verified.Groups,
 		Expiry:   verified.Expiry.Unix(),
 		IssuedAt: time.Now().Unix(),
-		CSRF:     existingCSRF, // Keep existing CSRF token
+		CSRF:     existingCSRF,
 	}
 
-	// Sign and set new session cookie
 	sig := signSessionCookie(newSession, signingKey)
 	newCookieData := sessionCookieData{
 		SessionData: newSession,
@@ -349,7 +309,6 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	}
 	encodedSession := base64.RawURLEncoding.EncodeToString(cookieJSON)
 
-	// Set cookies
 	if w != nil {
 		sessionCookie := &http.Cookie{
 			Name:     cfg.SessionCookie,
@@ -383,7 +342,8 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	return newCookieData, true
 }
 
-// scheduleAsyncRefresh schedules a background token refresh if expiry is near.
+// scheduleAsyncRefresh refreshes in the background when the session is within 5 minutes of
+// expiry.
 func scheduleAsyncRefresh(r *http.Request, expiry int64, cfg AuthConfig, signingKey []byte) {
 	if time.Until(time.Unix(expiry, 0)) >= 5*time.Minute {
 		return
@@ -395,7 +355,6 @@ func scheduleAsyncRefresh(r *http.Request, expiry int64, cfg AuthConfig, signing
 	}()
 }
 
-// buildIdentity creates an Identity from session cookie data.
 func buildIdentity(cookieData sessionCookieData, resolve ...func([]string) CapabilityGrants) Identity {
 	var grants CapabilityGrants
 	if len(resolve) > 0 && resolve[0] != nil {
@@ -409,7 +368,6 @@ func buildIdentity(cookieData sessionCookieData, resolve ...func([]string) Capab
 	}
 }
 
-// clearAuthCookies clears all auth cookies.
 func clearAuthCookies(w http.ResponseWriter, cfg AuthConfig) {
 	for _, item := range []struct {
 		name     string
@@ -437,7 +395,6 @@ func clearAuthCookies(w http.ResponseWriter, cfg AuthConfig) {
 	}
 }
 
-// CSRFMiddleware returns middleware that validates CSRF tokens on state-changing requests.
 func CSRFMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -477,12 +434,10 @@ func CSRFMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	}
 }
 
-// isSafeMethod returns true for HTTP methods that don't require CSRF validation.
 func isSafeMethod(method string) bool {
 	return method == "GET" || method == "HEAD" || method == "OPTIONS"
 }
 
-// extractCSRFToken gets the CSRF token from header or form field.
 func extractCSRFToken(r *http.Request) string {
 	token := r.Header.Get("X-CSRF-Token")
 	if token == "" {
@@ -491,12 +446,10 @@ func extractCSRFToken(r *http.Request) string {
 	return token
 }
 
-// validateCSRFToken compares the CSRF token from cookie with the one from request.
 func validateCSRFToken(cookieToken, headerToken string) bool {
 	return hmac.Equal([]byte(cookieToken), []byte(headerToken))
 }
 
-// isTrustedOrigin checks if the origin is in the trusted origins list.
 func isTrustedOrigin(origin string, trustedOrigins []string) bool {
 	if origin == "" {
 		return false
@@ -509,8 +462,7 @@ func isTrustedOrigin(origin string, trustedOrigins []string) bool {
 	return false
 }
 
-// RequireAuth is a helper for handlers that need authentication.
-// It returns the identity or writes a 401 response.
+// RequireAuth returns the identity or writes 401.
 func RequireAuth(w http.ResponseWriter, r *http.Request) (Identity, bool) {
 	id, ok := GetIdentity(r.Context())
 	if !ok {
@@ -520,8 +472,8 @@ func RequireAuth(w http.ResponseWriter, r *http.Request) (Identity, bool) {
 	return id, true
 }
 
-// RequireCSRF is a helper for handlers that need CSRF validation.
-// It validates the CSRF token and returns true if valid.
+// RequireCSRF validates the CSRF token, returning false when it is missing or the origin
+// is untrusted.
 func RequireCSRF(w http.ResponseWriter, r *http.Request, cfg AuthConfig) bool {
 	if r.Method == "GET" || r.Method == "HEAD" || r.Method == "OPTIONS" {
 		return true

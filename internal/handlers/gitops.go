@@ -13,41 +13,32 @@ import (
 	"github.com/kubeseal-ui/api/internal/policy"
 )
 
-// gitChangeRequest is the validated input shared by the GitOps dry-run
-// and delivery endpoints. It carries the namespace and name alongside the
-// change because the proposal branch is derived from the *identity* of the
-// secret (namespace/name), not from the repository or file path.
+// gitChangeRequest is the validated input shared by the GitOps dry-run and delivery endpoints. It
+// carries the namespace and name alongside the change because the proposal branch is derived from
+// the secret's identity (namespace/name), not from the repository or file path.
 type gitChangeRequest struct {
 	Change    gitops.Change
 	Mapping   policy.GitMapping
 	Namespace string
 	Name      string
-	// RequestedPath is the target_path the client sent, empty when it named no
-	// file. Kept alongside Change.Target.Path because the two differ: Change
-	// starts at the requested path or the mapping's template, and
-	// resolveDeliveryPath settles it once the caller is authorized.
+	// RequestedPath is the target_path the client sent, empty when it named no file. It is kept
+	// alongside Change.Target.Path because the two differ until resolveDeliveryPath settles it.
 	RequestedPath string
 }
 
-// errManifestNotSealedSecret marks a payload that is not the SealedSecret the
-// request names. It is separate from the generic invalid-request error so both
-// GitOps handlers can say what was wrong with the manifest rather than only that
-// something was.
+// errManifestNotSealedSecret marks a payload that is not the SealedSecret the request names. It is
+// separate from the generic invalid-request error so both GitOps handlers can say what was wrong
+// with the manifest rather than only that something was.
 var errManifestNotSealedSecret = errors.New("manifest is not a SealedSecret for this name and namespace")
 
-// validateManifest reports whether the reviewed ciphertext is a SealedSecret
-// for the name and namespace this request names.
+// validateManifest reports whether the reviewed ciphertext is a SealedSecret for the name and
+// namespace this request names.
 //
-// The payload is committed to the repository exactly as it arrives, and nothing
-// earlier in the request establishes that it is a manifest: a client that sends
-// back an encoded form of the ciphertext — base64, say — satisfies every other
-// check and commits a file the sealed-secrets controller cannot read, a failure
-// that surfaces only later as an app that will not reconcile. The shape is
-// therefore checked here, before either the dry run or the push.
-//
-// It is called after the capability check, not inside gitChange, so an
-// unauthorized caller is refused for that reason and learns nothing about the
-// payload.
+// The payload is committed exactly as it arrives, and nothing earlier establishes that it is a
+// manifest: a client posting back an encoded form of the ciphertext — base64, say — satisfies every
+// other check and commits a file the sealed-secrets controller cannot read, a failure that surfaces
+// only later as an app that will not reconcile. Checked after the capability check, so an
+// unauthorized caller is refused for that reason and learns nothing about the payload.
 func (cr gitChangeRequest) validateManifest() error {
 	if !gitops.MatchesSealedSecret(cr.Change.Content, cr.Namespace, cr.Name) {
 		return errManifestNotSealedSecret
@@ -74,11 +65,9 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitChangeRequest, error)
 		return gitChangeRequest{}, errors.New("mapping not found")
 	}
 
-	// The path is *not* settled here. A client may name the file it reviewed,
-	// but whether that name is usable depends on the mapping and on where this
-	// identity's manifest actually lives, and answering that needs a
-	// repository read — which belongs after the capability check, not in a
-	// parser that runs before it. resolveDeliveryPath does it.
+	// The path is *not* settled here. Whether a client-named file is usable depends on the
+	// mapping and on where this identity's manifest actually lives, and answering that needs a
+	// repository read — which belongs after the capability check, not in a parser before it.
 	path := req.TargetPath
 	if path == "" {
 		path = mapping.RenderPath(req.Namespace, req.Name)
@@ -95,18 +84,14 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitChangeRequest, error)
 	}, nil
 }
 
-// errTargetPathNotAllowed marks a delivery destination the mapping does not
-// permit: a named path that is not where this identity's manifest lives, or —
-// for a manifest that has no file yet — a path outside the ones the mapping
-// allows.
+// errTargetPathNotAllowed marks a delivery destination the mapping does not permit: a named path
+// that is not where this identity's manifest lives, or — for a manifest that has no file yet — a
+// path outside the ones the mapping allows.
 var errTargetPathNotAllowed = errors.New("target path not allowed by namespace mapping")
 
-// resolveDeliveryPath settles which file a change is written to, and returns
-// the change with its target path filled in.
-//
-// It is called after the capability check: the read it performs must not be
-// reachable by a caller who cannot deliver into the namespace. See
-// requestTransport for why the read is threaded rather than taken directly.
+// resolveDeliveryPath settles which file a change is written to, and returns the change with its
+// target path filled in. It runs after the capability check, since the read it performs must not
+// be reachable by a caller who cannot deliver into the namespace.
 func (h *ProtectedHandlers) resolveDeliveryPath(ctx context.Context, cr gitChangeRequest) (gitops.Change, error) {
 	change := cr.Change
 	path, err := h.resolveDestination(ctx, h.requestTransport(), cr.Mapping, cr.Namespace, cr.Name, cr.RequestedPath)
@@ -120,38 +105,25 @@ func (h *ProtectedHandlers) resolveDeliveryPath(ctx context.Context, cr gitChang
 	return change, nil
 }
 
-// resolveDestination returns the file a delivery for this SealedSecret writes
-// to, or errTargetPathNotAllowed when the mapping permits none. An empty path
-// with a nil error means the mapping renders no path and the caller named none
-// either.
+// resolveDestination returns the file a delivery for this SealedSecret writes to, or
+// errTargetPathNotAllowed when the mapping permits none. An empty path with a nil error means the
+// mapping renders no path and the caller named none either.
 //
-// The question it answers is where this SealedSecret already lives, because
-// that is the only file a delivery may write. The mapping's pathTemplate is a
-// *default* destination, not a location: discovery falls back to a walk of the
-// repository tree, so a Secret kept in an application subdirectory is found
-// somewhere the template does not render, and the templated path is vacant for
-// it. Writing there would not update the reviewed file — it would create a
-// second one claiming the same SealedSecret identity and leave the application
-// reading the stale ciphertext from the file nothing touched.
+// It answers where this SealedSecret already lives, because that is the only file a delivery may
+// write: the mapping's pathTemplate is a default, not a location, and a Secret kept in an
+// application subdirectory is found by the tree walk somewhere the template does not render.
+// Writing the templated path would create a second file claiming the same identity while the
+// application keeps reading the stale ciphertext.
 //
-// So a caller is not free to choose among the files the mapping allows. Once
-// this identity has a file, that file is the destination and a named path that
-// is anything else is refused, even one the allowlist admits: the allowlist is a
-// grant over destinations for manifests that do not exist yet, not a licence to
-// write an existing one twice. Only a manifest with no file yet leaves the
-// destination to the caller — to the mapping's own template or to a path its
-// allowlist admits. Naming the reviewed file is still what keeps a review honest
-// — the change lands in the file the operator saw — while discovery is what
-// makes an edit possible at all for a path no allowlist covers.
-//
-// Both write paths resolve through here, so the rule a delivery obeys and the
-// rule a sync obeys cannot drift apart.
+// So a caller may not choose among the files the mapping allows: once this identity has a file, any
+// other named path is refused, even one the allowlist admits — the allowlist grants destinations for
+// manifests that do not exist yet, not a licence to write an existing one twice. Both write paths
+// resolve through here, so the rule a delivery obeys and the rule a sync obeys cannot drift apart.
 func (h *ProtectedHandlers) resolveDestination(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, namespace, name, requested string) (string, error) {
 	defaultPath := mapping.RenderPath(namespace, name)
 	if defaultPath == "" {
-		// No template for this identity, so there is nowhere to discover and —
-		// since IsPathAllowed refuses every path when the render is empty —
-		// nowhere the caller may name either.
+		// No template for this identity: nowhere to discover, and — since IsPathAllowed refuses
+		// every path when the render is empty — nowhere the caller may name either.
 		if requested == "" {
 			return "", nil
 		}
@@ -159,28 +131,23 @@ func (h *ProtectedHandlers) resolveDestination(ctx context.Context, transport gi
 	}
 	existing, found, err := h.findManifestFor(ctx, transport, mapping, gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, namespace, name)
 	if err != nil {
-		// A read that failed has said nothing about where the manifest is, and
-		// the caller must not read that as a vacancy: a vacancy is the
-		// documented new-file case, and writing on a failed look is how a
-		// duplicate gets created.
+		// A read that failed has said nothing about where the manifest is, and the caller must
+		// not read that as a vacancy: writing on a failed look is how a duplicate gets created.
 		return "", err
 	}
 	if found {
 		if requested != "" && requested != existing {
-			// A named path this identity has no manifest at is a request to
-			// write somewhere the reviewed content does not belong — refused
-			// rather than quietly redirected, which would deliver a change to a
-			// file the operator never reviewed.
+			// A named path this identity has no manifest at is a request to write somewhere the
+			// reviewed content does not belong — refused rather than quietly redirected, which
+			// would deliver a change to a file the operator never reviewed.
 			return "", errTargetPathNotAllowed
 		}
 		return existing, nil
 	}
-	// No file for this identity yet, so this is a new manifest and the mapping
-	// decides where it may go. Its own rendered template is always accepted —
-	// that is what makes it the default, and refusing it would mean the path
-	// /secrets/encrypt echoes back for a create with no path chosen is one the
-	// delivery endpoints then reject — and the allowlist adds the alternatives a
-	// caller may name instead.
+	// No file for this identity yet, so the mapping decides where it may go. Its own rendered
+	// template is always accepted — refusing it would mean the path /secrets/encrypt echoes back
+	// for a create is one the delivery endpoints then reject — and the allowlist adds the
+	// alternatives a caller may name instead.
 	if requested != "" {
 		if requested != defaultPath && !mapping.IsPathAllowed(requested, namespace, name) {
 			return "", errTargetPathNotAllowed
@@ -190,16 +157,13 @@ func (h *ProtectedHandlers) resolveDestination(ctx context.Context, transport gi
 	return defaultPath, nil
 }
 
-// findManifestFor returns the path of this identity's manifest, and whether the
-// repository holds one at all.
+// findManifestFor returns the path of this identity's manifest, and whether the repository holds
+// one at all.
 //
-// Two-tier discovery, with one difference from the read path that reports a
-// location rather than a destination: a file at the templated path counts only
-// when it *is* this identity's manifest. Tier 1 reads whatever is at that path,
-// and a repository that keeps several Secrets in one file — or whose template
-// does not encode the name — has a manifest there that belongs to someone else.
-// Treating that as this identity's file would write one Secret over another's.
-// Tier 2 matches on the manifest's own metadata, so it needs no such check.
+// Two-tier discovery, and unlike the read path a file at the templated path counts only when it
+// *is* this identity's manifest: a repository keeping several Secrets in one file, or whose template
+// does not encode the name, has a manifest there belonging to someone else, and treating it as this
+// identity's would write one Secret over another's. Tier 2 matches on the manifest's own metadata.
 func (h *ProtectedHandlers) findManifestFor(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, target gitops.Target, namespace, name string) (string, bool, error) {
 	snapshot, err := transport.ReadManifest(ctx, target, mapping.AuthRef)
 	if err == nil {
@@ -222,10 +186,9 @@ func (h *ProtectedHandlers) findManifestFor(ctx context.Context, transport gitop
 	return found.Target.Path, true, nil
 }
 
-// proposalBranch derives the server-side proposal branch for a change.
-// Clients never choose the branch; the name is deterministic from the
-// namespace and secret so a retried delivery reconciles onto the same
-// branch rather than creating duplicates.
+// proposalBranch derives the server-side proposal branch for a change. Clients never choose the
+// branch; the name is deterministic from the namespace and secret so a retried delivery reconciles
+// onto the same branch rather than creating duplicates.
 func proposalBranch(namespace, name string) string {
 	return "kubeseal-ui/" + namespace + "-" + name
 }
@@ -248,9 +211,8 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusBadRequest, "INVALID_MANIFEST", "Manifest is not a SealedSecret for this name and namespace")
 		return
 	}
-	// The dry run previews the file the delivery will then write, so both
-	// resolve the path the same way. A preview of a different file would
-	// describe a change that is not the one delivered.
+	// The dry run previews the file the delivery will then write, so both resolve the path the
+	// same way; a preview of a different file would describe a change that is not the one delivered.
 	resolved, err := h.resolveDeliveryPath(r.Context(), cr)
 	if err != nil {
 		if errors.Is(err, errTargetPathNotAllowed) {
@@ -276,10 +238,8 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 	h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "success")
-	// The doc contract calls for "encrypted diff, resolved path, base
-	// commit, and fixed delivery mode". The after ciphertext flows under
-	// "after" (the key the client reads) and "diff" stays for compatibility
-	// with the original handler response.
+	// "after" is the key the client reads and posts straight back to /gitops/deliver; "diff" stays
+	// for compatibility with the original handler response.
 	jsonResponse(w, http.StatusOK, gitOpsDryRunResponse{
 		Before:     string(diff.Before),
 		After:      string(diff.After),
@@ -290,16 +250,10 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 	})
 }
 
-// gitOpsDryRunResponse is the dry-run wire contract.
-//
-// The manifest fields are strings and the conversion from gitops.Diff is
-// explicit for a reason: encoding/json renders a []byte as base64, and the
-// client keeps `after` and posts it straight back to /gitops/deliver. Returning
-// the byte slice directly therefore handed the client base64, which the delivery
-// endpoint wrote to the repository verbatim — a committed file that parses as
-// neither YAML nor JSON, produced by two endpoints that each look correct alone.
-// Declaring the fields as text here is what keeps that round trip to manifest
-// text; the "diff" key is the same value under the name the first handler used.
+// gitOpsDryRunResponse is the dry-run wire contract. The manifest fields are strings because
+// encoding/json renders a []byte as base64: the client keeps `after` and posts it straight back to
+// /gitops/deliver, so returning the byte slice committed a file that parses as neither YAML nor
+// JSON — a bug produced by two endpoints that each look correct alone.
 type gitOpsDryRunResponse struct {
 	Before     string                 `json:"before"`
 	After      string                 `json:"after"`
@@ -323,8 +277,8 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
-	// Checked before the idempotency store is consulted: a payload that cannot
-	// be delivered is not an attempt whose result is worth recording.
+	// Checked before the idempotency store is consulted: a payload that cannot be delivered is not
+	// an attempt whose result is worth recording.
 	if err = cr.validateManifest(); err != nil {
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_manifest")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "invalid_manifest")
@@ -337,10 +291,9 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 		return
 	}
-	// Resolved here rather than in gitChange so the repository read it may
-	// perform happens after the capability check, and before the idempotency
-	// store is consulted: a path this namespace has no manifest for is a
-	// refusal, not an attempt whose result is worth recording.
+	// Resolved here rather than in gitChange so the repository read it may perform happens after
+	// the capability check and before the idempotency store is consulted: a path this namespace has
+	// no manifest for is a refusal, not an attempt whose result is worth recording.
 	resolved, err := h.resolveDeliveryPath(r.Context(), cr)
 	if err != nil {
 		if errors.Is(err, errTargetPathNotAllowed) {
@@ -355,18 +308,16 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	change = resolved
-	// A retry of a delivery that already succeeded is answered with its
-	// original response rather than refused — see beginDelivery.
+	// A retry of a delivery that already succeeded is answered with its original response rather
+	// than refused — see beginDelivery.
 	w, finishDelivery, proceed := h.beginDelivery(w, r)
 	if !proceed {
 		return
 	}
 	defer finishDelivery()
-	// Proposal namespaces push a dedicated branch, never the mapped
-	// direct branch. Direct namespaces push the mapped branch itself.
-	// The branch is derived from the secret's identity (namespace/name) so
-	// that a retry — or the same change delivered through the sync endpoint —
-	// reconciles onto one branch instead of scattering per-path branches.
+	// The branch is derived from the secret's identity (namespace/name) so a retry — or the same
+	// change delivered through the sync endpoint — reconciles onto one branch, and a proposal
+	// namespace never pushes the mapped direct branch.
 	if mapping.Mode == policy.GitDeliveryProposal {
 		change.Branch = proposalBranch(cr.Namespace, cr.Name)
 	}
@@ -406,20 +357,18 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	jsonResponse(w, http.StatusOK, result)
 }
 
-// hasGitCapability reports whether the caller may deliver into the namespace the
-// mapping resolved to. Delivering into a namespace is an act in that namespace,
-// so a grant scoped elsewhere does not carry the capability here.
+// hasGitCapability reports whether the caller may deliver into the namespace the mapping resolved
+// to: delivering into a namespace is an act in that namespace, so a grant scoped elsewhere does
+// not carry the capability here.
 func hasGitCapability(r *http.Request, namespace string, mode policy.GitDeliveryMode) bool {
 	id, _ := authmw.GetIdentity(r.Context())
 	return id.HasCapabilityIn(namespace, string(policy.GitOpsCapabilityRequired(mode)))
 }
 
-// GitOpsSyncStatusHandler returns the drift status between live cluster and Git.
-// It uses Option A (two-tier source discovery: fast-path pathTemplate with Git tree walk fallback)
-// to locate the manifest in Git, and evaluates drift.
+// GitOpsSyncStatusHandler returns the drift status between the live cluster and Git, locating the
+// manifest via two-tier source discovery (fast-path pathTemplate, then a Git tree walk).
 func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *http.Request) {
-	// The namespace is a query parameter here, so it is read before the check
-	// rather than after: the check is about this namespace.
+	// The namespace is a query parameter here, so it is read before the check is about it.
 	namespace := r.URL.Query().Get("namespace")
 	name := r.URL.Query().Get("name")
 	if !requireCapability(w, r, namespace, policy.MetadataRead) {
@@ -486,14 +435,9 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 	jsonResponse(w, http.StatusOK, result)
 }
 
-// GitOpsSyncHandler syncs a live SealedSecret from Kubernetes to Git.
-// The client supplies only { namespace, name, base_commit }; the server
-// fetches the live YAML from Kubernetes and pushes it to the configured
-// or discovered Git path for that namespace. This resolves drift where the live cluster
-// state is ahead of Git (e.g. secrets applied out-of-band).
-//
-// Matching is done via Option A (Two-Tier Discovery: fast-path pathTemplate with
-// Git repository tree walk fallback).
+// GitOpsSyncHandler syncs a live SealedSecret from Kubernetes to Git. The client supplies only
+// { namespace, name, base_commit }; the server reads the live YAML and pushes it to the configured
+// or discovered Git path, using the same two-tier discovery as the status endpoint.
 func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Namespace  string `json:"namespace"`
@@ -530,15 +474,14 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 		return
 	}
-	// A retry of a sync that already succeeded is answered with its original
-	// response rather than refused — see beginDelivery.
+	// A retry of a sync that already succeeded is answered with its original response rather than
+	// refused — see beginDelivery.
 	w, finishDelivery, proceed := h.beginDelivery(w, r)
 	if !proceed {
 		return
 	}
 	defer finishDelivery()
 
-	// Fetch the live SealedSecret from Kubernetes.
 	secret, err := h.Kubernetes.GetSealedSecret(r.Context(), req.Namespace, req.Name)
 	if err != nil {
 		if errors.Is(err, kubernetes.ErrNotFound) {
@@ -551,13 +494,9 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// The live object was just read by this name and namespace, so it is a
-	// SealedSecret for them by construction: this is an invariant, not a check
-	// on client input. It runs anyway because the guard the dry-run and delivery
-	// endpoints apply is what makes "nothing but a manifest this mapping owns is
-	// committed" true of the product rather than of two of its three write
-	// paths, and a write path that is exempt only because it cannot currently be
-	// reached is a hole waiting for the next call site.
+	// The live object was just read by this name and namespace, so it is a SealedSecret by
+	// construction. Validated anyway: the same guard the dry-run and delivery endpoints apply is
+	// what makes "only a manifest this mapping owns is committed" true of the product.
 	if !gitops.MatchesSealedSecret([]byte(secret.YAML), req.Namespace, req.Name) {
 		h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "invalid_manifest")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "invalid_manifest")
@@ -565,9 +504,8 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// The destination is where this identity's manifest already lives, resolved
-	// by the same rule a delivery obeys: a named path is a destination only for
-	// a manifest that has no file yet, and only where the mapping allows it.
+	// The destination is where this identity's manifest already lives, resolved by the same rule a
+	// delivery obeys — see resolveDestination.
 	path, resolveErr := h.resolveDestination(r.Context(), h.requestTransport(), mapping, req.Namespace, req.Name, req.TargetPath)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errTargetPathNotAllowed) {
@@ -575,9 +513,8 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 			writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
 			return
 		}
-		// A Git that could not be read has not established that the manifest is
-		// absent, and syncing on that assumption would create a second file for
-		// an identity that already has one.
+		// A Git that could not be read has not established that the manifest is absent, and syncing
+		// on that assumption would create a second file for an identity that already has one.
 		h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "error")
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
