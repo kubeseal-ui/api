@@ -1027,7 +1027,19 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 	// delivery endpoints to render the template, which creates a second file for
 	// the same SealedSecret identity instead of updating the one that was
 	// reviewed.
-	targetPath, _ := git["file_path"].(string)
+	//
+	// Checked rather than discarded: the drift guard above has already returned for
+	// every state that carries no file — an unmapped namespace, an unmanaged Secret,
+	// a manifest not in sync — so a missing path here means the status and that
+	// guard disagreed. It is refused rather than defaulted to empty, because an
+	// empty target_path is falsy to the client, which falls back to the template
+	// this comment just described.
+	targetPath, ok := git["file_path"].(string)
+	if !ok || targetPath == "" {
+		result = opResultFailed
+		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
+		return
+	}
 	after, err := h.Crypto.ResealMany(r.Context(), secret.YAML, mutations)
 	if err != nil {
 		if errors.Is(err, crypto.ErrInvalidMutation) {

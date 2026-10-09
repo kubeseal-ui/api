@@ -243,7 +243,7 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
-	if err := cr.validateManifest(); err != nil {
+	if err = cr.validateManifest(); err != nil {
 		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_manifest")
 		writeError(w, r, http.StatusBadRequest, "INVALID_MANIFEST", "Manifest is not a SealedSecret for this name and namespace")
 		return
@@ -325,7 +325,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	}
 	// Checked before the idempotency store is consulted: a payload that cannot
 	// be delivered is not an attempt whose result is worth recording.
-	if err := cr.validateManifest(); err != nil {
+	if err = cr.validateManifest(); err != nil {
 		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_manifest")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "invalid_manifest")
 		writeError(w, r, http.StatusBadRequest, "INVALID_MANIFEST", "Manifest is not a SealedSecret for this name and namespace")
