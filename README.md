@@ -1,10 +1,9 @@
 # kubeseal-ui-api
 
-Go backend for kubeseal-ui
+Go backend for kubeseal-ui. The Vue frontend is a separate repository (`kubeseal-ui-frontend`).
 
 ## Repository Structure
 
-- `api/` - Go backend source code
 - `cmd/server/` - Entry point for the API server
 - `internal/` - Private packages organized by functionality
 - `go.mod` - Go module definition
@@ -66,23 +65,19 @@ additionally needs an adapter declared in `GITOPS_PROPOSAL_ADAPTERS`. See
 ### Prerequisites
 
 - Go 1.27
-- Node.js 26 (LTS) (for frontend)
 - Docker
 - Kubernetes cluster with Sealed Secrets controller
 
 ### Running Locally
 
-#### API Server
+Run from the repository root:
+
 ```bash
-cd api
 go run ./cmd/server
 ```
 
-#### Frontend
-```bash
-cd frontend
-npm run dev
-```
+The frontend is a separate repository; start it there with `npm run dev` and it will proxy `/api`
+here.
 
 ### Building Images
 
@@ -92,9 +87,9 @@ docker build -f Dockerfile -t kubeseal-api:dev .
 ```
 
 #### Frontend Image
-```bash
-docker build -f Dockerfile -t kubeseal-ui:dev .
-```
+
+Built from the `kubeseal-ui-frontend` repository, not this one: its own `Dockerfile` runs
+`npm run build` and serves `dist/` through nginx.
 
 ## Security
 
