@@ -38,6 +38,14 @@ func (l *worktreeLocks) lock(ctx context.Context, path string) (func(), error) {
 	entry.refs++
 	l.mu.Unlock()
 
+	// Checked before the select, not only inside it: when the slot is free and the context is
+	// already dead both cases of the select are ready, and a coin flip would sometimes run a whole
+	// Git operation for a request that is already gone.
+	if err := ctx.Err(); err != nil {
+		l.unref(path, entry)
+		return nil, err
+	}
+
 	select {
 	case entry.slot <- struct{}{}:
 		var once sync.Once
