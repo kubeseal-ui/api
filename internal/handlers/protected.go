@@ -581,8 +581,10 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 		}
 		items = append(items, map[string]any{
 			"name": secrets[i].Name, "namespace": secrets[i].Namespace,
-			"scope": secrets[i].Scope, "key_count": secrets[i].KeyCount,
-			"created_at": secrets[i].CreatedAt, "git": git,
+			// Key names travel with the listing so a client can search them without a fetch per
+			// Secret. They are read from spec.encryptedData and never decrypted.
+			"keys": secrets[i].Keys, "key_count": secrets[i].KeyCount,
+			"scope": secrets[i].Scope, "created_at": secrets[i].CreatedAt, "git": git,
 		})
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"secrets": items})
