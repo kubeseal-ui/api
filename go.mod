@@ -3,7 +3,7 @@ module github.com/kubeseal-ui/api
 go 1.27
 
 require (
-	github.com/bitnami/sealed-secrets v0.39.1
+	github.com/bitnami/sealed-secrets v0.40.0
 	github.com/coreos/go-oidc/v3 v3.2.0
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-git/go-git/v5 v5.19.2
@@ -21,9 +21,9 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/oauth2 v0.37.0
-	k8s.io/api v0.36.3
-	k8s.io/apimachinery v0.37.1
-	k8s.io/client-go v0.36.3
+	k8s.io/api v0.37.0
+	k8s.io/apimachinery v0.37.0
+	k8s.io/client-go v0.37.0
 	sigs.k8s.io/yaml v1.6.0
 )
 
