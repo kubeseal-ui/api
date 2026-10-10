@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/prometheus"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -126,7 +125,7 @@ func SetupTelemetry(opts TelemetryOptions) (*Telemetry, error) {
 			sdklog.WithResource(res),
 			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp)),
 		)
-		global.SetLoggerProvider(tel.LoggerProvider)
+		otel.SetLoggerProvider(tel.LoggerProvider)
 	}
 
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(

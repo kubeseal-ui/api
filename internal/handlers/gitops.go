@@ -201,7 +201,7 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
-	change, mapping := cr.Change, cr.Mapping
+	mapping := cr.Mapping
 	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
 		h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
@@ -225,7 +225,7 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
-	change = resolved
+	change := resolved
 	diff, err := h.GitTransport.DryRun(r.Context(), change, mapping.AuthRef)
 	if err != nil {
 		var base *gitops.BaseCommitError
