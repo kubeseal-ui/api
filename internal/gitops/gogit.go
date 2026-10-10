@@ -33,6 +33,9 @@ type GoGitTransport struct {
 	credentials CredentialResolver
 	// now is overridable in tests.
 	now func() time.Time
+	// worktrees serialises the operations sharing one checkout directory. One transport serves the
+	// whole process, so this is what makes the per-target worktree safe to share.
+	worktrees worktreeLocks
 }
 
 type GoGitOptions struct {
@@ -147,7 +150,13 @@ func (t *GoGitTransport) ReadManifest(ctx context.Context, target Target, authRe
 	if err != nil {
 		return ManifestSnapshot{}, err
 	}
-	repo, err := t.openOrClone(ctx, t.worktreePath(target), target, auth, 1)
+	path := t.worktreePath(target)
+	release, err := t.worktrees.lock(ctx, path)
+	if err != nil {
+		return ManifestSnapshot{}, err
+	}
+	defer release()
+	repo, err := t.openOrClone(ctx, path, target, auth, 1)
 	if err != nil {
 		return ManifestSnapshot{}, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
 	}
@@ -224,7 +233,14 @@ func (t *GoGitTransport) PreviousManifest(ctx context.Context, target Target, au
 	if err != nil {
 		return nil, err
 	}
-	repo, err := t.openOrClone(ctx, t.historyPath(target), target, auth, 0)
+	// The history checkout is a directory of its own, so it has a lock of its own.
+	path := t.historyPath(target)
+	release, err := t.worktrees.lock(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	repo, err := t.openOrClone(ctx, path, target, auth, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
 	}
@@ -294,7 +310,13 @@ func (t *GoGitTransport) ReadBranch(ctx context.Context, repository, branch, aut
 	if err != nil {
 		return BranchSnapshot{}, err
 	}
-	repo, err := t.openOrClone(ctx, t.worktreePath(target), target, auth, 1)
+	path := t.worktreePath(target)
+	release, err := t.worktrees.lock(ctx, path)
+	if err != nil {
+		return BranchSnapshot{}, err
+	}
+	defer release()
+	repo, err := t.openOrClone(ctx, path, target, auth, 1)
 	if err != nil {
 		return BranchSnapshot{}, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
 	}
@@ -361,7 +383,13 @@ func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch,
 	if err != nil {
 		return ManifestSnapshot{}, err
 	}
-	repo, err := t.openOrClone(ctx, t.worktreePath(target), target, auth, 1)
+	path := t.worktreePath(target)
+	release, err := t.worktrees.lock(ctx, path)
+	if err != nil {
+		return ManifestSnapshot{}, err
+	}
+	defer release()
+	repo, err := t.openOrClone(ctx, path, target, auth, 1)
 	if err != nil {
 		return ManifestSnapshot{}, fmt.Errorf("open or clone %s: %w", remoteURL(target), err)
 	}
@@ -437,7 +465,13 @@ func (t *GoGitTransport) DryRun(ctx context.Context, change Change, authRef stri
 	if err != nil {
 		return Diff{}, err
 	}
-	repo, err := t.openOrClone(ctx, t.worktreePath(change.Target), change.Target, auth, 1)
+	path := t.worktreePath(change.Target)
+	release, err := t.worktrees.lock(ctx, path)
+	if err != nil {
+		return Diff{}, err
+	}
+	defer release()
+	repo, err := t.openOrClone(ctx, path, change.Target, auth, 1)
 	if err != nil {
 		return Diff{}, fmt.Errorf("open or clone %s: %w", remoteURL(change.Target), err)
 	}
@@ -475,7 +509,15 @@ func (t *GoGitTransport) PushBranch(ctx context.Context, change Change, authRef 
 	if err != nil {
 		return PushResult{}, err
 	}
-	repo, err := t.openOrClone(ctx, t.worktreePath(change.Target), change.Target, auth, 1)
+	// Held across the whole read-modify-write: the pull, the add, the commit and the push all act on
+	// one index and one HEAD, so a second request in the same directory must not interleave.
+	path := t.worktreePath(change.Target)
+	release, err := t.worktrees.lock(ctx, path)
+	if err != nil {
+		return PushResult{}, err
+	}
+	defer release()
+	repo, err := t.openOrClone(ctx, path, change.Target, auth, 1)
 	if err != nil {
 		return PushResult{}, fmt.Errorf("open or clone %s: %w", remoteURL(change.Target), err)
 	}
@@ -495,20 +537,22 @@ func (t *GoGitTransport) PushBranch(ctx context.Context, change Change, authRef 
 	if err != nil {
 		return PushResult{}, fmt.Errorf("head: %w", err)
 	}
-	// Stale base guard before any write: never build on an obsolete base.
-	if change.BaseCommit != "" && head.Hash().String() != change.BaseCommit {
-		return PushResult{}, &ConflictError{Expected: change.BaseCommit, Actual: head.Hash().String()}
-	}
-
 	branch := change.Branch
 	if branch == "" {
 		branch = change.Target.Branch
 	}
 
-	// Same-content short-circuit: the file already holds the requested content at head, so the
-	// change is already delivered.
+	// Same-content short-circuit, checked before the stale-base guard: a file that already holds the
+	// requested content is delivered whatever base the caller holds, because there is nothing left to
+	// write. Guarding first turned a retry of a push that had landed into a conflict against the base
+	// that push had moved.
 	if existing, readErr := readFileAtHead(repo, change.Target.Path); readErr == nil && bytes.Equal(existing, change.Content) {
 		return PushResult{Repository: change.Target.Repository, Branch: branch, Commit: head.Hash().String()}, nil
+	}
+
+	// Stale base guard before any write: never build on an obsolete base.
+	if change.BaseCommit != "" && head.Hash().String() != change.BaseCommit {
+		return PushResult{}, &ConflictError{Expected: change.BaseCommit, Actual: head.Hash().String()}
 	}
 
 	// Parent directories are created for the new-file vacancy case.
@@ -532,6 +576,16 @@ func (t *GoGitTransport) PushBranch(ctx context.Context, change Change, authRef 
 	})
 	if err != nil {
 		return PushResult{}, fmt.Errorf("commit: %w", err)
+	}
+	// A proposal pushes a branch that does not exist locally: the clone is single-branch on the
+	// target and go-git resolves a refspec source against the local refs, so without this ref the
+	// push carries no command and returns NoErrAlreadyUpToDate — success for a push that never
+	// happened.
+	if branch != change.Target.Branch {
+		refErr := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(branch), commitHash))
+		if refErr != nil {
+			return PushResult{}, fmt.Errorf("create proposal ref %s: %w", branch, refErr)
+		}
 	}
 	// Proposal pushes go to a dedicated branch, direct pushes to the mapped branch. The
 	// refspec is a plain non-forcing push.

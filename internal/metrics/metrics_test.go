@@ -82,6 +82,7 @@ func TestInstrumentsBuildAndRecord(t *testing.T) {
 	RecordGitOpsDelivery("proposal", "proposal_failed")
 	RecordOpenFGACheck("allow")
 	RecordOIDCAuth("success")
+	RecordSecretListing("degraded", 30, 1200*time.Millisecond)
 
 	got := collect(t, reader)
 	for _, name := range []string{
@@ -91,6 +92,8 @@ func TestInstrumentsBuildAndRecord(t *testing.T) {
 		"kubeseal_ui_gitops_delivery_total",
 		"kubeseal_ui_openfga_check_total",
 		"kubeseal_ui_oidc_auth_total",
+		"kubeseal_ui_secret_listing_duration_seconds",
+		"kubeseal_ui_secret_listing_items",
 	} {
 		if _, ok := got[name]; !ok {
 			t.Errorf("metric %s not recorded", name)
@@ -106,6 +109,51 @@ func TestInstrumentsBuildAndRecord(t *testing.T) {
 			t.Errorf("gitops_delivery attrs mismatch: %+v", dlv)
 		}
 	}
+	// The listing's cost is per Secret, so its item count is recorded beside its duration, and both
+	// carry the outcome that says whether the cost bought a complete answer.
+	if items, ok := got["kubeseal_ui_secret_listing_items"]; ok {
+		if !histogramHasAttrs(t, items, attribute.String("result", "degraded")) {
+			t.Errorf("listing items attrs mismatch: %+v", items)
+		}
+	}
+	if dur, ok := got["kubeseal_ui_secret_listing_duration_seconds"]; ok {
+		if !histogramHasAttrs(t, dur, attribute.String("result", "degraded")) {
+			t.Errorf("listing duration attrs mismatch: %+v", dur)
+		}
+	}
+}
+
+// histogramHasAttrs reports whether some data point carries exactly these attributes. Histograms
+// need their own walk: findAttrs asserts the int64 sum shape.
+func histogramHasAttrs(t *testing.T, m metricdata.Metrics, want ...attribute.KeyValue) bool {
+	t.Helper()
+	var points []attribute.Set
+	switch data := m.Data.(type) {
+	case metricdata.Histogram[float64]:
+		for _, dp := range data.DataPoints {
+			points = append(points, dp.Attributes)
+		}
+	case metricdata.Histogram[int64]:
+		for _, dp := range data.DataPoints {
+			points = append(points, dp.Attributes)
+		}
+	default:
+		t.Fatalf("metric %s: not a histogram", m.Name)
+	}
+	for _, set := range points {
+		match := true
+		for _, w := range want {
+			v, exists := set.Value(w.Key)
+			if !exists || v != w.Value {
+				match = false
+				break
+			}
+		}
+		if match && len(set.ToSlice()) == len(want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEmptyLabelValuesBecomeUnknown(t *testing.T) {

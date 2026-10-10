@@ -199,28 +199,54 @@ type partialSealedSecret struct {
 	} `yaml:"spec"`
 }
 
-// MatchesSealedSecret reports whether raw YAML content (single or multi-doc) holds a
-// SealedSecret matching the given name and namespace.
-func MatchesSealedSecret(content []byte, namespace, name string) bool {
-	docs := bytes.Split(content, []byte("\n---"))
-	for _, docBytes := range docs {
+// identityKey is how a SealedSecret is looked up. The separator cannot occur in a Kubernetes name,
+// so no (namespace, name) pair collides with another.
+func identityKey(namespace, name string) string { return namespace + "\x00" + name }
+
+// sealedSecretIdentities returns the identity of every SealedSecret document in content. One parser
+// serves both the single-content match and the branch search index, so a file a search matches is
+// indexed under exactly the identity that search would have matched.
+func sealedSecretIdentities(content []byte) []string {
+	var identities []string
+	for _, docBytes := range bytes.Split(content, []byte("\n---")) {
 		var doc partialSealedSecret
 		if err := yaml.Unmarshal(docBytes, &doc); err != nil {
 			continue
 		}
-		if doc.Kind != "SealedSecret" || doc.Metadata.Name != name {
+		if doc.Kind != "SealedSecret" {
 			continue
 		}
-		manifestNs := doc.Metadata.Namespace
-		if manifestNs == "" {
-			manifestNs = doc.Spec.Template.Metadata.Namespace
+		namespace := doc.Metadata.Namespace
+		if namespace == "" {
+			namespace = doc.Spec.Template.Metadata.Namespace
 		}
-		if manifestNs != "" && manifestNs != namespace {
-			continue
+		identities = append(identities, identityKey(namespace, doc.Metadata.Name))
+	}
+	return identities
+}
+
+// MatchesSealedSecret reports whether raw YAML content (single or multi-doc) holds a
+// SealedSecret matching the given name and namespace. A manifest that names no namespace is matched
+// by name alone, whatever namespace the caller asked about.
+func MatchesSealedSecret(content []byte, namespace, name string) bool {
+	for _, identity := range sealedSecretIdentities(content) {
+		if identity == identityKey(namespace, name) || identity == identityKey("", name) {
+			return true
 		}
-		return true
 	}
 	return false
+}
+
+// lookupIdentity resolves an identity against an index of identityKey to path, applying the same
+// rule MatchesSealedSecret applies to content: the identity asked for, or a manifest that names no
+// namespace and so matches by name alone. Both are answers, and the one that names the namespace is
+// preferred — it is the one certainly about the identity that was asked for.
+func lookupIdentity(index map[string]string, namespace, name string) (string, bool) {
+	if path, ok := index[identityKey(namespace, name)]; ok {
+		return path, true
+	}
+	path, ok := index[identityKey("", name)]
+	return path, ok
 }
 
 func (t *LocalTransport) SearchManifest(_ context.Context, repository, branch, namespace, name, _ string) (ManifestSnapshot, error) {

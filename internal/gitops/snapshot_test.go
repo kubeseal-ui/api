@@ -3,6 +3,7 @@ package gitops
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 )
 
@@ -165,6 +166,112 @@ func TestSnapshotSearchIsDeterministic(t *testing.T) {
 		if found.Target.Path != "a-first.yaml" {
 			t.Fatalf("search path = %q, want the lexicographically first match", found.Target.Path)
 		}
+	}
+}
+
+// The index answers the question MatchesSealedSecret answers, and a listing now resolves every
+// Secret it returns through it — so the properties that matter are that it never names a file the
+// matcher would reject, and never misses a file the matcher would accept. The two disagree on one
+// case, deliberately: a manifest that declares the namespace is preferred over one that declares
+// none and matches by name alone.
+func TestIdentityIndexResolvesWhatMatchesSealedSecretResolves(t *testing.T) {
+	files := map[string][]byte{
+		"a.yaml": []byte(apiSealedSecret),
+		"b.yaml": []byte(`apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: api
+spec:
+  template:
+    metadata:
+      namespace: payments
+`),
+		"c.yaml": []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api\n  namespace: payments\n"),
+		"d.yaml": []byte("not: [valid"),
+	}
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	index := buildIdentityIndex(files)
+
+	queries := []struct{ namespace, name string }{
+		{"payments", "api"}, {"other", "api"}, {"payments", "db"},
+		{"", "api"}, {"", ""}, {"payments", ""},
+	}
+	for _, query := range queries {
+		matched := false
+		for _, path := range paths {
+			matched = matched || MatchesSealedSecret(files[path], query.namespace, query.name)
+		}
+		got, ok := lookupIdentity(index, query.namespace, query.name)
+		if !ok {
+			if matched {
+				t.Errorf("query %v matched a file but the index found nothing", query)
+			}
+			continue
+		}
+		if !matched {
+			t.Errorf("query %v found %q but no file matches", query, got)
+			continue
+		}
+		if !MatchesSealedSecret(files[got], query.namespace, query.name) {
+			t.Errorf("query %v resolved to %q, which does not match", query, got)
+		}
+	}
+}
+
+// The one case where the index and a plain scan differ, pinned so the preference is a decision
+// rather than an accident of map order: both files match a nameless-namespace query, and the one
+// that declares the namespace wins wherever it sorts.
+func TestIdentityIndexPrefersTheManifestThatDeclaresTheNamespace(t *testing.T) {
+	namespaced := []byte("apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: api\n  namespace: payments\n")
+	nameless := []byte("apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: api\n")
+	// The nameless manifest sorts first, so a scan that took the first match would pick it.
+	index := buildIdentityIndex(map[string][]byte{"a-nameless.yaml": nameless, "z-namespaced.yaml": namespaced})
+
+	got, ok := lookupIdentity(index, "payments", "api")
+	if !ok || got != "z-namespaced.yaml" {
+		t.Fatalf("resolved to %q (ok = %v), want the manifest that declares the namespace", got, ok)
+	}
+	// A namespace no manifest declares still reaches the nameless one, by name alone.
+	got, ok = lookupIdentity(index, "development", "api")
+	if !ok || got != "a-nameless.yaml" {
+		t.Fatalf("resolved to %q (ok = %v), want the nameless manifest", got, ok)
+	}
+}
+
+// The index is derived from the snapshot, so a push that drops the snapshot must drop the index
+// with it: an index outliving its snapshot would keep naming the path the push replaced.
+func TestSnapshotSearchIndexIsDroppedWithItsSnapshot(t *testing.T) {
+	transport, _ := countingBranchTransport(t)
+	transport.Seed(Target{Repository: "platform", Branch: "main", Path: "b.yaml"}, apiSealedSecret, "abc")
+	snapshot := NewSnapshotTransport(transport)
+
+	found, err := snapshot.SearchManifest(t.Context(), "platform", "main", "payments", "api", "auth")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if found.Target.Path != "b.yaml" {
+		t.Fatalf("search path = %q, want b.yaml", found.Target.Path)
+	}
+
+	// A second manifest for the same identity, at a path that sorts ahead of the indexed one.
+	if _, err := snapshot.PushBranch(t.Context(), Change{
+		Target:     Target{Repository: "platform", Branch: "main", Path: "a.yaml"},
+		BaseCommit: "abc",
+		Content:    []byte(apiSealedSecret),
+	}, "auth"); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	found, err = snapshot.SearchManifest(t.Context(), "platform", "main", "payments", "api", "auth")
+	if err != nil {
+		t.Fatalf("search after push: %v", err)
+	}
+	if found.Target.Path != "a.yaml" {
+		t.Fatalf("search path after push = %q, want the newly pushed a.yaml", found.Target.Path)
 	}
 }
 

@@ -50,6 +50,23 @@ type branchState struct {
 	mu       sync.Mutex
 	loaded   bool
 	snapshot BranchSnapshot
+	// identity maps every SealedSecret identity in the snapshot to the path holding it. Built on the
+	// first search and dropped with the snapshot it was derived from.
+	identity map[string]string
+}
+
+// load pulls the branch once and fills the state. The caller holds state.mu, so concurrent readers
+// of a cold branch share one fetch rather than racing.
+func (s *branchState) load(ctx context.Context, reader BranchReader, repository, branch, authRef string) error {
+	if s.loaded {
+		return nil
+	}
+	snapshot, err := reader.ReadBranch(ctx, repository, branch, authRef)
+	if err != nil {
+		return err
+	}
+	s.snapshot, s.loaded = snapshot, true
+	return nil
 }
 
 // NewSnapshotTransport wraps a transport for one request. A nil inner, or one that cannot
@@ -89,6 +106,7 @@ func (t *SnapshotTransport) invalidate(repository, branch string) {
 	defer state.mu.Unlock()
 	state.loaded = false
 	state.snapshot = BranchSnapshot{}
+	state.identity = nil
 }
 
 // snapshotOf returns the branch's file map, pulling once. The per-branch lock is held across the
@@ -97,12 +115,8 @@ func (t *SnapshotTransport) snapshotOf(ctx context.Context, repository, branch, 
 	state := t.stateFor(repository, branch)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if !state.loaded {
-		snapshot, err := t.reader.ReadBranch(ctx, repository, branch, authRef)
-		if err != nil {
-			return BranchSnapshot{}, err
-		}
-		state.snapshot, state.loaded = snapshot, true
+	if err := state.load(ctx, t.reader, repository, branch, authRef); err != nil {
+		return BranchSnapshot{}, err
 	}
 	return state.snapshot, nil
 }
@@ -128,34 +142,53 @@ func (t *SnapshotTransport) ReadManifest(ctx context.Context, target Target, aut
 	return ManifestSnapshot{Target: target, Content: append([]byte(nil), content...), Commit: snapshot.Commit}, nil
 }
 
-// SearchManifest scans the branch snapshot instead of pulling and walking the tree again.
-//
-// Paths are visited in sorted order rather than map order: two files claiming the same
-// SealedSecret identity is a misconfiguration, but it must not make drift flap between requests,
-// and the tree walk this replaces was already ordered.
+// SearchManifest answers from an index of the branch's identities rather than scanning the snapshot
+// per search. A listing resolves drift for every Secret it returns, and an unindexed scan parses
+// every document in the branch, so the scan costs the whole branch once per Secret.
 func (t *SnapshotTransport) SearchManifest(ctx context.Context, repository, branch, namespace, name, authRef string) (ManifestSnapshot, error) {
 	if t.reader == nil {
 		return t.inner.SearchManifest(ctx, repository, branch, namespace, name, authRef)
 	}
-	snapshot, err := t.snapshotOf(ctx, repository, branch, authRef)
-	if err != nil {
+	state := t.stateFor(repository, branch)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.load(ctx, t.reader, repository, branch, authRef); err != nil {
 		return ManifestSnapshot{}, err
 	}
-	paths := make([]string, 0, len(snapshot.Files))
-	for path := range snapshot.Files {
+	if state.identity == nil {
+		state.identity = buildIdentityIndex(state.snapshot.Files)
+	}
+	path, ok := lookupIdentity(state.identity, namespace, name)
+	if !ok {
+		return ManifestSnapshot{}, ErrNotFound
+	}
+	return ManifestSnapshot{
+		Target:  Target{Repository: repository, Branch: branch, Path: path},
+		Content: append([]byte(nil), state.snapshot.Files[path]...),
+		Commit:  state.snapshot.Commit,
+	}, nil
+}
+
+// buildIdentityIndex maps each SealedSecret identity in a branch to the path holding it.
+//
+// Paths are visited in sorted order rather than map order: two files claiming one identity is a
+// misconfiguration, but which of them answers must not flap between requests, and the tree walk the
+// search replaced was already ordered. The first path in that order wins.
+func buildIdentityIndex(files map[string][]byte) map[string]string {
+	paths := make([]string, 0, len(files))
+	for path := range files {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+	index := make(map[string]string, len(paths))
 	for _, path := range paths {
-		if MatchesSealedSecret(snapshot.Files[path], namespace, name) {
-			return ManifestSnapshot{
-				Target:  Target{Repository: repository, Branch: branch, Path: path},
-				Content: append([]byte(nil), snapshot.Files[path]...),
-				Commit:  snapshot.Commit,
-			}, nil
+		for _, identity := range sealedSecretIdentities(files[path]) {
+			if _, taken := index[identity]; !taken {
+				index[identity] = path
+			}
 		}
 	}
-	return ManifestSnapshot{}, ErrNotFound
+	return index
 }
 
 // PreviousManifest delegates to the wrapped transport when it can read history, and reports

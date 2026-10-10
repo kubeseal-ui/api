@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
@@ -202,12 +203,12 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 	}
 	change, mapping := cr.Change, cr.Mapping
 	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
-		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
+		h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
 	}
 	if err = cr.validateManifest(); err != nil {
-		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_manifest")
+		h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "invalid_manifest")
 		writeError(w, r, http.StatusBadRequest, "INVALID_MANIFEST", "Manifest is not a SealedSecret for this name and namespace")
 		return
 	}
@@ -216,11 +217,11 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 	resolved, err := h.resolveDeliveryPath(r.Context(), cr)
 	if err != nil {
 		if errors.Is(err, errTargetPathNotAllowed) {
-			h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_target_path")
+			h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "invalid_target_path")
 			writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
 			return
 		}
-		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "error")
+		h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "error")
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
@@ -229,15 +230,15 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 	if err != nil {
 		var base *gitops.BaseCommitError
 		if errors.As(err, &base) {
-			h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "conflict")
+			h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "conflict")
 			writeError(w, r, http.StatusConflict, "BASE_COMMIT_CONFLICT", "Base commit conflict")
 			return
 		}
-		h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "error")
+		h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "error")
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
-	h.emitSecurityEvent(r, "gitops_dry_run", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "success")
+	h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "success")
 	// "after" is the key the client reads and posts straight back to /gitops/deliver; "diff" stays
 	// for compatibility with the original handler response.
 	jsonResponse(w, http.StatusOK, gitOpsDryRunResponse{
@@ -263,6 +264,21 @@ type gitOpsDryRunResponse struct {
 	Mode       policy.GitDeliveryMode `json:"mode"`
 }
 
+// gitDeliveryLog records the Git-side detail the security event does not carry. That event's
+// namespace and resource fields name the Secret, which is what the audit trail is queried by, so
+// the repository and file path belong beside it here rather than in those fields.
+func gitDeliveryLog(r *http.Request, cr gitChangeRequest, change gitops.Change, branch, result string, err error) {
+	attrs := []any{
+		"namespace", cr.Namespace, "name", cr.Name,
+		"repository", change.Target.Repository, "branch", branch, "path", change.Target.Path,
+		"result", result, "request_id", requestID(r),
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	slog.Info("gitops delivery", attrs...)
+}
+
 func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.Request) {
 	cr, err := h.gitChange(r)
 	if err != nil {
@@ -272,7 +288,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	}
 	change, mapping := cr.Change, cr.Mapping
 	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
-		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "denied")
+		h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "denied")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "denied")
 		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
 		return
@@ -280,13 +296,13 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	// Checked before the idempotency store is consulted: a payload that cannot be delivered is not
 	// an attempt whose result is worth recording.
 	if err = cr.validateManifest(); err != nil {
-		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_manifest")
+		h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "invalid_manifest")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "invalid_manifest")
 		writeError(w, r, http.StatusBadRequest, "INVALID_MANIFEST", "Manifest is not a SealedSecret for this name and namespace")
 		return
 	}
 	if mapping.Mode == policy.GitDeliveryProposal && mapping.ProposalAdapter == nil {
-		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_unavailable")
+		h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "proposal_unavailable")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "proposal_unavailable")
 		writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 		return
@@ -297,12 +313,12 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	resolved, err := h.resolveDeliveryPath(r.Context(), cr)
 	if err != nil {
 		if errors.Is(err, errTargetPathNotAllowed) {
-			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "invalid_target_path")
+			h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "invalid_target_path")
 			metrics.RecordGitOpsDelivery(string(mapping.Mode), "invalid_target_path")
 			writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
 			return
 		}
-		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "error")
+		h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "error")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "failed")
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
@@ -321,16 +337,24 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	if mapping.Mode == policy.GitDeliveryProposal {
 		change.Branch = proposalBranch(cr.Namespace, cr.Name)
 	}
+	// The branch this push lands on, resolved the way the transport resolves it, for log lines
+	// written before a PushResult exists.
+	branch := change.Branch
+	if branch == "" {
+		branch = change.Target.Branch
+	}
 	pushed, err := h.GitTransport.PushBranch(r.Context(), change, mapping.AuthRef)
 	if err != nil {
 		var conflict *gitops.ConflictError
 		if errors.As(err, &conflict) {
-			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "conflict")
+			gitDeliveryLog(r, cr, change, branch, "conflict", err)
+			h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "conflict")
 			metrics.RecordGitOpsDelivery(string(mapping.Mode), "conflict")
 			writeError(w, r, http.StatusConflict, "GIT_CONFLICT", "Git conflict")
 			return
 		}
-		h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "error")
+		gitDeliveryLog(r, cr, change, branch, "failed", err)
+		h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "error")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "failed")
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
@@ -339,20 +363,23 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	if mapping.Mode == policy.GitDeliveryProposal {
 		provider := mapping.ProposalAdapter
 		if provider == nil {
-			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_unavailable")
+			gitDeliveryLog(r, cr, change, pushed.Branch, "proposal_unavailable", nil)
+			h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "proposal_unavailable")
 			writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
 			return
 		}
 		proposal, err := provider.OpenProposal(r.Context(), gitops.ProposalRequest{Change: change, Push: pushed})
 		if err != nil {
-			h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "proposal_failed")
+			gitDeliveryLog(r, cr, change, pushed.Branch, "proposal_failed", err)
+			h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "proposal_failed")
 			metrics.RecordGitOpsDelivery(string(mapping.Mode), "proposal_failed")
 			writeError(w, r, http.StatusBadGateway, "PROPOSAL_FAILED", "Proposal failed")
 			return
 		}
 		result["proposal_url"] = proposal.URL
 	}
-	h.emitSecurityEvent(r, "gitops_delivery", change.Target.Repository, change.Target.Path, "", string(mapping.Mode), "success")
+	gitDeliveryLog(r, cr, change, pushed.Branch, "success", nil)
+	h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "success")
 	metrics.RecordGitOpsDelivery(string(mapping.Mode), "success")
 	jsonResponse(w, http.StatusOK, result)
 }

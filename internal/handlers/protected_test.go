@@ -162,6 +162,42 @@ func TestSecretsHandlerReturnsMetadataAndDriftWithoutYAML(t *testing.T) {
 	}
 }
 
+// gitReadFailures answers every Git read with an error: the shape of a Git outage reached through a
+// listing. LocalTransport has no ReadBranch, so wrapping it in the request's SnapshotTransport
+// passes reads straight through to these.
+type gitReadFailures struct{ *gitops.LocalTransport }
+
+func (gitReadFailures) ReadManifest(context.Context, gitops.Target, string) (gitops.ManifestSnapshot, error) {
+	return gitops.ManifestSnapshot{}, errors.New("git unavailable")
+}
+
+func (gitReadFailures) SearchManifest(context.Context, string, string, string, string, string) (gitops.ManifestSnapshot, error) {
+	return gitops.ManifestSnapshot{}, errors.New("git unavailable")
+}
+
+// A listing whose Git state cannot be read still answers: a Secret with unknown drift is more use to
+// the rail than no listing at all. What it must not do is report that as an ordinary success — the
+// per-Secret failure is logged and the listing is counted as degraded, which is what makes an outage
+// visible instead of looking like a cluster of unrelated unknowns.
+func TestSecretsHandlerDegradesRatherThanFailingWhenGitIsUnreadable(t *testing.T) {
+	live := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: db\n  namespace: ns\nspec:\n  encryptedData:\n    password: cipher\n"
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "db", Namespace: "ns", YAML: live}}}
+	h := NewProtectedHandlersWithGitOps(store, gitReadFailures{gitops.NewLocalTransport()}, k8s, nil, false)
+
+	rr := httptest.NewRecorder()
+	h.SecretsHandler(rr, protectedRequest(http.MethodGet, "/api/v1/secrets?namespace=ns", "", protectedIdentity(policy.MetadataRead)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want the listing to answer: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"drift":"unknown"`) || !strings.Contains(rr.Body.String(), `"name":"db"`) {
+		t.Fatalf("degraded listing did not report the Secret with unknown drift: %s", rr.Body.String())
+	}
+}
+
 func TestSecretHandlerReturnsMetadataAndGitStatus(t *testing.T) {
 	live := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: db\n  namespace: ns\nspec:\n  encryptedData:\n    password: cipher\n"
 	transport := gitops.NewLocalTransport()

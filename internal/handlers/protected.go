@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	authmw "github.com/kubeseal-ui/api/internal/auth/middleware"
@@ -63,6 +64,12 @@ const (
 	opResultConflict       = "conflict"
 	opResultFailed         = "failed"
 )
+
+// opResultDegraded is the listing's own outcome, outside the operation vocabulary above: it
+// answered with less than it was asked for, because some Secret's Git state could not be read. Not
+// "failed" — the response is a success — and not "success", because an alert on this is how a Git
+// outage becomes visible.
+const opResultDegraded = "degraded"
 
 func NewProtectedHandlers(k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, enableDecrypt bool) *ProtectedHandlers {
 	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, idempotency: newIdempotencyStore()}
@@ -574,9 +581,21 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 	// One transport for the whole listing: the shared snapshot is what keeps this loop from turning
 	// into one Git fetch per Secret.
 	transport := h.requestTransport()
+	started := time.Now()
+	result := opResultSuccess
 	for i := range secrets {
 		git, gitErr := h.gitStatus(r.Context(), transport, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "", false)
 		if gitErr != nil {
+			// Degraded, not silent: the listing still answers, because a Secret whose drift is
+			// unknown is more use to the rail than no listing at all. Only the first failure is
+			// logged — they share one cause, and this endpoint is a rail's poll, so a line per
+			// Secret per focus is a flood that says the same thing 300 times.
+			if result != opResultDegraded {
+				slog.Warn("listing git status failed",
+					"namespace", secrets[i].Namespace, "name", secrets[i].Name,
+					"request_id", requestID(r), "error", gitErr)
+			}
+			result = opResultDegraded
 			git = map[string]any{"managed": true, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 		}
 		items = append(items, map[string]any{
@@ -587,6 +606,7 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 			"scope": secrets[i].Scope, "created_at": secrets[i].CreatedAt, "git": git,
 		})
 	}
+	metrics.RecordSecretListing(result, len(items), time.Since(started))
 	jsonResponse(w, http.StatusOK, map[string]any{"secrets": items})
 }
 
