@@ -362,7 +362,7 @@ func main() {
 		if cfg.FakeK8sClient {
 			privProvider = &devPrivProvider{key: devPrivateKey()}
 		} else {
-			privProvider = kubePrivateKeyProvider{client: k8sClient}
+			privProvider = newKubePrivateKeyProvider(k8sClient, nil)
 		}
 	}
 	cryptoWrapper := crypto.New(certProvider, privProvider)
@@ -425,12 +425,17 @@ func main() {
 		slog.Error("router construction failed", "error", routerErr)
 		os.Exit(1)
 	}
+	// writeGrace keeps the connection write deadline above the request deadline. WriteTimeout is a
+	// write deadline on the connection, not a cancellation of the handler: set below the request
+	// deadline it severs the response while the handler runs to completion and logs the success it
+	// never delivered, which reaches the operator as an unexplained 502 with a 200 in the log.
+	const writeGrace = 15 * time.Second
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		ReadTimeout:       cfg.APITimeout,
+		WriteTimeout:      cfg.APITimeout + writeGrace,
 		IdleTimeout:       60 * time.Second,
 	}
 

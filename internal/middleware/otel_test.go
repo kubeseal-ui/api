@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -99,7 +100,8 @@ func TestOTelSpanRecordsStatusOnSpan(t *testing.T) {
 
 func TestOTelSpanRoutePatternFallsBackConservatively(t *testing.T) {
 	// Resource-shaped segments collapse to "unmatched" so namespace and secret names never
-	// become labels.
+	// become labels. This is the fallback for a request no route claimed; a matched route is
+	// labelled from the router's own table, which the tests below cover.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/secrets/db/pg-cred", nil)
 	if got := OTelSpanRoutePattern(req); got != "unmatched" {
 		t.Fatalf("route pattern = %q, want unmatched", got)
@@ -108,10 +110,58 @@ func TestOTelSpanRoutePatternFallsBackConservatively(t *testing.T) {
 	if got := OTelSpanRoutePattern(req); got != "/healthz" {
 		t.Fatalf("route pattern = %q, want /healthz", got)
 	}
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/secrets/db/pg-cred", nil)
-	req = req.WithContext(contextWithRoutePattern(req.Context(), "/api/v1/secrets/{namespace}/{name}"))
-	if got := OTelSpanRoutePattern(req); got != "/api/v1/secrets/{namespace}/{name}" {
-		t.Fatalf("route pattern = %q, want the router pattern", got)
+}
+
+func TestSetRoutePatternLabelsMatchedRoute(t *testing.T) {
+	router := chi.NewRouter()
+	router.Group(func(r chi.Router) {
+		r.Use(SetRoutePattern)
+		r.Get("/api/v1/secrets/{namespace}/{name}", func(http.ResponseWriter, *http.Request) {})
+	})
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	RouteRecorder(RequestLogger(logger)(router)).
+		ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/secrets/db/pg-cred", nil))
+
+	out := buf.String()
+	if !strings.Contains(out, `"route":"/api/v1/secrets/{namespace}/{name}"`) {
+		t.Fatalf("route not labelled by the matched pattern: %s", out)
+	}
+	// The label is the point: the resource name must not reach the log line or the metric.
+	if strings.Contains(out, "pg-cred") {
+		t.Fatalf("log line leaked the resource name: %s", out)
+	}
+}
+
+func TestOTelSpanNameAndRouteUseMatchedPattern(t *testing.T) {
+	recorder, _ := spanTracerProvider(t)
+
+	router := chi.NewRouter()
+	router.Group(func(r chi.Router) {
+		r.Use(SetRoutePattern)
+		r.Get("/api/v1/secrets/{namespace}/{name}", func(http.ResponseWriter, *http.Request) {})
+	})
+	RouteRecorder(OTelSpan(router)).
+		ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/secrets/db/pg-cred", nil))
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	want := "HTTP GET /api/v1/secrets/{namespace}/{name}"
+	if got := spans[0].Name(); got != want {
+		t.Fatalf("span name = %q, want %q", got, want)
+	}
+	var routes []string
+	for _, attr := range spans[0].Attributes() {
+		if attr.Key == attribute.Key("http.route") {
+			routes = append(routes, attr.Value.AsString())
+		}
+	}
+	// Exactly one, and the matched pattern: a value written at start would leave a stale second.
+	if len(routes) != 1 || routes[0] != "/api/v1/secrets/{namespace}/{name}" {
+		t.Fatalf("http.route attributes = %v, want the matched pattern once", routes)
 	}
 }
 

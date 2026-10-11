@@ -4,8 +4,9 @@
 // The api never writes to Kubernetes: only list/get reads over namespaces, SealedSecrets,
 // and (in decrypt-enabled mode) the controller's private-key Secret. Active-key selection
 // is deterministic and never depends on API list order; ambiguous or malformed state fails
-// closed rather than picking the first item. Key bytes are never cached, logged, or
-// retained after use.
+// closed rather than picking the first item. This package caches nothing and key bytes are never
+// logged: every call re-reads the cluster. Retention belongs to the caller — the decrypt provider in
+// cmd/server deliberately holds parsed keys for a short TTL.
 package kubernetes
 
 import (

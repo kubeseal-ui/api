@@ -8,10 +8,28 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
+)
+
+const (
+	// The documented API timeout: a 30-second default with a 120-second hard maximum, per the
+	// Limits table in internal-docs/product/prd.md. A value outside the bounds fails startup
+	// rather than being clamped, which is what that table promises.
+	DefaultAPITimeout = 30 * time.Second
+	MaxAPITimeout     = 120 * time.Second
+	// minAPITimeout is the floor below which the server could not reliably answer even its own
+	// health checks, so a value under it is a misconfiguration rather than a preference.
+	minAPITimeout = 5 * time.Second
 )
 
 type Config struct {
 	Port int
+
+	// APITimeout bounds one request. It is applied to the request context and to the server's
+	// connection deadlines, and the connection write deadline is deliberately set above it: set
+	// below, it would kill the response while the handler ran on to log a success nobody
+	// received, which reads as an unexplained 502 with a 200 in the log.
+	APITimeout time.Duration
 
 	LogLevel string
 
@@ -132,6 +150,17 @@ func Load() (Config, error) {
 		OTelMetricIntervalSeconds: os.Getenv("OTEL_METRIC_INTERVAL_SECONDS"),
 	}
 
+	// Set before the environment override so an unset variable keeps the documented default
+	// rather than a zero duration, which would cancel every request on arrival.
+	cfg.APITimeout = DefaultAPITimeout
+	if v := os.Getenv("KUBESEAL_API_TIMEOUT_SECONDS"); v != "" {
+		parsed, sErr := strconv.Atoi(v)
+		if sErr != nil {
+			return Config{}, fmt.Errorf("invalid KUBESEAL_API_TIMEOUT_SECONDS %q: not a number", v)
+		}
+		cfg.APITimeout = time.Duration(parsed) * time.Second
+	}
+
 	if v := os.Getenv("KUBESEAL_API_PORT"); v != "" {
 		parsed, sErr := strconv.Atoi(v)
 		if sErr != nil || parsed <= 0 || parsed > 65535 {
@@ -161,6 +190,9 @@ func Load() (Config, error) {
 }
 
 func (c Config) validate() error {
+	if c.APITimeout < minAPITimeout || c.APITimeout > MaxAPITimeout {
+		return fmt.Errorf("invalid API timeout %s: must be between %s and %s", c.APITimeout, minAPITimeout, MaxAPITimeout)
+	}
 	switch strings.ToLower(c.LogLevel) {
 	case "debug", "info", "warn", "error":
 		return nil
@@ -181,8 +213,8 @@ func (c Config) Ready() bool {
 // threat model, so they flow through.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"port=%d log_level=%s oidc_issuer=%s oidc_client_id=%s enable_decrypt=%t",
-		c.Port, c.LogLevel, c.OIDCIssuer, redactValue("oidc_client_id", c.OIDCClientID), c.EnableDecrypt,
+		"port=%d api_timeout=%s log_level=%s oidc_issuer=%s oidc_client_id=%s enable_decrypt=%t",
+		c.Port, c.APITimeout, c.LogLevel, c.OIDCIssuer, redactValue("oidc_client_id", c.OIDCClientID), c.EnableDecrypt,
 	)
 }
 

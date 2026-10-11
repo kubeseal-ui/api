@@ -293,6 +293,27 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 	return status, nil
 }
 
+// refuseGitRead answers a Git read that failed and returns the audit outcome to record for it.
+//
+// A read failure has not established that Git and the cluster disagree, so it is never reported as
+// drift: that told the operator the two copies differ when Git had not answered at all. A stale
+// base commit is a conflict the caller can resolve, a deadline is the server's own bound rather
+// than a fact about Git, and everything else is a read that did not happen.
+func refuseGitRead(w http.ResponseWriter, r *http.Request, err error) string {
+	var base *gitops.BaseCommitError
+	switch {
+	case errors.As(err, &base):
+		writeError(w, r, http.StatusConflict, "BASE_COMMIT_CONFLICT", "Base commit conflict")
+		return opResultConflict
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		writeError(w, r, http.StatusGatewayTimeout, "TIMEOUT", "The request exceeded the server's time limit")
+		return opResultFailed
+	default:
+		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
+		return opResultFailed
+	}
+}
+
 // gitMovedPastLive reports whether the live manifest is the version the mapped file held before its
 // most recent change — Git moved on and the cluster did not, so overwriting the file would discard
 // the change that moved it. A Secret edited in place matches nothing in that history, so it is never
@@ -922,7 +943,11 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
-	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+	if gitErr != nil {
+		result = refuseGitRead(w, r, gitErr)
+		return
+	}
+	if git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
@@ -1057,7 +1082,11 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	transport := h.requestTransport()
 	git, gitErr := h.gitStatus(r.Context(), transport, namespace, name, secret.YAML, req.BaseCommit, false)
-	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+	if gitErr != nil {
+		result = refuseGitRead(w, r, gitErr)
+		return
+	}
+	if git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
@@ -1165,7 +1194,11 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
-	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+	if gitErr != nil {
+		result = refuseGitRead(w, r, gitErr)
+		return
+	}
+	if git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
