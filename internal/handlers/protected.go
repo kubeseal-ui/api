@@ -386,8 +386,13 @@ func identityDiffers(live, git map[string]any) bool {
 }
 
 func encryptedKeyNamesDiffer(live, git map[string]any) bool {
-	liveKeys, _ := specSection(live, "encryptedData").(map[string]any)
-	gitKeys, _ := specSection(git, "encryptedData").(map[string]any)
+	liveKeys, liveIsMap := specSection(live, "encryptedData").(map[string]any)
+	gitKeys, gitIsMap := specSection(git, "encryptedData").(map[string]any)
+	// One side carrying the section and the other not is itself a difference in key names. The
+	// caller only asks once the two sections are known to be unequal, so this is that case.
+	if liveIsMap != gitIsMap {
+		return true
+	}
 	if len(liveKeys) != len(gitKeys) {
 		return true
 	}
@@ -402,8 +407,8 @@ func encryptedKeyNamesDiffer(live, git map[string]any) bool {
 // specSection reads one field of spec, or nil when either the field or spec itself is absent — which
 // is how a comparison distinguishes a missing section from an empty one that was stripped.
 func specSection(doc map[string]any, field string) any {
-	spec, _ := doc["spec"].(map[string]any)
-	if spec == nil {
+	spec, ok := doc["spec"].(map[string]any)
+	if !ok {
 		return nil
 	}
 	return spec[field]
