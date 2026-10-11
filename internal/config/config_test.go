@@ -140,13 +140,30 @@ func TestReadyRequiresOIDC(t *testing.T) {
 func TestReadyWithOIDC(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
+	t.Setenv("SESSION_SIGNING_KEY", "signing-key-for-test")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if !cfg.Ready() {
-		t.Errorf("Ready: want true (OIDC configured), got false")
+		t.Errorf("Ready: want true (OIDC and signing key configured), got false")
+	}
+}
+
+// A pod missing the signing key mounts no /api/v1 routes at all, so reporting ready would keep it in
+// the Service endpoints while every API call 404s.
+func TestReadyRequiresSessionSigningKey(t *testing.T) {
+	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
+	t.Setenv("SESSION_SIGNING_KEY", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ready() {
+		t.Errorf("Ready: want false (no session signing key), got true")
 	}
 }
 

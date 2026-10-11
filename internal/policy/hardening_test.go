@@ -47,6 +47,56 @@ func TestGitMappingRejectsTraversalAndInvalidTemplate(t *testing.T) {
 	}
 }
 
+// TestIsPathAllowedRefusesNonCanonicalAndEscapingPaths pins the allowlist as a boundary on the path
+// that is actually written, not on the string the client sent.
+//
+// An allowed prefix is matched by string, so `apps/dev/../ci/x.yaml` starts with `apps/dev/` and
+// passes a naive test while the transport joins the raw path onto the worktree, where the filesystem
+// cleans it for real and the write lands in `ci/`. A path that Clean would rewrite is therefore not
+// judged at all.
+func TestIsPathAllowedRefusesNonCanonicalAndEscapingPaths(t *testing.T) {
+	mapping := validMapping("dev")
+	mapping.AllowedPaths = []string{"apps/{namespace}"}
+
+	allowed := []string{
+		"apps/dev/x.yaml",
+		"apps/dev/nested/x.yaml",
+		"apps/dev/.hidden",
+	}
+	for _, path := range allowed {
+		if !mapping.IsPathAllowed(path, "dev", "x") {
+			t.Errorf("IsPathAllowed(%q) = false, want true", path)
+		}
+	}
+
+	refused := []string{
+		"apps/dev/../ci/release.yaml", // climbs out of the granted prefix
+		"apps/dev/sub/../x.yaml",      // climbs within it, so the raw string still matches
+		"apps/dev/./x.yaml",           // not canonical
+		"apps//dev/x.yaml",            // not canonical
+		"apps/dev",                    // the granted directory, not a file in it
+		"apps/dev/",                   // ...nor with a trailing separator
+		"apps/development/x.yaml",     // the prefix must end at a separator
+		"/etc/passwd",                 // absolute
+		"../apps/dev/x.yaml",          // above the checkout
+		"",                            // no path at all
+	}
+	for _, path := range refused {
+		if mapping.IsPathAllowed(path, "dev", "x") {
+			t.Errorf("IsPathAllowed(%q) = true, want false", path)
+		}
+	}
+
+	// Without an allowlist the rule is unchanged: the rendered path, and nothing else.
+	plain := validMapping("dev")
+	if !plain.IsPathAllowed(plain.RenderPath("dev", "x"), "dev", "x") {
+		t.Error("the mapping's own rendered path was refused")
+	}
+	if plain.IsPathAllowed("apps/dev/../dev/x.yaml", "dev", "x") {
+		t.Error("a non-canonical path passed a mapping with no allowlist")
+	}
+}
+
 func TestProposalMappingRequiresAdapter(t *testing.T) {
 	mapping := validMapping("default")
 	mapping.Mode = GitDeliveryProposal

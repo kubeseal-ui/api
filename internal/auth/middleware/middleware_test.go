@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,8 +18,85 @@ import (
 // credential-like literal.
 var csrfTokenVal = "valid-csrf-" + "token"
 
-// fakeOIDCProvider is a stub for refresh tests; no test uses it yet.
-type fakeOIDCProvider struct{}
+// rotatingProvider is an AuthProvider that rotates refresh tokens the way a strict provider does:
+// each token is spendable once, and a retired one is an error rather than a second exchange. It
+// counts exchanges and tracks overlap, which is what shows whether the middleware serialised.
+type rotatingProvider struct {
+	mu        sync.Mutex
+	exchanges int
+	inFlight  int
+	peak      int
+	retired   map[string]bool
+}
+
+func (p *rotatingProvider) LoginURL(*oidc.FlowState) (string, error) {
+	return "", errors.New("not used")
+}
+
+func (p *rotatingProvider) ExchangeCode(context.Context, string, string) (*oidc.TokenResponse, error) {
+	return nil, errors.New("not used")
+}
+
+func (p *rotatingProvider) RevokeToken(context.Context, string) error { return nil }
+
+func (p *rotatingProvider) VerifyIDToken(context.Context, string, string) (*oidc.VerifiedIDToken, error) {
+	return &oidc.VerifiedIDToken{
+		Subject: "user-123", Email: "user@example.com", Name: "Test User", Username: "testuser",
+		Groups: []string{"team-a"}, Expiry: time.Now().Add(time.Hour), IssuedAt: time.Now(),
+	}, nil
+}
+
+func (p *rotatingProvider) RefreshTokens(_ context.Context, refreshToken string) (*oidc.TokenResponse, error) {
+	p.mu.Lock()
+	p.exchanges++
+	p.inFlight++
+	if p.inFlight > p.peak {
+		p.peak = p.inFlight
+	}
+	spent := p.retired[refreshToken]
+	p.retired[refreshToken] = true
+	p.mu.Unlock()
+
+	// Held open long enough that overlapping exchanges really do overlap: without it the goroutines
+	// may serialise by luck and the test would pass against a middleware that does not serialise.
+	time.Sleep(20 * time.Millisecond)
+
+	p.mu.Lock()
+	p.inFlight--
+	p.mu.Unlock()
+
+	if spent {
+		return nil, errors.New("invalid_grant: refresh token already used")
+	}
+	return &oidc.TokenResponse{RefreshToken: "rotated-" + refreshToken, IDToken: "id-token", ExpiresIn: 3600}, nil
+}
+
+func (p *rotatingProvider) counts() (exchanges, peak int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.exchanges, p.peak
+}
+
+// failingProvider refuses every refresh, which is how a provider outage reaches the middleware.
+type failingProvider struct{}
+
+func (failingProvider) LoginURL(*oidc.FlowState) (string, error) {
+	return "", errors.New("not used")
+}
+
+func (failingProvider) ExchangeCode(context.Context, string, string) (*oidc.TokenResponse, error) {
+	return nil, errors.New("not used")
+}
+
+func (failingProvider) RevokeToken(context.Context, string) error { return nil }
+
+func (failingProvider) VerifyIDToken(context.Context, string, string) (*oidc.VerifiedIDToken, error) {
+	return nil, errors.New("token endpoint unavailable")
+}
+
+func (failingProvider) RefreshTokens(context.Context, string) (*oidc.TokenResponse, error) {
+	return nil, errors.New("token endpoint unavailable")
+}
 
 // testSessionData mirrors the internal sessionCookieData for test setup.
 type testSessionData struct {
@@ -264,5 +343,176 @@ func TestIdentityFromContext(t *testing.T) {
 	_, ok2 := GetIdentity(emptyCtx)
 	if ok2 {
 		t.Error("GetIdentity on empty context should return false")
+	}
+}
+
+// refreshRequest builds the request a browser sends while its session is inside the refresh window.
+// The cookie value is built by the caller so the concurrency test can hand the same request to every
+// goroutine without a helper that calls t.Fatalf off the test's goroutine.
+func refreshRequest(sessionCookie, refreshToken, csrfToken string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: "kubeseal_session", Value: sessionCookie})
+	req.AddCookie(&http.Cookie{Name: "kubeseal_refresh", Value: refreshToken})
+	req.AddCookie(&http.Cookie{Name: "kubeseal_csrf", Value: csrfToken})
+	return req
+}
+
+func okHandler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := GetIdentity(r.Context())
+		if !ok {
+			t.Error("identity not in context")
+		}
+		if id.Email != "user@example.com" {
+			t.Errorf("email = %q, want the refreshed identity", id.Email)
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func cookieValues(rr *httptest.ResponseRecorder) map[string]string {
+	values := map[string]string{}
+	for _, c := range rr.Result().Cookies() {
+		values[c.Name] = c.Value
+	}
+	return values
+}
+
+// A session inside the refresh window is renewed on the request that carries it, and the rotation
+// covers all three cookies: the session, the refresh token the provider replaced, and the CSRF
+// cookie whose lifetime came from the token that just expired. Leaving the CSRF cookie behind would
+// retire the double-submit anchor while the session lived on — GETs keep working and every write
+// starts failing 403, which reads as a permissions bug rather than an expired cookie.
+func TestAuthMiddlewareRefreshesANearExpirySession(t *testing.T) {
+	provider := &rotatingProvider{retired: map[string]bool{}}
+	cfg := makeTestConfig()
+	cfg.OIDCProvider = provider
+
+	session := validSessionData()
+	session.Expiry = time.Now().Add(time.Minute).Unix()
+	req := refreshRequest(makeTestSession(t, session, cfg.SigningKey), "refresh-0", session.CSRF)
+
+	rr := httptest.NewRecorder()
+	AuthMiddleware(cfg)(okHandler(t)).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+
+	values := cookieValues(rr)
+	if values[cfg.SessionCookie] == "" {
+		t.Error("no session cookie was written")
+	}
+	if values[cfg.RefreshCookie] != "rotated-refresh-0" {
+		t.Errorf("refresh cookie = %q, want rotated-refresh-0", values[cfg.RefreshCookie])
+	}
+	if values[cfg.CSRFCookie] != session.CSRF {
+		t.Errorf("csrf cookie = %q, want the preserved %q", values[cfg.CSRFCookie], session.CSRF)
+	}
+}
+
+// A page load fires its requests together, so a session near expiry is presented to the middleware
+// many times with the same refresh token. A provider that rotates tokens retires that token on the
+// first exchange and reads a second use as a replay — the answer to which is often to invalidate the
+// whole token family, sending a valid user back to login mid-session. One exchange, and every
+// request answered.
+func TestAuthMiddlewareSerialisesRefreshAcrossConcurrentRequests(t *testing.T) {
+	provider := &rotatingProvider{retired: map[string]bool{}}
+	cfg := makeTestConfig()
+	cfg.OIDCProvider = provider
+
+	session := validSessionData()
+	session.Expiry = time.Now().Add(time.Minute).Unix()
+	// Built here, once, so no goroutine calls a helper that reports through t.
+	sessionCookie := makeTestSession(t, session, cfg.SigningKey)
+
+	handler := AuthMiddleware(cfg)(okHandler(t))
+	const requests = 8
+	responses := make([]*httptest.ResponseRecorder, requests)
+	var wg sync.WaitGroup
+	for i := range responses {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, refreshRequest(sessionCookie, "refresh-0", session.CSRF))
+			responses[i] = rr
+		}(i)
+	}
+	wg.Wait()
+
+	if exchanges, peak := provider.counts(); exchanges != 1 || peak != 1 {
+		t.Errorf("exchanges = %d (peak overlap %d), want 1 and 1", exchanges, peak)
+	}
+	for i, rr := range responses {
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200 (body=%s)", i, rr.Code, rr.Body.String())
+		}
+		if values := cookieValues(rr); values[cfg.RefreshCookie] != "rotated-refresh-0" {
+			t.Errorf("request %d: refresh cookie = %q, want the rotated token", i, values[cfg.RefreshCookie])
+		}
+	}
+}
+
+// A refresh that fails while the session still has time left must not end it. The session in hand is
+// valid until it expires, so a provider outage becomes a failed refresh that the next request
+// retries — not a logout, which is what clearing the cookies here would amount to.
+func TestAuthMiddlewareServesAValidSessionWhenTheRefreshFails(t *testing.T) {
+	cfg := makeTestConfig()
+	cfg.OIDCProvider = &failingProvider{}
+
+	session := validSessionData()
+	session.Expiry = time.Now().Add(time.Minute).Unix()
+	rr := httptest.NewRecorder()
+	AuthMiddleware(cfg)(okHandler(t)).ServeHTTP(rr, refreshRequest(makeTestSession(t, session, cfg.SigningKey), "refresh-0", session.CSRF))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: a transient refresh failure must not end a valid session (body=%s)", rr.Code, rr.Body.String())
+	}
+	if values := cookieValues(rr); values[cfg.SessionCookie] != "" {
+		t.Error("the session cookie was rewritten by a failed refresh")
+	}
+}
+
+// The other half of that rule: a session whose payload has expired has nothing left to serve, so a
+// refresh that cannot renew it is terminal — the cookies are cleared and the request is refused,
+// which is the state the client reads as "log in again".
+func TestAuthMiddlewareClearsAnExpiredSessionWhenTheRefreshFails(t *testing.T) {
+	cfg := makeTestConfig()
+	cfg.OIDCProvider = &failingProvider{}
+
+	session := validSessionData()
+	session.Expiry = time.Now().Add(-time.Minute).Unix()
+	rr := httptest.NewRecorder()
+	AuthMiddleware(cfg)(okHandler(t)).ServeHTTP(rr, refreshRequest(makeTestSession(t, session, cfg.SigningKey), "refresh-0", session.CSRF))
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+	values := cookieValues(rr)
+	for _, name := range []string{cfg.SessionCookie, cfg.RefreshCookie} {
+		if value, ok := values[name]; !ok || value != "" {
+			t.Errorf("cookie %s = %q (present=%v), want it cleared", name, value, ok)
+		}
+	}
+}
+
+// A middleware built without a signing key refuses every request. The alternative — substituting a
+// constant key, which is what this used to do — signs sessions with a value that is in the source,
+// so a deployment that lost the key would authenticate forged cookies instead of failing.
+func TestAuthMiddlewareWithoutASigningKeyRefusesEveryRequest(t *testing.T) {
+	cfg := makeTestConfig()
+	cfg.SigningKey = nil
+
+	called := false
+	rr := httptest.NewRecorder()
+	AuthMiddleware(cfg)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).
+		ServeHTTP(rr, refreshRequest("whatever", "refresh-0", "csrf"))
+
+	if called {
+		t.Error("the next handler ran without a signing key")
+	}
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
 	}
 }

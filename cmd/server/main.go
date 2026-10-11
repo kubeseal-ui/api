@@ -189,6 +189,26 @@ func parseAllowedPaths(raw string) []string {
 	return paths
 }
 
+// checkMappingCredentials refuses a boot whose namespace mappings name a credential
+// GITOPS_CREDENTIAL_REFS does not define.
+//
+// The resolver is consulted per request, so an unknown reference would otherwise surface as a 502
+// on the first delivery — an upstream-error class for what is a configuration mistake, discovered
+// by an operator mid-change rather than at rollout. Both lists are parsed in full here, so the
+// check costs a map and a loop.
+func checkMappingCredentials(specs []policy.GitMappingSpec, refs []gitops.FileCredential) error {
+	known := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		known[ref.AuthRef] = struct{}{}
+	}
+	for _, spec := range specs {
+		if _, ok := known[spec.AuthRef]; !ok {
+			return fmt.Errorf("namespace %q maps to git credential %q, which GITOPS_CREDENTIAL_REFS does not define", spec.Namespace, spec.AuthRef)
+		}
+	}
+	return nil
+}
+
 // proposalAdapterSpec is one parsed GITOPS_PROPOSAL_ADAPTERS entry.
 type proposalAdapterSpec struct {
 	Name      string
@@ -381,6 +401,16 @@ func main() {
 	if transport != nil {
 		slog.Info("gitops delivery enabled", "worktree_dir", cfg.GitWorktreeDir, "credentials", len(parseCredentialRefs(cfg.GitCredentialRefs)))
 	}
+	// Parsed once and reused: the boot check below and the router must see the same mappings.
+	mappingSpecs := parseMappingSpecs(cfg.GitMappingSpecs)
+	if cfg.GitOpsEnabled {
+		if credentialErr := checkMappingCredentials(mappingSpecs, parseCredentialRefs(cfg.GitCredentialRefs)); credentialErr != nil {
+			// Fail closed: a mapping whose credential does not exist can never deliver, so serving
+			// it would mean every change in that namespace fails one request at a time.
+			slog.Error("gitops mapping references an undefined credential", "error", credentialErr)
+			os.Exit(1)
+		}
+	}
 	adapters, adaptersErr := proposalAdapters(&cfg)
 	if adaptersErr != nil {
 		slog.Error("proposal adapter construction failed", "error", adaptersErr)
@@ -414,7 +444,7 @@ func main() {
 		k8s:            k8sClient,
 		transport:      transport,
 		oidcProvider:   oidcProvider,
-		mappingSpecs:   parseMappingSpecs(cfg.GitMappingSpecs),
+		mappingSpecs:   mappingSpecs,
 		adapters:       adapters,
 		policyStore:    policyStore,
 		readyCheck:     readyCheck,

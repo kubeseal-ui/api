@@ -204,8 +204,11 @@ func (c Config) validate() error {
 // Ready reports whether the api has enough configuration to serve requests; /readyz
 // uses it to gate kubelet traffic. EnableDecrypt is deliberately excluded — decryption
 // is gated per request, so a boot that only encrypts or only reads can still be ready.
+//
+// The session signing key is included because a pod missing it mounts no /api/v1 routes at all
+// (router.go), so reporting ready would keep it in the Service endpoints while every API call 404s.
 func (c Config) Ready() bool {
-	return c.OIDCIssuer != "" && c.OIDCClientID != ""
+	return c.OIDCIssuer != "" && c.OIDCClientID != "" && c.SessionSigningKey != ""
 }
 
 // String renders the config for startup logging with every sensitive field replaced by

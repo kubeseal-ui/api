@@ -54,7 +54,7 @@ func ReadyzWithCheck(check func() error) http.HandlerFunc {
 		if !cfg.Ready() {
 			jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
 				"status": "not_ready",
-				"reason": "OIDC issuer or client id not configured",
+				"reason": "OIDC issuer, client id, or session signing key not configured",
 			})
 			return
 		}
