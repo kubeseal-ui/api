@@ -352,6 +352,21 @@ func buildKubernetesClient(cfg config.Config) kubernetes.Client {
 	return client
 }
 
+// prewarmGitBranches pulls every mapped branch in the background at boot so the first request after a
+// restart is served from a warm cache rather than waiting on a cold clone. A fresh pod's git scratch
+// is an emptyDir, so that first pull is a full clone — the slowest one there is. No-op without a
+// transport or mappings; see gitops.PrewarmBranches.
+func prewarmGitBranches(ctx context.Context, transport gitops.GitTransport, mappingSpecs []policy.GitMappingSpec, logger *slog.Logger) {
+	if transport == nil || len(mappingSpecs) == 0 {
+		return
+	}
+	warmTargets := make([]gitops.WarmTarget, 0, len(mappingSpecs))
+	for _, spec := range mappingSpecs {
+		warmTargets = append(warmTargets, gitops.WarmTarget{Repository: spec.Repository, Branch: spec.Branch, AuthRef: spec.AuthRef})
+	}
+	go gitops.PrewarmBranches(ctx, transport, warmTargets, logger)
+}
+
 func main() {
 	flag.Parse()
 	cfg, err := config.Load()
@@ -486,16 +501,9 @@ func main() {
 	}
 
 	// Warm the branch cache off the serving path, so the first request after a restart does not wait
-	// on a cold clone of every mapped repository. A fresh pod's git scratch is an emptyDir, so that
-	// first pull is a full clone — the slowest one there is; prewarming turns it into a boot cost no
-	// user waits on. Backgrounded: readiness must not block on a remote fetch.
-	if transport != nil && len(mappingSpecs) > 0 {
-		warmTargets := make([]gitops.WarmTarget, 0, len(mappingSpecs))
-		for _, spec := range mappingSpecs {
-			warmTargets = append(warmTargets, gitops.WarmTarget{Repository: spec.Repository, Branch: spec.Branch, AuthRef: spec.AuthRef})
-		}
-		go gitops.PrewarmBranches(ctx, transport, warmTargets, logger)
-	}
+	// on a cold clone of every mapped repository. Backgrounded inside the helper: readiness must not
+	// block on a remote fetch.
+	prewarmGitBranches(ctx, transport, mappingSpecs, logger)
 
 	go func() {
 		slog.Info("starting api",
