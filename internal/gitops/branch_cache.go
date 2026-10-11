@@ -94,7 +94,11 @@ func (t *cachingTransport) ReadBranch(ctx context.Context, repository, branch, a
 		snapshot := entry.snapshot
 		if !entry.refreshing {
 			entry.refreshing = true
-			go t.refresh(entry, repository, branch, authRef)
+			// Detached from the request, not torn from it: WithoutCancel keeps the request's trace
+			// and span values so the background pull stays attributable, while dropping its
+			// cancellation so the refresh outlives the request that triggered it — the whole point of
+			// stale-while-revalidate.
+			go t.refresh(context.WithoutCancel(ctx), entry, repository, branch, authRef)
 		}
 		entry.mu.Unlock()
 		return snapshot, nil
@@ -114,13 +118,13 @@ func (t *cachingTransport) ReadBranch(ctx context.Context, repository, branch, a
 // because the request that triggered it may already have returned. fetchedAt advances only on
 // success, so a failed refresh keeps serving the last-good snapshot and is retried on the next read;
 // the refreshing flag means a persistent failure costs one background pull per read, not a herd.
-func (t *cachingTransport) refresh(entry *branchEntry, repository, branch, authRef string) {
+func (t *cachingTransport) refresh(ctx context.Context, entry *branchEntry, repository, branch, authRef string) {
 	defer func() {
 		if t.refreshDone != nil {
 			t.refreshDone()
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), t.ttl)
+	ctx, cancel := context.WithTimeout(ctx, t.ttl)
 	defer cancel()
 	snapshot, err := t.reader.ReadBranch(ctx, repository, branch, authRef)
 	entry.mu.Lock()
