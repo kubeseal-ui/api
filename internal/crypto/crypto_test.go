@@ -362,6 +362,42 @@ func TestResealDeleteLastKeyFails(t *testing.T) {
 	}
 }
 
+// TestResealManyDeletesTheOnlyKeyWhileAddingAnother pins that deleting the only key is allowed when
+// the same batch adds another: the Secret nets to one key, so it is never empty. The "cannot delete
+// the final key" rule must look at the net of the whole batch, not refuse the delete because it
+// sorts ahead of the add in the client's array. Regression for a 400 the editor hit on exactly this
+// edit — delete the one key, add a replacement.
+func TestResealManyDeletesTheOnlyKeyWhileAddingAnother(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := SecretYAML("secret", "default", map[string]string{"key": "old"}, "")
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	// Delete sent before the add, which is the order the editor stages existing-key changes ahead of
+	// new rows.
+	resealed, err := w.ResealMany(t.Context(), sealed, []Mutation{
+		{Key: "key", Op: ResealDelete},
+		{Key: "ff", Value: "new", Op: ResealAdd},
+	})
+	if err != nil {
+		t.Fatalf("ResealMany delete-and-add should be allowed: %v", err)
+	}
+
+	decrypted, err := w.DecryptYAML(t.Context(), resealed)
+	if err != nil {
+		t.Fatalf("DecryptYAML after ResealMany: %v", err)
+	}
+	if strings.Contains(decrypted, "key:") {
+		t.Errorf("deleted key should not appear: %s", decrypted)
+	}
+	if !strings.Contains(decrypted, "ff: new") {
+		t.Errorf("added key should be present: %s", decrypted)
+	}
+}
+
 func TestResealReplaceNonExistentFails(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 

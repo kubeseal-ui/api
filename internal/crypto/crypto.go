@@ -363,8 +363,11 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 	for k := range data {
 		present[k] = true
 	}
-	// Deletions count against the starting state too, so a batch that would empty the
-	// Secret is refused as a whole regardless of the order its entries arrive in.
+	// Deletions count against the starting state, so a batch that would empty the Secret is refused
+	// as a whole regardless of the order its entries arrive in. The count is the net of the whole
+	// batch, checked once after validation — a running "<= 1 before this delete" check would refuse a
+	// delete-then-add batch that keeps the Secret non-empty, purely because the delete came first in
+	// the array the client sent.
 	finalCount := len(data)
 	seen := make(map[string]bool, len(mutations))
 	for _, m := range mutations {
@@ -389,13 +392,13 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 			if !present[m.Key] {
 				return "", StrictScope, fmt.Errorf("%w: key %q does not exist", ErrInvalidMutation, m.Key)
 			}
-			if finalCount <= 1 {
-				return "", StrictScope, fmt.Errorf("%w: cannot delete the final key", ErrInvalidMutation)
-			}
 			finalCount--
 		default:
 			return "", StrictScope, fmt.Errorf("%w: unknown operation %q", ErrInvalidMutation, m.Op)
 		}
+	}
+	if finalCount < 1 {
+		return "", StrictScope, fmt.Errorf("%w: cannot delete the final key", ErrInvalidMutation)
 	}
 
 	for _, m := range mutations {
