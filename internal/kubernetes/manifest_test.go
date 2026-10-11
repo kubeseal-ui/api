@@ -26,10 +26,10 @@ func liveObject() map[string]any {
 			},
 			"labels": map[string]any{"app.kubernetes.io/name": "immich", "argocd.argoproj.io/instance": "immich"},
 			"annotations": map[string]any{
-				"sealedsecrets.bitnami.com/scope":                    "namespace-wide",
-				"kubectl.kubernetes.io/last-applied-configuration":   `{"apiVersion":"bitnami.com/v1alpha1"}`,
-				"argocd.argoproj.io/tracking-id":                     "immich:SealedSecret:immich/tet",
-				"argocd.argoproj.io/sync-wave":                       "-1",
+				"sealedsecrets.bitnami.com/scope":                  "namespace-wide",
+				"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"bitnami.com/v1alpha1"}`,
+				"argocd.argoproj.io/tracking-id":                   "immich:SealedSecret:immich/tet",
+				"argocd.argoproj.io/sync-wave":                     "-1",
 			},
 		},
 		"spec": map[string]any{

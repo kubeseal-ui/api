@@ -511,16 +511,16 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		gitStat["drift_reason"] != driftReasonIdentity
 
 	result := map[string]any{
-		"namespace":     namespace,
-		"name":          name,
-		"managed":       gitStat["managed"],
-		"file_path":     gitStat["file_path"],
-		"repository":    gitStat["repository"],
-		"branch":        gitStat["branch"],
-		"delivery_mode": gitStat["delivery_mode"],
-		"base_commit":   gitStat["base_commit"],
-		"drift_status":  driftVal,
-		"can_sync":      syncable,
+		"namespace":       namespace,
+		"name":            name,
+		"managed":         gitStat["managed"],
+		"file_path":       gitStat["file_path"],
+		"repository":      gitStat["repository"],
+		"branch":          gitStat["branch"],
+		"delivery_mode":   gitStat["delivery_mode"],
+		"base_commit":     gitStat["base_commit"],
+		"drift_status":    driftVal,
+		"can_sync":        syncable,
 		"git_moved_ahead": gitStat["git_moved_ahead"] == true,
 		"live": map[string]any{
 			"exists": liveExists,

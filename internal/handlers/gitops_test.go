@@ -51,7 +51,7 @@ func TestGitOpsDryRunHandlerRequiresModeCapability(t *testing.T) {
 
 func TestGitOpsDryRunResolvesMappingAndReturnsEncryptedDiff(t *testing.T) {
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old-ciphertext", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, deliveryManifest("payments", "api", "old-ciphertext"), "abc")
 	store := policy.NewPolicyStore()
 	mapping := policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}
 	if err := store.SetGitMapping(mapping); err != nil {
@@ -75,8 +75,9 @@ func TestGitOpsDryRunResolvesMappingAndReturnsEncryptedDiff(t *testing.T) {
 // unreadable to the sealed-secrets controller.
 func TestGitOpsDryRunReturnsManifestTextNotBase64(t *testing.T) {
 	manifest := sealedManifest("payments", "api")
+	existing := deliveryManifest("payments", "api", "old-ciphertext")
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old-ciphertext", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, existing, "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -99,7 +100,7 @@ func TestGitOpsDryRunReturnsManifestTextNotBase64(t *testing.T) {
 	if result.After != manifest || result.Diff != manifest {
 		t.Fatalf("after = %q, want the manifest text %q", result.After, manifest)
 	}
-	if result.Before != "old-ciphertext" {
+	if result.Before != existing {
 		t.Fatalf("before = %q, want the existing file text", result.Before)
 	}
 }
@@ -135,7 +136,7 @@ func TestGitOpsDeliveryRejectsAnEncodedManifest(t *testing.T) {
 
 func TestGitOpsDeliverDirectUsesTransport(t *testing.T) {
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, deliveryManifest("payments", "api", "old"), "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -165,8 +166,9 @@ func (failingProposalAdapter) OpenProposal(context.Context, gitops.ProposalReque
 }
 
 func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *testing.T) {
+	existing := deliveryManifest("payments", "api", "old")
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, existing, "abc")
 	store := policy.NewPolicyStore()
 	mapping := policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryProposal, ProposalAdapter: failingProposalAdapter{}}
 	if err := store.SetGitMapping(mapping); err != nil {
@@ -188,7 +190,7 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(snapshot.Content) != "old" {
+	if string(snapshot.Content) != existing {
 		t.Fatal("direct branch content changed by a proposal push")
 	}
 
@@ -989,4 +991,3 @@ func TestGitOpsSyncRefusesAMappedFileHoldingAnotherSecret(t *testing.T) {
 		t.Fatalf("refused sync replaced the occupant: %q", string(held.Content))
 	}
 }
-
