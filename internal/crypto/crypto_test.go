@@ -164,6 +164,94 @@ func TestDecryptAfterKeyRotation(t *testing.T) {
 	}
 }
 
+// rotatingPrivProvider serves a stale list until it is invalidated, which is what a key that rotated
+// inside the provider's cache window looks like from here.
+type rotatingPrivProvider struct {
+	current     []*rsa.PrivateKey
+	fresh       []*rsa.PrivateKey
+	calls       int
+	invalidated int
+}
+
+func (p *rotatingPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, error) {
+	p.calls++
+	return p.current, nil
+}
+
+func (p *rotatingPrivProvider) InvalidateKeyCache() {
+	p.invalidated++
+	p.current = p.fresh
+}
+
+// plainPrivProvider implements only PrivateKeyProvider, which is what a provider that does not cache
+// looks like: the invalidation is an optional capability, so the retry must be skipped rather than
+// assumed.
+type plainPrivProvider struct {
+	keys  []*rsa.PrivateKey
+	calls int
+}
+
+func (p *plainPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, error) {
+	p.calls++
+	return p.keys, nil
+}
+
+// TestDecryptRetriesAfterInvalidatingAStaleKeyList covers the condition that makes caching the
+// controller key list acceptable. A key that rotated after the provider built its list is missing
+// from it, which arrives as an unseal failure; without the retry that is a Secret that cannot be
+// revealed at all until the cache happens to expire.
+func TestDecryptRetriesAfterInvalidatingAStaleKeyList(t *testing.T) {
+	sealer, oldKey := mustNewTestCrypto(t)
+	_, newKey := mustNewTestCrypto(t)
+
+	sealed, err := sealer.EncryptYAML(t.Context(),
+		SecretYAML("secret", "default", map[string]string{"key": "val"}, ""),
+		"default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	provider := &rotatingPrivProvider{
+		current: []*rsa.PrivateKey{newKey},         // the stale list: the rotated-in key only
+		fresh:   []*rsa.PrivateKey{newKey, oldKey}, // what a fresh read returns
+	}
+	decrypted, err := New(sealer.cert, provider).DecryptYAML(t.Context(), sealed)
+	if err != nil {
+		t.Fatalf("DecryptYAML: %v", err)
+	}
+	if !strings.Contains(decrypted, "key: val") {
+		t.Fatalf("decrypted output missing value: %s", decrypted)
+	}
+	if provider.invalidated != 1 {
+		t.Fatalf("invalidation calls = %d, want 1", provider.invalidated)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("key list calls = %d, want 2 (the failing attempt and the retry)", provider.calls)
+	}
+}
+
+// TestDecryptDoesNotRetryWithoutACache is the other half: a provider with nothing to drop must not be
+// asked to, so an operation that genuinely failed stays one key fetch rather than two.
+func TestDecryptDoesNotRetryWithoutACache(t *testing.T) {
+	sealer, _ := mustNewTestCrypto(t)
+	_, otherKey := mustNewTestCrypto(t)
+
+	sealed, err := sealer.EncryptYAML(t.Context(),
+		SecretYAML("secret", "default", map[string]string{"key": "val"}, ""),
+		"default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	provider := &plainPrivProvider{keys: []*rsa.PrivateKey{otherKey}}
+	if _, err := New(sealer.cert, provider).DecryptYAML(t.Context(), sealed); err == nil {
+		t.Fatal("expected decryption with only an unrelated key to fail, got nil")
+	}
+	if provider.calls != 1 {
+		t.Fatalf("key list calls = %d, want 1", provider.calls)
+	}
+}
+
 func TestResealReplace(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 

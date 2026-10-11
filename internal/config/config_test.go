@@ -3,10 +3,12 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("KUBESEAL_API_PORT", "")
+	t.Setenv("KUBESEAL_API_TIMEOUT_SECONDS", "")
 	t.Setenv("LOG_LEVEL", "")
 	t.Setenv("OIDC_ISSUER", "")
 	t.Setenv("OIDC_CLIENT_ID", "")
@@ -19,6 +21,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Port != 8080 {
 		t.Errorf("Port: want 8080, got %d", cfg.Port)
 	}
+	if cfg.APITimeout != DefaultAPITimeout {
+		t.Errorf("APITimeout: want %s, got %s", DefaultAPITimeout, cfg.APITimeout)
+	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel: want info, got %q", cfg.LogLevel)
 	}
@@ -27,6 +32,43 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.EnableDecrypt {
 		t.Errorf("EnableDecrypt: want false, got true")
+	}
+}
+
+// TestAPITimeout pins the documented bounds rather than a clamp: prd.md's Limits table says an
+// invalid value fails startup, so a value outside the range must not be quietly rounded into it.
+func TestAPITimeout(t *testing.T) {
+	cases := map[string]struct {
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		"unset keeps the documented default":   {"", DefaultAPITimeout, false},
+		"override is honoured":                 {"45", 45 * time.Second, false},
+		"the floor itself is accepted":         {"5", 5 * time.Second, false},
+		"the hard maximum itself is accepted":  {"120", MaxAPITimeout, false},
+		"below the floor fails startup":        {"4", 0, true},
+		"above the hard maximum fails startup": {"121", 0, true},
+		"zero fails startup":                   {"0", 0, true},
+		"not a number fails startup":           {"thirty", 0, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("KUBESEAL_API_TIMEOUT_SECONDS", tc.value)
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load: want an error for %q, got timeout %s", tc.value, cfg.APITimeout)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.APITimeout != tc.want {
+				t.Fatalf("APITimeout = %s, want %s", cfg.APITimeout, tc.want)
+			}
+		})
 	}
 }
 

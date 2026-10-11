@@ -33,8 +33,9 @@ type kubePrivateKeyProvider struct {
 	loaded time.Time
 }
 
-// The retry that makes the cache safe lives in crypto.DecryptYAML, which reaches it through this
-// interface; the assertion is what keeps a rename on either side from silently disabling it.
+// The retry that makes the cache acceptable lives in crypto.DecryptYAML, which reaches it through
+// this interface; the assertion is what keeps a rename on either side from silently disabling it and
+// leaving the stale window as a Secret that cannot be revealed.
 var _ crypto.KeyCacheInvalidator = (*kubePrivateKeyProvider)(nil)
 
 // newKubePrivateKeyProvider builds the production provider. A nil now means time.Now.
