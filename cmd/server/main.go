@@ -328,6 +328,30 @@ func setupTelemetryFromConfig(cfg *config.Config, logger *slog.Logger) *observab
 	return telemetry
 }
 
+// buildKubernetesClient constructs the cluster client, or the in-memory fake in explicit fake mode.
+// Reaching the cluster is fatal on failure: the api cannot answer a single read without it, so a
+// boot that cannot build the client should exit rather than serve 502s one request at a time.
+func buildKubernetesClient(cfg config.Config) kubernetes.Client {
+	if cfg.FakeK8sClient {
+		return kubernetes.NewFake(
+			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
+			[]kubernetes.SealedSecret{
+				{Name: "example", Namespace: "default", Scope: "strict"},
+			},
+			nil,
+		)
+	}
+	kubeConfig, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatal("kubernetes config", "error", err)
+	}
+	client, err := kubernetes.NewClientFromConfig(kubeConfig, kubernetes.Options{ControllerNamespace: cfg.ControllerNamespace, ActiveKeyLabel: cfg.ActiveKeyLabel})
+	if err != nil {
+		log.Fatal("kubernetes client", "error", err)
+	}
+	return client
+}
+
 func main() {
 	flag.Parse()
 	cfg, err := config.Load()
@@ -360,25 +384,7 @@ func main() {
 	}
 
 	// Kubernetes client (fake in explicit fake mode; production client otherwise)
-	var k8sClient kubernetes.Client
-	if cfg.FakeK8sClient {
-		k8sClient = kubernetes.NewFake(
-			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
-			[]kubernetes.SealedSecret{
-				{Name: "example", Namespace: "default", Scope: "strict"},
-			},
-			nil,
-		)
-	} else {
-		kubeConfig, configErr := rest.InClusterConfig()
-		if configErr != nil {
-			log.Fatal("kubernetes config", "error", configErr)
-		}
-		k8sClient, configErr = kubernetes.NewClientFromConfig(kubeConfig, kubernetes.Options{ControllerNamespace: cfg.ControllerNamespace, ActiveKeyLabel: cfg.ActiveKeyLabel})
-		if configErr != nil {
-			log.Fatal("kubernetes client", "error", configErr)
-		}
-	}
+	k8sClient := buildKubernetesClient(cfg)
 
 	var privProvider crypto.PrivateKeyProvider
 	if cfg.EnableDecrypt {

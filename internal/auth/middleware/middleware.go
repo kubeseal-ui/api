@@ -322,7 +322,7 @@ func (g *refreshGate) enter(key string) (entry *refreshEntry, lead bool) {
 // settle publishes the outcome to everyone waiting on this token and keeps it for the grace period.
 // A failed exchange is published too: the waiter's answer to a spent token is the same as the
 // leader's, and retrying an invalid_grant is what the contract forbids.
-func (g *refreshGate) settle(key string, entry *refreshEntry, outcome *refreshOutcome) {
+func (g *refreshGate) settle(entry *refreshEntry, outcome *refreshOutcome) {
 	g.mu.Lock()
 	entry.outcome = outcome
 	entry.expires = time.Now().Add(refreshGrace)
@@ -387,7 +387,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	outcome := exchangeRefreshToken(r, cfg, signingKey, refreshCookie.Value)
 	// Settled before this caller writes its own cookies, so waiters are released as soon as the
 	// exchange is decided.
-	gate.settle(key, entry, outcome)
+	gate.settle(entry, outcome)
 	if outcome == nil {
 		return sessionCookieData{}, false
 	}
@@ -467,7 +467,7 @@ func writeRefreshCookies(w http.ResponseWriter, cfg AuthConfig, outcome refreshO
 	if w == nil {
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is set from cfg.CookieSecure, which gosec cannot prove constant
 		Name:     cfg.SessionCookie,
 		Value:    outcome.cookieValue,
 		Path:     "/",
@@ -478,7 +478,7 @@ func writeRefreshCookies(w http.ResponseWriter, cfg AuthConfig, outcome refreshO
 		Domain:   cfg.CookieDomain,
 	})
 	if outcome.refreshToken != "" {
-		http.SetCookie(w, &http.Cookie{
+		http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is set from cfg.CookieSecure, which gosec cannot prove constant
 			Name:     cfg.RefreshCookie,
 			Value:    outcome.refreshToken,
 			Path:     "/api/v1",
