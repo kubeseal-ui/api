@@ -176,7 +176,7 @@ func TestGitPathsHandlerKeepsTheWildcardMapping(t *testing.T) {
 	store := policy.NewPolicyStore()
 	for _, namespace := range []string{policy.AnyNamespace, "payments", "development"} {
 		if err := store.SetGitMapping(policy.GitMapping{
-			Namespace: namespace, Repository: "YogaNovvaindra/kube", Branch: "main",
+			Namespace: namespace, Repository: "platform/config", Branch: "main",
 			PathTemplate: "{namespace}/{name}-cred.yml", AuthRef: "git-auth",
 			Mode: policy.GitDeliveryDirect,
 		}); err != nil {
