@@ -105,7 +105,10 @@ func gitopsTransport(cfg *config.Config) (gitops.GitTransport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return transport, nil
+	// Wrap once, process-lived: the cache memoizes a branch pull across requests so a drift-resolving
+	// listing does not re-fetch the remote every time. NewCachingTransport returns the transport
+	// unchanged when the TTL is zero, so a disabled cache needs no branch here.
+	return gitops.NewCachingTransport(transport, cfg.GitSnapshotTTL), nil
 }
 
 // parseCredentialRefs parses the comma-separated typed credential list, each entry being
