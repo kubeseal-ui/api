@@ -20,9 +20,11 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 // RequestLogger emits one structured line per request, with trace_id/span_id when a span is
-// recording so a log line correlates to a trace in Tempo. It never logs bodies, query
-// strings or headers — those can carry credentials — and labels the bounded route pattern,
-// never the raw path, which holds namespace and secret names.
+// recording so a log line correlates to a trace in Tempo. Bodies, query strings and headers are
+// never logged — those can carry credentials. `route` is the bounded pattern and is what the metric
+// labels; `path` keeps the raw path beside it on purpose, because that is what names the Secret a
+// slow or failing request touched. A Secret name is public — the security event sends it too — but
+// as a label it would be unbounded cardinality.
 func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
