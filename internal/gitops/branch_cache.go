@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -188,4 +189,50 @@ func (t *cachingTransport) PreviousManifest(ctx context.Context, target Target, 
 		return nil, ErrNoHistory
 	}
 	return history.PreviousManifest(ctx, target, authRef)
+}
+
+// WarmTarget names one branch to pull before any user asks for it.
+type WarmTarget struct{ Repository, Branch, AuthRef string }
+
+// PrewarmBranches pulls each distinct branch once, in the background and bounded in parallel, so the
+// per-branch cache is warm before the first request rather than making that request wait on a cold
+// clone. Call it at startup, off the serving path. A transport that cannot enumerate branches is a
+// no-op; even with caching disabled the pull still lands the on-disk worktree, so the first real
+// read is a fetch rather than a clone.
+func PrewarmBranches(ctx context.Context, transport GitTransport, targets []WarmTarget, logger *slog.Logger) {
+	reader, ok := transport.(BranchReader)
+	if !ok || len(targets) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	distinct := make([]WarmTarget, 0, len(targets))
+	for _, target := range targets {
+		if target.Repository == "" || target.Branch == "" {
+			continue
+		}
+		key := branchKey(target.Repository, target.Branch)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		distinct = append(distinct, target)
+	}
+
+	const maxConcurrent = 4
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	for _, target := range distinct {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(target WarmTarget) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if _, err := reader.ReadBranch(ctx, target.Repository, target.Branch, target.AuthRef); err != nil && logger != nil {
+				// Not fatal: a branch that fails to warm stays cold and the first request that needs
+				// it pays the pull, exactly as it would have without prewarming.
+				logger.Warn("gitops branch prewarm failed", "repository", target.Repository, "branch", target.Branch, "error", err)
+			}
+		}(target)
+	}
+	wg.Wait()
 }

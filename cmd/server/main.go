@@ -485,6 +485,18 @@ func main() {
 		go watchPolicyReloads(ctx, policyLoader)
 	}
 
+	// Warm the branch cache off the serving path, so the first request after a restart does not wait
+	// on a cold clone of every mapped repository. A fresh pod's git scratch is an emptyDir, so that
+	// first pull is a full clone — the slowest one there is; prewarming turns it into a boot cost no
+	// user waits on. Backgrounded: readiness must not block on a remote fetch.
+	if transport != nil && len(mappingSpecs) > 0 {
+		warmTargets := make([]gitops.WarmTarget, 0, len(mappingSpecs))
+		for _, spec := range mappingSpecs {
+			warmTargets = append(warmTargets, gitops.WarmTarget{Repository: spec.Repository, Branch: spec.Branch, AuthRef: spec.AuthRef})
+		}
+		go gitops.PrewarmBranches(ctx, transport, warmTargets, logger)
+	}
+
 	go func() {
 		slog.Info("starting api",
 			"version", version,

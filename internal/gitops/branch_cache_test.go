@@ -231,3 +231,34 @@ func TestCachingTransport_SingleFlightOnCold(t *testing.T) {
 		t.Fatalf("expected a single shared pull for concurrent cold readers, got %d", got)
 	}
 }
+
+func TestPrewarmBranchesWarmsTheCache(t *testing.T) {
+	inner := &fakeBranchGit{commit: "c0"}
+	cache, _ := newTestCache(t, inner, 15*time.Second)
+
+	// Duplicate (repo,branch) and an empty entry are both dropped, so the one real branch is pulled
+	// exactly once.
+	PrewarmBranches(context.Background(), cache, []WarmTarget{
+		{Repository: "repo", Branch: "main", AuthRef: ""},
+		{Repository: "repo", Branch: "main", AuthRef: ""},
+		{Repository: "", Branch: "main"},
+	}, nil)
+	if got := inner.reads(); got != 1 {
+		t.Fatalf("prewarm should pull the one distinct branch once, got %d", got)
+	}
+
+	// A request after warming is served from the cache rather than pulling again — the point of
+	// prewarming is that the first user request is already warm.
+	if _, err := cache.ReadBranch(context.Background(), "repo", "main", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.reads(); got != 1 {
+		t.Fatalf("post-prewarm read should be served from cache, got %d pulls", got)
+	}
+}
+
+func TestPrewarmBranchesIgnoresNonBranchReader(t *testing.T) {
+	// A transport that cannot enumerate a branch (caching disabled, or mock mode) is a no-op rather
+	// than a panic.
+	PrewarmBranches(context.Background(), NewLocalTransport(), []WarmTarget{{Repository: "r", Branch: "main"}}, nil)
+}
