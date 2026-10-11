@@ -474,8 +474,11 @@ stringData:
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The file differs from anything the live object renders to, so the assertion below can tell the
+	// two sources apart: a header comment is part of the file and of nothing else.
+	fileText := "# Delivered by kubeseal-ui. Do not edit by hand.\n" + live
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, live, "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, fileText, "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -502,6 +505,11 @@ stringData:
 	}
 	if resp.Before == "" || resp.After == "" || resp.Checksum == "" || resp.BaseCommit == "" {
 		t.Fatalf("incomplete diff response: %s", rr.Body.String())
+	}
+	// The pane says "Git, before", so it shows the file — the same thing the dry run's Before means.
+	// Serving the live object instead shows a document that has never been in the repository.
+	if resp.Before != fileText {
+		t.Fatalf("before = %q, want the file as Git holds it", resp.Before)
 	}
 	if resp.Before == resp.After || resp.BaseCommit != "abc" {
 		t.Fatalf("unexpected diff response: %s", rr.Body.String())
@@ -540,8 +548,11 @@ stringData:
 	// The mapping renders clusters/ns/name.yaml; the manifest lives elsewhere, so tier 1 is vacant
 	// and only the tree walk finds it.
 	const discovered = "custom/apps/secrets/name.yaml"
+	// Read back from the path the walk found, not the templated one — which is the case a read that
+	// assumed the template would come back empty on.
+	fileText := "# Discovered by the tree walk.\n" + live
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: discovered}, live, "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: discovered}, fileText, "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -560,6 +571,9 @@ stringData:
 	}
 	if resp.TargetPath != discovered {
 		t.Fatalf("target_path = %q, want %q: %s", resp.TargetPath, discovered, rr.Body.String())
+	}
+	if resp.Before != fileText {
+		t.Fatalf("before = %q, want the file the discovered path holds", resp.Before)
 	}
 }
 

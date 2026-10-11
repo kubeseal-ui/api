@@ -187,6 +187,25 @@ func (h *ProtectedHandlers) lookupManifest(ctx context.Context, transport gitops
 	return snapshot, false, nil
 }
 
+// mappedFileText reads back a file as Git holds it, which is what a view that says "Git, before"
+// has to show. The read is served from the request's branch snapshot, so a path the request has
+// already resolved is a map lookup rather than a second fetch.
+func (h *ProtectedHandlers) mappedFileText(ctx context.Context, transport gitops.GitTransport, namespace, path string) (string, error) {
+	if h.GitMappings == nil || transport == nil {
+		return "", errors.New("no Git mapping for this namespace")
+	}
+	mapping, ok := h.GitMappings.GetGitMapping(namespace)
+	if !ok {
+		return "", errors.New("no Git mapping for this namespace")
+	}
+	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}
+	snapshot, err := transport.ReadManifest(ctx, target, mapping.AuthRef)
+	if err != nil {
+		return "", err
+	}
+	return string(snapshot.Content), nil
+}
+
 // gitStatus resolves a Secret's Git state through the request's transport, so that resolving it for
 // thirty Secrets in one listing costs one fetch per branch rather than one per Secret. See
 // requestTransport. withHistory additionally asks which side moved when the two differ, at the cost
@@ -304,40 +323,11 @@ func canonicalSealedSecret(manifest string) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// canonicalDocument is the document the drift comparison and its reason both read: a manifest with
-// the volatile runtime and GitOps-tracking fields stripped, so comparison sees spec and stable
-// metadata without false divergences.
+// canonicalDocument is the document the drift comparison and its reason both read. The stripping
+// lives in the kubernetes package beside the projection that serves a live object as a manifest,
+// so one rule covers both sides rather than two that have to be kept in step.
 func canonicalDocument(manifest string) (map[string]any, error) {
-	var m map[string]any
-	if err := yaml.Unmarshal([]byte(manifest), &m); err != nil {
-		return nil, err
-	}
-	if m == nil {
-		m = map[string]any{}
-	}
-	delete(m, "status")
-	if meta, ok := m["metadata"].(map[string]any); ok {
-		delete(meta, "resourceVersion")
-		delete(meta, "uid")
-		delete(meta, "generation")
-		delete(meta, "creationTimestamp")
-		delete(meta, "managedFields")
-		cleanAnnotations(meta)
-		cleanLabels(meta)
-	}
-	if spec, ok := m["spec"].(map[string]any); ok {
-		if tpl, ok := spec["template"].(map[string]any); ok {
-			if tplMeta, ok := tpl["metadata"].(map[string]any); ok {
-				delete(tplMeta, "creationTimestamp")
-				cleanAnnotations(tplMeta)
-				cleanLabels(tplMeta)
-				if len(tplMeta) == 0 {
-					delete(tpl, "metadata")
-				}
-			}
-		}
-	}
-	return m, nil
+	return kubernetes.CanonicalManifest(manifest)
 }
 
 // The parts of a SealedSecret two sides can disagree about, most decisive first. `identity` is the
@@ -470,72 +460,6 @@ func joinPath(prefix, key string) string {
 	return prefix + "." + key
 }
 
-// gitopsAnnotationPrefixes are the annotation namespaces that record how a manifest was applied
-// rather than what it is. They are stripped from both a SealedSecret compared against Git and a
-// Secret being adopted, so the two agree. The concrete case:
-// kubectl.kubernetes.io/last-applied-configuration holds the whole object as JSON — noise once
-// sealed, and it would carry back every field the normalizer strips.
-var gitopsAnnotationPrefixes = []string{
-	"kubectl.kubernetes.io/",
-	"argocd.argoproj.io/",
-	"helm.sh/",
-	"meta.helm.sh/",
-	"fluxcd.io/",
-	"kustomize.toolkit.fluxcd.io/",
-}
-
-// gitopsLabelPrefixes are the label namespaces that record which tool owns a manifest; ownership
-// is the delivering tool's business, not the Secret's.
-var gitopsLabelPrefixes = []string{
-	"argocd.argoproj.io/",
-	"helm.sh/",
-}
-
-// runtimeMetadataFields are assigned by the API server to one live object; carrying them into a
-// manifest records something that was never true of the file, and the next apply would fight them.
-var runtimeMetadataFields = []string{
-	"uid", "resourceVersion", "generation", "creationTimestamp", "managedFields", "selfLink",
-}
-
-func cleanAnnotations(meta map[string]any) {
-	ann, ok := meta["annotations"].(map[string]any)
-	if !ok {
-		return
-	}
-	for k := range ann {
-		if hasAnyPrefix(k, gitopsAnnotationPrefixes) {
-			delete(ann, k)
-		}
-	}
-	if len(ann) == 0 {
-		delete(meta, "annotations")
-	}
-}
-
-func cleanLabels(meta map[string]any) {
-	labels, ok := meta["labels"].(map[string]any)
-	if !ok {
-		return
-	}
-	for k := range labels {
-		if hasAnyPrefix(k, gitopsLabelPrefixes) {
-			delete(labels, k)
-		}
-	}
-	if len(labels) == 0 {
-		delete(meta, "labels")
-	}
-}
-
-func hasAnyPrefix(value string, prefixes []string) bool {
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(value, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // normalizeSecretYAML reduces a manifest to the desired state of a Secret. Applied to every seal
 // request, typed manifests included, so the create path has one shape rather than two, and it is
 // what lets a live Secret be adopted without a new Kubernetes permission: the operator's own
@@ -560,15 +484,11 @@ func normalizeSecretYAML(secretYAML, namespace, name string) (string, error) {
 		meta = map[string]any{}
 		manifest["metadata"] = meta
 	}
-	for _, field := range runtimeMetadataFields {
-		delete(meta, field)
-	}
 	// Adoption copies a Secret's content, not its garbage-collection relationship to whatever
 	// created it: a manifest that arrived owning itself would be a claim about another cluster.
 	delete(meta, "ownerReferences")
 	delete(manifest, "status")
-	cleanAnnotations(meta)
-	cleanLabels(meta)
+	kubernetes.CleanMetadata(meta)
 
 	if declared, isString := meta["name"].(string); isString && declared != "" && declared != name {
 		return "", fmt.Errorf("manifest names %q, but this request names %q", declared, name)
@@ -1135,7 +1055,8 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
+	transport := h.requestTransport()
+	git, gitErr := h.gitStatus(r.Context(), transport, namespace, name, secret.YAML, req.BaseCommit, false)
 	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
@@ -1155,6 +1076,19 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
+	// The pane this feeds is labelled "Git, before", so it shows the file as Git holds it — the same
+	// thing the dry run's Before means — rather than the live object. Those differ in formatting and
+	// in anything the file carries that the cluster's copy of the object does not, and a diff of the
+	// live object against the reseal says nothing about the file the commit will land in.
+	//
+	// The read is served from the branch snapshot gitStatus already pulled, so it costs a lookup
+	// rather than a second fetch.
+	before, readErr := h.mappedFileText(r.Context(), transport, namespace, targetPath)
+	if readErr != nil {
+		result = opResultFailed
+		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
+		return
+	}
 	after, err := h.Crypto.ResealMany(r.Context(), secret.YAML, mutations)
 	if err != nil {
 		if errors.Is(err, crypto.ErrInvalidMutation) {
@@ -1168,7 +1102,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	jsonResponse(w, http.StatusOK, map[string]any{"before": secret.YAML, "after": after, "mutations": mutationSummary(req.Mutations), "base_commit": req.BaseCommit, "checksum": encryptedChecksum(after), "target_path": targetPath})
+	jsonResponse(w, http.StatusOK, map[string]any{"before": before, "after": after, "mutations": mutationSummary(req.Mutations), "base_commit": req.BaseCommit, "checksum": encryptedChecksum(after), "target_path": targetPath})
 	result = opResultSuccess
 }
 

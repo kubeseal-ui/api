@@ -46,7 +46,10 @@ type SealedSecret struct {
 	KeyCount  int      `json:"key_count"`
 	Keys      []string `json:"keys,omitempty"`
 	CreatedAt string   `json:"created_at,omitempty"`
-	YAML      string   `json:"-"`
+	// YAML is the whole object as a manifest — YAML, with the API server's bookkeeping already off
+	// it (see ManifestFromObject) — because it is both displayed to an operator and committed as
+	// the mapped file. Never the raw object: that is the cluster's record, not the file's content.
+	YAML string `json:"-"`
 }
 
 // ActiveKey is the resolved controller private key; the client never retains it, and
