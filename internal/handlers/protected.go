@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -240,11 +241,19 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 		status["drift"] = "git_only"
 		return status, nil
 	}
-	liveCanonical, err := canonicalSealedSecret(liveYAML)
+	liveDoc, err := canonicalDocument(liveYAML)
 	if err != nil {
 		return status, err
 	}
-	gitCanonical, err := canonicalSealedSecret(string(snapshot.Content))
+	gitDoc, err := canonicalDocument(string(snapshot.Content))
+	if err != nil {
+		return status, err
+	}
+	liveCanonical, err := json.Marshal(liveDoc)
+	if err != nil {
+		return status, err
+	}
+	gitCanonical, err := json.Marshal(gitDoc)
 	if err != nil {
 		return status, err
 	}
@@ -254,6 +263,11 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 		return status, nil
 	}
 	status["drift"] = string(kubernetes.DriftDiverged)
+	reason, fields := driftReason(liveDoc, gitDoc)
+	status["drift_reason"] = reason
+	if len(fields) > 0 {
+		status["drift_fields"] = fields
+	}
 	if withHistory && h.gitMovedPastLive(ctx, transport, mapping, target, liveCanonical) {
 		status["git_moved_ahead"] = true
 	}
@@ -283,12 +297,24 @@ func (h *ProtectedHandlers) gitMovedPastLive(ctx context.Context, transport gito
 }
 
 func canonicalSealedSecret(manifest string) ([]byte, error) {
+	m, err := canonicalDocument(manifest)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(m)
+}
+
+// canonicalDocument is the document the drift comparison and its reason both read: a manifest with
+// the volatile runtime and GitOps-tracking fields stripped, so comparison sees spec and stable
+// metadata without false divergences.
+func canonicalDocument(manifest string) (map[string]any, error) {
 	var m map[string]any
 	if err := yaml.Unmarshal([]byte(manifest), &m); err != nil {
 		return nil, err
 	}
-	// Strip volatile runtime and GitOps-tracking fields so comparison sees spec and stable metadata
-	// without false divergences.
+	if m == nil {
+		m = map[string]any{}
+	}
 	delete(m, "status")
 	if meta, ok := m["metadata"].(map[string]any); ok {
 		delete(meta, "resourceVersion")
@@ -311,7 +337,132 @@ func canonicalSealedSecret(manifest string) ([]byte, error) {
 			}
 		}
 	}
-	return json.Marshal(m)
+	return m, nil
+}
+
+// The parts of a SealedSecret two sides can disagree about, most decisive first. `identity` is the
+// one the operator cannot resolve by syncing: the file at the mapped path belongs to another Secret.
+const (
+	driftReasonIdentity   = "identity"
+	driftReasonKeys       = "keys"
+	driftReasonCiphertext = "ciphertext"
+	driftReasonTemplate   = "template"
+	driftReasonMetadata   = "metadata"
+)
+
+// driftReason names which part of two canonical documents differs, and lists every differing path.
+// The name is the most decisive category and the list is not narrowed to it: a Secret whose
+// ciphertext and metadata both differ reports the ciphertext, and the namespace path alongside it, so
+// that a second cause is never hidden behind the first. The comparison is structural throughout — it
+// reads ciphertext, never plaintext, so this reason needs no controller key and reveals nothing
+// reveal itself withholds.
+func driftReason(live, git map[string]any) (string, []string) {
+	var fields []string
+	differingPaths(live, git, "", &fields)
+	sort.Strings(fields)
+
+	switch {
+	case identityDiffers(live, git):
+		return driftReasonIdentity, fields
+	case !reflect.DeepEqual(specSection(live, "encryptedData"), specSection(git, "encryptedData")):
+		// Same values sealed twice are different bytes — sealing is not deterministic — so the
+		// key names decide between "these are separate encryptions" and "a key was added".
+		if encryptedKeyNamesDiffer(live, git) {
+			return driftReasonKeys, fields
+		}
+		return driftReasonCiphertext, fields
+	case !reflect.DeepEqual(specSection(live, "template"), specSection(git, "template")):
+		return driftReasonTemplate, fields
+	}
+	return driftReasonMetadata, fields
+}
+
+// identityDiffers is true only when both sides declare a name and disagree: a manifest that omits
+// metadata.name is not claiming to be another Secret.
+func identityDiffers(live, git map[string]any) bool {
+	liveName, liveOK := nestedString(live, "metadata", "name")
+	gitName, gitOK := nestedString(git, "metadata", "name")
+	return liveOK && gitOK && liveName != gitName
+}
+
+func encryptedKeyNamesDiffer(live, git map[string]any) bool {
+	liveKeys, _ := specSection(live, "encryptedData").(map[string]any)
+	gitKeys, _ := specSection(git, "encryptedData").(map[string]any)
+	if len(liveKeys) != len(gitKeys) {
+		return true
+	}
+	for key := range liveKeys {
+		if _, ok := gitKeys[key]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// specSection reads one field of spec, or nil when either the field or spec itself is absent — which
+// is how a comparison distinguishes a missing section from an empty one that was stripped.
+func specSection(doc map[string]any, field string) any {
+	spec, _ := doc["spec"].(map[string]any)
+	if spec == nil {
+		return nil
+	}
+	return spec[field]
+}
+
+func nestedString(doc map[string]any, path ...string) (string, bool) {
+	var current any = doc
+	for _, key := range path {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		current, ok = m[key]
+		if !ok {
+			return "", false
+		}
+	}
+	value, ok := current.(string)
+	return value, ok && value != ""
+}
+
+// differingPaths appends the path of every leaf the two documents disagree about, and of every leaf
+// only one of them has. A list is compared whole and reported as one path: an encryptedData value is
+// a string, so a list that differs is simply a different list. A section only one side carries is
+// descended into rather than reported as itself, because which annotation or template field it holds
+// is the actionable half of the answer.
+func differingPaths(a, b any, prefix string, out *[]string) {
+	aMap, aIsMap := a.(map[string]any)
+	bMap, bIsMap := b.(map[string]any)
+	switch {
+	case aIsMap && bIsMap:
+		for key, aValue := range aMap {
+			differingPaths(aValue, bMap[key], joinPath(prefix, key), out)
+		}
+		for key, bValue := range bMap {
+			if _, ok := aMap[key]; !ok {
+				differingPaths(nil, bValue, joinPath(prefix, key), out)
+			}
+		}
+	case aIsMap:
+		for key, aValue := range aMap {
+			differingPaths(aValue, nil, joinPath(prefix, key), out)
+		}
+	case bIsMap:
+		for key, bValue := range bMap {
+			differingPaths(nil, bValue, joinPath(prefix, key), out)
+		}
+	default:
+		if !reflect.DeepEqual(a, b) {
+			*out = append(*out, prefix)
+		}
+	}
+}
+
+func joinPath(prefix, key string) string {
+	if prefix == "" {
+		return key
+	}
+	return prefix + "." + key
 }
 
 // gitopsAnnotationPrefixes are the annotation namespaces that record how a manifest was applied
