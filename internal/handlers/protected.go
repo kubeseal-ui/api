@@ -209,8 +209,10 @@ func (h *ProtectedHandlers) mappedFileText(ctx context.Context, transport gitops
 // gitStatus resolves a Secret's Git state through the request's transport, so that resolving it for
 // thirty Secrets in one listing costs one fetch per branch rather than one per Secret. See
 // requestTransport. withHistory additionally asks which side moved when the two differ, at the cost
-// of a Git history read — worth it for one Secret, not for a listing.
-func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitTransport, namespace, name, liveYAML, baseCommit string, withHistory bool) (map[string]any, error) {
+// of a Git history read — worth it for one Secret, not for a listing. withGitText carries the file's
+// own text back on `diverged`, which only a view that is about to overwrite it can use: a listing
+// holds thirty of them and shows none.
+func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitTransport, namespace, name, liveYAML, baseCommit string, withHistory, withGitText bool) (map[string]any, error) {
 	status := map[string]any{"managed": false, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 	if h.GitMappings == nil || transport == nil {
 		return status, nil
@@ -286,6 +288,11 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 	status["drift_reason"] = reason
 	if len(fields) > 0 {
 		status["drift_fields"] = fields
+	}
+	// Diverged is the only state that offers a sync, and a sync overwrites this file, so the copy it
+	// replaces travels with the drift. Every other state either agrees with Git or offers nothing.
+	if withGitText {
+		status["git_file_yaml"] = string(snapshot.Content)
 	}
 	if withHistory && h.gitMovedPastLive(ctx, transport, mapping, target, liveCanonical) {
 		status["git_moved_ahead"] = true
@@ -549,7 +556,7 @@ func (h *ProtectedHandlers) SecretHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, "", true)
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, "", true, true)
 	if gitErr != nil {
 		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
 		return
@@ -681,7 +688,7 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 	started := time.Now()
 	result := opResultSuccess
 	for i := range secrets {
-		git, gitErr := h.gitStatus(r.Context(), transport, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "", false)
+		git, gitErr := h.gitStatus(r.Context(), transport, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "", false, false)
 		if gitErr != nil {
 			// Degraded, not silent: the listing still answers, because a Secret whose drift is
 			// unknown is more use to the rail than no listing at all. Only the first failure is
@@ -942,7 +949,7 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false, false)
 	if gitErr != nil {
 		result = refuseGitRead(w, r, gitErr)
 		return
@@ -1081,7 +1088,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	transport := h.requestTransport()
-	git, gitErr := h.gitStatus(r.Context(), transport, namespace, name, secret.YAML, req.BaseCommit, false)
+	git, gitErr := h.gitStatus(r.Context(), transport, namespace, name, secret.YAML, req.BaseCommit, false, false)
 	if gitErr != nil {
 		result = refuseGitRead(w, r, gitErr)
 		return
@@ -1193,7 +1200,7 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false, false)
 	if gitErr != nil {
 		result = refuseGitRead(w, r, gitErr)
 		return

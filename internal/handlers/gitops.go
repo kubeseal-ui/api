@@ -493,7 +493,7 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		liveYAML = secret.YAML
 	}
 
-	gitStat, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, liveYAML, "", true)
+	gitStat, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, liveYAML, "", true, true)
 	if gitErr != nil {
 		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
 		return
@@ -522,6 +522,9 @@ func (h *ProtectedHandlers) GitOpsSyncStatusHandler(w http.ResponseWriter, r *ht
 		"drift_status":    driftVal,
 		"can_sync":        syncable,
 		"git_moved_ahead": gitStat["git_moved_ahead"] == true,
+		// The file as Git holds it now, so the client can show what a sync replaces rather than
+		// naming the file and leaving its content to be taken on faith.
+		"git_file_yaml": gitStat["git_file_yaml"],
 		"live": map[string]any{
 			"exists": liveExists,
 		},
