@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -473,8 +474,11 @@ stringData:
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The file differs from anything the live object renders to, so the assertion below can tell the
+	// two sources apart: a header comment is part of the file and of nothing else.
+	fileText := "# Delivered by kubeseal-ui. Do not edit by hand.\n" + live
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, live, "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, fileText, "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -501,6 +505,11 @@ stringData:
 	}
 	if resp.Before == "" || resp.After == "" || resp.Checksum == "" || resp.BaseCommit == "" {
 		t.Fatalf("incomplete diff response: %s", rr.Body.String())
+	}
+	// The pane says "Git, before", so it shows the file — the same thing the dry run's Before means.
+	// Serving the live object instead shows a document that has never been in the repository.
+	if resp.Before != fileText {
+		t.Fatalf("before = %q, want the file as Git holds it", resp.Before)
 	}
 	if resp.Before == resp.After || resp.BaseCommit != "abc" {
 		t.Fatalf("unexpected diff response: %s", rr.Body.String())
@@ -539,8 +548,11 @@ stringData:
 	// The mapping renders clusters/ns/name.yaml; the manifest lives elsewhere, so tier 1 is vacant
 	// and only the tree walk finds it.
 	const discovered = "custom/apps/secrets/name.yaml"
+	// Read back from the path the walk found, not the templated one — which is the case a read that
+	// assumed the template would come back empty on.
+	fileText := "# Discovered by the tree walk.\n" + live
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: discovered}, live, "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: discovered}, fileText, "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -559,6 +571,9 @@ stringData:
 	}
 	if resp.TargetPath != discovered {
 		t.Fatalf("target_path = %q, want %q: %s", resp.TargetPath, discovered, rr.Body.String())
+	}
+	if resp.Before != fileText {
+		t.Fatalf("before = %q, want the file the discovered path holds", resp.Before)
 	}
 }
 
@@ -864,6 +879,133 @@ status:
 
 	if !bytes.Equal(gitCanon, liveCanon) {
 		t.Fatalf("expected canonical forms to match, but they differed:\nGit:  %s\nLive: %s", string(gitCanon), string(liveCanon))
+	}
+}
+
+// TestDriftReasonNamesThePartThatDiffers pins the vocabulary the Secret surface words. A diverged
+// report says only that the two sides differ, which leaves the operator fetching the live object and
+// the file to diff them by hand; this names the part instead. The name is the most decisive category
+// and the field list is not narrowed to it, so a second cause is never hidden behind the first.
+func TestDriftReasonNamesThePartThatDiffers(t *testing.T) {
+	// The shape of the case this exists for: five keys sealed strict, no scope annotation.
+	const live = `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: mktxp-cred
+  namespace: monitoring
+spec:
+  encryptedData:
+    password: AgBy3i4OJSWK
+    username: AgCtr3i4OJSWK
+`
+	cases := []struct {
+		name       string
+		git        string
+		wantReason string
+		wantFields []string
+	}{
+		{
+			// Same values sealed twice are different bytes: sealing is not deterministic, so this
+			// is what a re-seal, or a controller key rotation that re-seals, looks like from here.
+			"one value resealed",
+			strings.Replace(live, "password: AgBy3i4OJSWK", "password: AgDf9x2LMPQZ", 1),
+			driftReasonCiphertext,
+			[]string{"spec.encryptedData.password"},
+		},
+		{
+			"a key the file does not carry",
+			strings.Replace(live, "    username: AgCtr3i4OJSWK\n", "", 1),
+			driftReasonKeys,
+			[]string{"spec.encryptedData.username"},
+		},
+		{
+			"a key only the file carries",
+			strings.Replace(live, "    username: AgCtr3i4OJSWK\n", "    username: AgCtr3i4OJSWK\n    token: AgToken\n", 1),
+			driftReasonKeys,
+			[]string{"spec.encryptedData.token"},
+		},
+		{
+			"the same namespace written differently",
+			strings.Replace(live, "  namespace: monitoring\n", "  namespace: others\n", 1),
+			driftReasonMetadata,
+			[]string{"metadata.namespace"},
+		},
+		{
+			// The likeliest metadata-only cause in practice: the file declares the scope, and the
+			// object sealed by the CLI carries no such annotation because strict is its default.
+			"a scope annotation only the file declares",
+			strings.Replace(live, "  namespace: monitoring\n", "  namespace: monitoring\n  annotations:\n    sealedsecrets.bitnami.com/scope: strict\n", 1),
+			driftReasonMetadata,
+			[]string{"metadata.annotations.sealedsecrets.bitnami.com/scope"},
+		},
+		{
+			"only the template differs",
+			live + "  template:\n    type: Opaque\n",
+			driftReasonTemplate,
+			[]string{"spec.template.type"},
+		},
+		{
+			// The one divergence a sync cannot resolve: the file belongs to something else.
+			"the file is another Secret's manifest",
+			strings.Replace(live, "  name: mktxp-cred\n", "  name: other-cred\n", 1),
+			driftReasonIdentity,
+			[]string{"metadata.name"},
+		},
+		{
+			// Both causes are reported: the name picks the decisive one, the list keeps the rest.
+			"a reseal and a namespace drift together",
+			strings.Replace(
+				strings.Replace(live, "password: AgBy3i4OJSWK", "password: AgDf9x2LMPQZ", 1),
+				"  namespace: monitoring\n", "  namespace: others\n", 1),
+			driftReasonCiphertext,
+			[]string{"metadata.namespace", "spec.encryptedData.password"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			liveDoc, err := canonicalDocument(live)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitDoc, err := canonicalDocument(tc.git)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason, fields := driftReason(liveDoc, gitDoc)
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+			if !reflect.DeepEqual(fields, tc.wantFields) {
+				t.Errorf("fields = %v, want %v", fields, tc.wantFields)
+			}
+		})
+	}
+}
+
+// TestSecretHandlerReportsWhyASecretDiverged pins the two fields on the wire, because a reason the
+// client cannot read is the guessing this exists to end.
+func TestSecretHandlerReportsWhyASecretDiverged(t *testing.T) {
+	live := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: db\n  namespace: ns\nspec:\n  encryptedData:\n    password: live-cipher\n"
+	gitYAML := strings.Replace(live, "live-cipher", "git-cipher", 1)
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/db.yaml"}, gitYAML, "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "db", Namespace: "ns", KeyCount: 1, Keys: []string{"password"}, YAML: live}}}, nil, false)
+
+	rr := httptest.NewRecorder()
+	h.SecretHandler(rr, protectedRequest(http.MethodGet, "/api/v1/secrets/ns/db", "", protectedIdentity(policy.MetadataRead)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"drift":"diverged"`) ||
+		!strings.Contains(body, `"drift_reason":"ciphertext"`) ||
+		!strings.Contains(body, `"drift_fields":["spec.encryptedData.password"]`) {
+		t.Fatalf("diverged detail did not say which part differs: %s", body)
 	}
 }
 

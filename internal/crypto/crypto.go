@@ -82,6 +82,15 @@ type PrivateKeyProvider interface {
 	PrivateKeys(ctx context.Context) ([]*rsa.PrivateKey, error)
 }
 
+// KeyCacheInvalidator is the optional capability a PrivateKeyProvider has when it caches the key
+// list. DecryptYAML drops that cache and retries once when no supplied key opens the data, which is
+// what makes a bounded cache safe: a key that rotated inside the cache's window is found on the
+// retry instead of being reported as an undecryptable Secret. A provider that does not cache simply
+// does not implement it, and the retry is skipped.
+type KeyCacheInvalidator interface {
+	InvalidateKeyCache()
+}
+
 // Wrapper encrypts, decrypts, and reseals in-process. All methods are safe for
 // concurrent use.
 type Wrapper struct {
@@ -165,20 +174,26 @@ func (w *Wrapper) DecryptYAML(ctx context.Context, sealedYAML string) (string, e
 		return "", fmt.Errorf("crypto: decrypt is disabled (ENABLE_DECRYPT=false)")
 	}
 
-	privKeys, err := w.privateKeyMap(ctx)
+	secret, err := w.unseal(ctx, sealedYAML)
+	if err != nil {
+		// A key that rotated after the provider built its list is missing from the map, which arrives
+		// here as an unseal failure. Drop the provider's copy and try once with a fresh list: that
+		// retry is the condition that makes a cached key list acceptable, since without it the cache's
+		// stale window would turn a just-rotated key into a Secret that cannot be revealed at all. The
+		// document is re-parsed rather than the first attempt's object reused, so the retry rests on
+		// nothing about how the library treats its receiver. Every failure pays one extra key fetch,
+		// which is the cheap side of that trade.
+		if stale, ok := w.priv.(KeyCacheInvalidator); ok {
+			stale.InvalidateKeyCache()
+			if retried, retryErr := w.unseal(ctx, sealedYAML); retryErr == nil {
+				secret, err = retried, nil
+			}
+		}
+	}
 	if err != nil {
 		return "", err
 	}
 
-	sealed, err := parseSealedSecret(sealedYAML)
-	if err != nil {
-		return "", err
-	}
-
-	secret, err := sealed.Unseal(w.codecs, privKeys)
-	if err != nil {
-		return "", fmt.Errorf("crypto: unseal: %w", err)
-	}
 	// Render as stringData so the output is human-readable and matches the kubeseal
 	// CLI's unseal output.
 	sd := make(map[string]string, len(secret.Data))
@@ -193,6 +208,26 @@ func (w *Wrapper) DecryptYAML(ctx context.Context, sealedYAML string) (string, e
 		return "", fmt.Errorf("crypto: encode secret: %w", err)
 	}
 	return string(y), nil
+}
+
+// unseal fetches the controller keys and opens the document with them. It is separate from
+// DecryptYAML so the retry runs the whole sequence again rather than a partial one.
+func (w *Wrapper) unseal(ctx context.Context, sealedYAML string) (*corev1.Secret, error) {
+	privKeys, err := w.privateKeyMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	sealed, err := parseSealedSecret(sealedYAML)
+	if err != nil {
+		return nil, err
+	}
+
+	secret, err := sealed.Unseal(w.codecs, privKeys)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: unseal: %w", err)
+	}
+	return secret, nil
 }
 
 // privateKeyMap indexes every controller key by its public-key fingerprint; Unseal looks
@@ -328,8 +363,11 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 	for k := range data {
 		present[k] = true
 	}
-	// Deletions count against the starting state too, so a batch that would empty the
-	// Secret is refused as a whole regardless of the order its entries arrive in.
+	// Deletions count against the starting state, so a batch that would empty the Secret is refused
+	// as a whole regardless of the order its entries arrive in. The count is the net of the whole
+	// batch, checked once after validation — a running "<= 1 before this delete" check would refuse a
+	// delete-then-add batch that keeps the Secret non-empty, purely because the delete came first in
+	// the array the client sent.
 	finalCount := len(data)
 	seen := make(map[string]bool, len(mutations))
 	for _, m := range mutations {
@@ -354,13 +392,13 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 			if !present[m.Key] {
 				return "", StrictScope, fmt.Errorf("%w: key %q does not exist", ErrInvalidMutation, m.Key)
 			}
-			if finalCount <= 1 {
-				return "", StrictScope, fmt.Errorf("%w: cannot delete the final key", ErrInvalidMutation)
-			}
 			finalCount--
 		default:
 			return "", StrictScope, fmt.Errorf("%w: unknown operation %q", ErrInvalidMutation, m.Op)
 		}
+	}
+	if finalCount < 1 {
+		return "", StrictScope, fmt.Errorf("%w: cannot delete the final key", ErrInvalidMutation)
 	}
 
 	for _, m := range mutations {

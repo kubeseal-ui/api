@@ -4,8 +4,9 @@
 // The api never writes to Kubernetes: only list/get reads over namespaces, SealedSecrets,
 // and (in decrypt-enabled mode) the controller's private-key Secret. Active-key selection
 // is deterministic and never depends on API list order; ambiguous or malformed state fails
-// closed rather than picking the first item. Key bytes are never cached, logged, or
-// retained after use.
+// closed rather than picking the first item. This package caches nothing and key bytes are never
+// logged: every call re-reads the cluster. Retention belongs to the caller — the decrypt provider in
+// cmd/server deliberately holds parsed keys for a short TTL.
 package kubernetes
 
 import (
@@ -46,7 +47,10 @@ type SealedSecret struct {
 	KeyCount  int      `json:"key_count"`
 	Keys      []string `json:"keys,omitempty"`
 	CreatedAt string   `json:"created_at,omitempty"`
-	YAML      string   `json:"-"`
+	// YAML is the whole object as a manifest — YAML, with the API server's bookkeeping already off
+	// it (see ManifestFromObject) — because it is both displayed to an operator and committed as
+	// the mapped file. Never the raw object: that is the cluster's record, not the file's content.
+	YAML string `json:"-"`
 }
 
 // ActiveKey is the resolved controller private key; the client never retains it, and

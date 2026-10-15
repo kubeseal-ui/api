@@ -15,7 +15,7 @@ import (
 // commit it produced.
 func TestGitOpsDeliverReplaysARepeatInsteadOfReExecutingIt(t *testing.T) {
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, deliveryManifest("payments", "api", "old"), "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -56,7 +56,7 @@ func TestGitOpsDeliverReplaysARepeatInsteadOfReExecutingIt(t *testing.T) {
 // transient failure would refuse every retry until it expired, the opposite of what the key is for.
 func TestGitOpsDeliverRetryAfterFailureIsNotRefused(t *testing.T) {
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, deliveryManifest("payments", "api", "old"), "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryProposal, ProposalAdapter: failingProposalAdapter{}}); err != nil {
 		t.Fatal(err)

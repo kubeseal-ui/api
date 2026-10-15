@@ -105,7 +105,10 @@ func gitopsTransport(cfg *config.Config) (gitops.GitTransport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return transport, nil
+	// Wrap once, process-lived: the cache memoizes a branch pull across requests so a drift-resolving
+	// listing does not re-fetch the remote every time. NewCachingTransport returns the transport
+	// unchanged when the TTL is zero, so a disabled cache needs no branch here.
+	return gitops.NewCachingTransport(transport, cfg.GitSnapshotTTL), nil
 }
 
 // parseCredentialRefs parses the comma-separated typed credential list, each entry being
@@ -187,6 +190,26 @@ func parseAllowedPaths(raw string) []string {
 		}
 	}
 	return paths
+}
+
+// checkMappingCredentials refuses a boot whose namespace mappings name a credential
+// GITOPS_CREDENTIAL_REFS does not define.
+//
+// The resolver is consulted per request, so an unknown reference would otherwise surface as a 502
+// on the first delivery — an upstream-error class for what is a configuration mistake, discovered
+// by an operator mid-change rather than at rollout. Both lists are parsed in full here, so the
+// check costs a map and a loop.
+func checkMappingCredentials(specs []policy.GitMappingSpec, refs []gitops.FileCredential) error {
+	known := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		known[ref.AuthRef] = struct{}{}
+	}
+	for _, spec := range specs {
+		if _, ok := known[spec.AuthRef]; !ok {
+			return fmt.Errorf("namespace %q maps to git credential %q, which GITOPS_CREDENTIAL_REFS does not define", spec.Namespace, spec.AuthRef)
+		}
+	}
+	return nil
 }
 
 // proposalAdapterSpec is one parsed GITOPS_PROPOSAL_ADAPTERS entry.
@@ -305,6 +328,45 @@ func setupTelemetryFromConfig(cfg *config.Config, logger *slog.Logger) *observab
 	return telemetry
 }
 
+// buildKubernetesClient constructs the cluster client, or the in-memory fake in explicit fake mode.
+// Reaching the cluster is fatal on failure: the api cannot answer a single read without it, so a
+// boot that cannot build the client should exit rather than serve 502s one request at a time.
+func buildKubernetesClient(cfg config.Config) kubernetes.Client {
+	if cfg.FakeK8sClient {
+		return kubernetes.NewFake(
+			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
+			[]kubernetes.SealedSecret{
+				{Name: "example", Namespace: "default", Scope: "strict"},
+			},
+			nil,
+		)
+	}
+	kubeConfig, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatal("kubernetes config", "error", err)
+	}
+	client, err := kubernetes.NewClientFromConfig(kubeConfig, kubernetes.Options{ControllerNamespace: cfg.ControllerNamespace, ActiveKeyLabel: cfg.ActiveKeyLabel})
+	if err != nil {
+		log.Fatal("kubernetes client", "error", err)
+	}
+	return client
+}
+
+// prewarmGitBranches pulls every mapped branch in the background at boot so the first request after a
+// restart is served from a warm cache rather than waiting on a cold clone. A fresh pod's git scratch
+// is an emptyDir, so that first pull is a full clone — the slowest one there is. No-op without a
+// transport or mappings; see gitops.PrewarmBranches.
+func prewarmGitBranches(ctx context.Context, transport gitops.GitTransport, mappingSpecs []policy.GitMappingSpec, logger *slog.Logger) {
+	if transport == nil || len(mappingSpecs) == 0 {
+		return
+	}
+	warmTargets := make([]gitops.WarmTarget, 0, len(mappingSpecs))
+	for _, spec := range mappingSpecs {
+		warmTargets = append(warmTargets, gitops.WarmTarget{Repository: spec.Repository, Branch: spec.Branch, AuthRef: spec.AuthRef})
+	}
+	go gitops.PrewarmBranches(ctx, transport, warmTargets, logger)
+}
+
 func main() {
 	flag.Parse()
 	cfg, err := config.Load()
@@ -337,32 +399,14 @@ func main() {
 	}
 
 	// Kubernetes client (fake in explicit fake mode; production client otherwise)
-	var k8sClient kubernetes.Client
-	if cfg.FakeK8sClient {
-		k8sClient = kubernetes.NewFake(
-			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
-			[]kubernetes.SealedSecret{
-				{Name: "example", Namespace: "default", Scope: "strict"},
-			},
-			nil,
-		)
-	} else {
-		kubeConfig, configErr := rest.InClusterConfig()
-		if configErr != nil {
-			log.Fatal("kubernetes config", "error", configErr)
-		}
-		k8sClient, configErr = kubernetes.NewClientFromConfig(kubeConfig, kubernetes.Options{ControllerNamespace: cfg.ControllerNamespace, ActiveKeyLabel: cfg.ActiveKeyLabel})
-		if configErr != nil {
-			log.Fatal("kubernetes client", "error", configErr)
-		}
-	}
+	k8sClient := buildKubernetesClient(cfg)
 
 	var privProvider crypto.PrivateKeyProvider
 	if cfg.EnableDecrypt {
 		if cfg.FakeK8sClient {
 			privProvider = &devPrivProvider{key: devPrivateKey()}
 		} else {
-			privProvider = kubePrivateKeyProvider{client: k8sClient}
+			privProvider = newKubePrivateKeyProvider(k8sClient, nil)
 		}
 	}
 	cryptoWrapper := crypto.New(certProvider, privProvider)
@@ -380,6 +424,16 @@ func main() {
 	}
 	if transport != nil {
 		slog.Info("gitops delivery enabled", "worktree_dir", cfg.GitWorktreeDir, "credentials", len(parseCredentialRefs(cfg.GitCredentialRefs)))
+	}
+	// Parsed once and reused: the boot check below and the router must see the same mappings.
+	mappingSpecs := parseMappingSpecs(cfg.GitMappingSpecs)
+	if cfg.GitOpsEnabled {
+		if credentialErr := checkMappingCredentials(mappingSpecs, parseCredentialRefs(cfg.GitCredentialRefs)); credentialErr != nil {
+			// Fail closed: a mapping whose credential does not exist can never deliver, so serving
+			// it would mean every change in that namespace fails one request at a time.
+			slog.Error("gitops mapping references an undefined credential", "error", credentialErr)
+			os.Exit(1)
+		}
 	}
 	adapters, adaptersErr := proposalAdapters(&cfg)
 	if adaptersErr != nil {
@@ -414,7 +468,7 @@ func main() {
 		k8s:            k8sClient,
 		transport:      transport,
 		oidcProvider:   oidcProvider,
-		mappingSpecs:   parseMappingSpecs(cfg.GitMappingSpecs),
+		mappingSpecs:   mappingSpecs,
 		adapters:       adapters,
 		policyStore:    policyStore,
 		readyCheck:     readyCheck,
@@ -425,12 +479,17 @@ func main() {
 		slog.Error("router construction failed", "error", routerErr)
 		os.Exit(1)
 	}
+	// writeGrace keeps the connection write deadline above the request deadline. WriteTimeout is a
+	// write deadline on the connection, not a cancellation of the handler: set below the request
+	// deadline it severs the response while the handler runs to completion and logs the success it
+	// never delivered, which reaches the operator as an unexplained 502 with a 200 in the log.
+	const writeGrace = 15 * time.Second
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		ReadTimeout:       cfg.APITimeout,
+		WriteTimeout:      cfg.APITimeout + writeGrace,
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -440,6 +499,11 @@ func main() {
 	if policyLoader != nil {
 		go watchPolicyReloads(ctx, policyLoader)
 	}
+
+	// Warm the branch cache off the serving path, so the first request after a restart does not wait
+	// on a cold clone of every mapped repository. Backgrounded inside the helper: readiness must not
+	// block on a remote fetch.
+	prewarmGitBranches(ctx, transport, mappingSpecs, logger)
 
 	go func() {
 		slog.Info("starting api",

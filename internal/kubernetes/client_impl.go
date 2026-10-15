@@ -102,9 +102,12 @@ func (c *KubeClient) ListSealedSecrets(ctx context.Context, namespace string) ([
 }
 
 func projectSealedSecret(obj *unstructured.Unstructured) (SealedSecret, error) {
-	raw, err := obj.MarshalJSON()
+	// Projected rather than echoed: what leaves here is displayed as the manifest and, on a sync,
+	// committed as the file, so it is the object's content rather than the API server's record of
+	// it. See ManifestFromObject.
+	manifest, err := ManifestFromObject(obj.Object)
 	if err != nil {
-		return SealedSecret{}, fmt.Errorf("marshal sealed secret: %w", err)
+		return SealedSecret{}, err
 	}
 	var annotations = obj.GetAnnotations()
 	scope := annotations["sealedsecrets.bitnami.com/scope"]
@@ -134,7 +137,7 @@ func projectSealedSecret(obj *unstructured.Unstructured) (SealedSecret, error) {
 		KeyCount:  len(keys),
 		Keys:      keys,
 		CreatedAt: createdAt,
-		YAML:      string(raw),
+		YAML:      manifest,
 	}, nil
 }
 

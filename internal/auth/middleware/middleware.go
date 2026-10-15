@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/kubeseal-ui/api/internal/auth/oidc"
@@ -183,17 +184,25 @@ func verifySessionCookie(data SessionData, sig string, secret []byte) error {
 func AuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	signingKey := cfg.SigningKey
 	if len(signingKey) == 0 {
-		signingKey = []byte("dev-signing-key-change-in-production")
+		// Fail closed rather than substitute a key. A constant compiled into the binary signs a
+		// session anyone can forge, and a deployment that forgot the key must serve 401 rather than
+		// authenticate on a secret that is in the source. Logged once, at construction, because
+		// every request takes this path.
+		slog.Error("auth: no session signing key configured; refusing every request")
+		return func(http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			})
+		}
 	}
+	gate := newRefreshGate()
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			cookieData, ok := extractAndValidateSession(w, r, cfg, signingKey)
+			cookieData, ok := extractAndValidateSession(w, r, cfg, signingKey, gate)
 			if !ok {
 				return
 			}
-
-			scheduleAsyncRefresh(r, cookieData.Expiry, cfg, signingKey)
 
 			identity := buildIdentity(cookieData, cfg.ResolveCapabilities)
 
@@ -203,8 +212,9 @@ func AuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	}
 }
 
-// extractAndValidateSession returns the cookie data, or writes 401 and returns false.
-func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte) (sessionCookieData, bool) {
+// extractAndValidateSession returns the cookie data, or writes 401 and returns false. A session
+// inside the refresh window is renewed here, before the handler and the ACL checks run.
+func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte, gate *refreshGate) (sessionCookieData, bool) {
 	sessionCookie, err := r.Cookie(cfg.SessionCookie)
 	if err != nil {
 		slog.Debug("auth: no session cookie", "error", err)
@@ -229,37 +239,170 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 	if err := verifySessionCookie(cookieData.SessionData, cookieData.Signature, signingKey); err != nil {
 		slog.Debug("auth: session verification failed", "error", err)
 		if err.Error() == "session expired" {
-			if refreshed, ok := attemptRefresh(w, r, cfg, signingKey); ok {
+			// A cookie that outlived its payload — a client ignoring MaxAge, or clock skew. The
+			// session is gone and only a refresh can revive it, so this one is terminal.
+			if refreshed, ok := attemptRefresh(w, r, cfg, signingKey, gate); ok {
 				return refreshed, true
 			}
+			clearAuthCookies(w, cfg)
 		}
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return sessionCookieData{}, false
 	}
 
+	// Renewal runs while the session is still in force, so a refresh that fails on a transient
+	// provider error does not end a session that still has time left: the request is served on the
+	// session in hand and the next one tries again. Cleared cookies and 401 are for the session
+	// above, which has nothing left to renew.
+	if time.Until(time.Unix(cookieData.Expiry, 0)) < sessionRefreshWindow {
+		if refreshed, ok := attemptRefresh(w, r, cfg, signingKey, gate); ok {
+			return refreshed, true
+		}
+	}
+
 	return cookieData, true
 }
 
-func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte) (sessionCookieData, bool) {
-	if cfg.OIDCProvider == nil || len(signingKey) == 0 {
-		if w != nil {
-			clearAuthCookies(w, cfg)
+// sessionRefreshWindow is how long before expiry a session is renewed.
+const sessionRefreshWindow = 5 * time.Minute
+
+// refreshGate keeps one exchange per spent refresh token, shared by every request presenting it. A
+// browser whose session is inside the refresh window fires a page of requests carrying that token,
+// and a provider that rotates refresh tokens retires it on the first exchange — the others would
+// present a spent token, which such providers read as a replay of the whole token family and answer
+// by killing it. The first caller performs the exchange; the rest adopt its result, which is the same
+// identity, the same CSRF token, and a cookie signed with the same key.
+type refreshGate struct {
+	mu      sync.Mutex
+	entries map[string]*refreshEntry
+}
+
+// refreshGrace is how long a completed exchange stays available to requests that arrive with the
+// token it spent.
+//
+// This is about more than the requests waiting while the exchange runs. A page load fires its
+// requests together, so most of them reach the middleware *after* the exchange has finished and
+// still carry the pre-refresh cookie, because the browser only learns the new one when the first
+// response lands. Every one of those would present a spent token and provoke exactly the replay the
+// gate exists to prevent, from the requests that arrived a moment too late.
+const refreshGrace = 60 * time.Second
+
+// refreshEntry is one exchange, shared by the requests presenting the token it spends. It is in
+// flight until settle publishes the outcome, and answers late arrivals until it expires.
+type refreshEntry struct {
+	done    chan struct{}
+	outcome *refreshOutcome
+	expires time.Time
+}
+
+func newRefreshGate() *refreshGate {
+	return &refreshGate{entries: map[string]*refreshEntry{}}
+}
+
+// enter returns the entry for a token — in flight, recently settled, or one this caller now leads.
+func (g *refreshGate) enter(key string) (entry *refreshEntry, lead bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	for k, e := range g.entries {
+		// Swept here rather than on a timer, so the map holds only the refreshes of the last grace
+		// period and nothing needs stopping when the process shuts down.
+		if !e.expires.IsZero() && now.After(e.expires) {
+			delete(g.entries, k)
 		}
+	}
+	if existing, ok := g.entries[key]; ok {
+		return existing, false
+	}
+	entry = &refreshEntry{done: make(chan struct{})}
+	g.entries[key] = entry
+	return entry, true
+}
+
+// settle publishes the outcome to everyone waiting on this token and keeps it for the grace period.
+// A failed exchange is published too: the waiter's answer to a spent token is the same as the
+// leader's, and retrying an invalid_grant is what the contract forbids.
+func (g *refreshGate) settle(entry *refreshEntry, outcome *refreshOutcome) {
+	g.mu.Lock()
+	entry.outcome = outcome
+	entry.expires = time.Now().Add(refreshGrace)
+	g.mu.Unlock()
+	close(entry.done)
+}
+
+// refreshGateKey hashes the refresh token so the token itself is not held in the map.
+func refreshGateKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// refreshOutcome is the result of one exchange, shared with the requests that waited on it: the
+// signed session, the token that replaced the spent one, and the expiry every rotated cookie
+// derives from. Each participant writes the same cookies, so it does not matter which response the
+// browser commits last.
+type refreshOutcome struct {
+	session      sessionCookieData
+	cookieValue  string
+	refreshToken string
+	csrf         string
+	expiry       time.Time
+}
+
+// attemptRefresh spends the session's refresh token and, on success, writes the rotated cookies to
+// this response. A failure leaves every cookie untouched and reports false: what an unrenewable
+// session means is the caller's decision, and it differs between a session still in force and one
+// that has already expired.
+//
+// The exchange runs on the request's own goroutine, inside the request deadline, because a rotated
+// cookie needs a response to be written to — a refresh the client never receives is not a refresh.
+func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte, gate *refreshGate) (sessionCookieData, bool) {
+	if cfg.OIDCProvider == nil || len(signingKey) == 0 {
 		return sessionCookieData{}, false
 	}
 	refreshCookie, err := r.Cookie(cfg.RefreshCookie)
 	if err != nil {
+		// No refresh token to spend (a provider that issues none, or a cleared cookie): the
+		// session serves until it expires.
 		return sessionCookieData{}, false
 	}
 
+	key := refreshGateKey(refreshCookie.Value)
+	entry, lead := gate.enter(key)
+	if !lead {
+		// Another request has spent — or is spending — this token. Waiting for its result rather
+		// than presenting the token again is the point of the gate: a rotating provider reads the
+		// second use of a spent token as a replay.
+		select {
+		case <-entry.done:
+		case <-r.Context().Done():
+			return sessionCookieData{}, false
+		}
+		if entry.outcome == nil {
+			return sessionCookieData{}, false
+		}
+		writeRefreshCookies(w, cfg, *entry.outcome)
+		return entry.outcome.session, true
+	}
+
+	outcome := exchangeRefreshToken(r, cfg, signingKey, refreshCookie.Value)
+	// Settled before this caller writes its own cookies, so waiters are released as soon as the
+	// exchange is decided.
+	gate.settle(entry, outcome)
+	if outcome == nil {
+		return sessionCookieData{}, false
+	}
+	writeRefreshCookies(w, cfg, *outcome)
+	return outcome.session, true
+}
+
+// exchangeRefreshToken spends one refresh token at the provider and verifies what comes back. A nil
+// result means the refresh failed, and the caller answers 401 and clears the session cookies.
+func exchangeRefreshToken(r *http.Request, cfg AuthConfig, signingKey []byte, refreshToken string) *refreshOutcome {
 	ctx := r.Context()
-	tokens, err := cfg.OIDCProvider.RefreshTokens(ctx, refreshCookie.Value)
+	tokens, err := cfg.OIDCProvider.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		slog.Debug("auth: token refresh failed", "error", err)
-		if w != nil {
-			clearAuthCookies(w, cfg)
-		}
-		return sessionCookieData{}, false
+		return nil
 	}
 
 	// A refreshed ID token still passes issuer, audience, signature, expiry, and claim
@@ -267,10 +410,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	verified, err := cfg.OIDCProvider.VerifyIDToken(ctx, tokens.IDToken, "")
 	if err != nil {
 		slog.Debug("auth: refreshed ID token verification failed", "error", err)
-		if w != nil {
-			clearAuthCookies(w, cfg)
-		}
-		return sessionCookieData{}, false
+		return nil
 	}
 
 	// Preserve the existing CSRF token across the refresh.
@@ -296,63 +436,72 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 		CSRF:     existingCSRF,
 	}
 
-	sig := signSessionCookie(newSession, signingKey)
 	newCookieData := sessionCookieData{
 		SessionData: newSession,
-		Signature:   sig,
+		Signature:   signSessionCookie(newSession, signingKey),
 	}
 
 	cookieJSON, err := json.Marshal(newCookieData)
 	if err != nil {
 		slog.Debug("auth: failed to marshal new session", "error", err)
-		return sessionCookieData{}, false
-	}
-	encodedSession := base64.RawURLEncoding.EncodeToString(cookieJSON)
-
-	if w != nil {
-		sessionCookie := &http.Cookie{
-			Name:     cfg.SessionCookie,
-			Value:    encodedSession,
-			Path:     "/",
-			MaxAge:   int(time.Until(verified.Expiry).Seconds()),
-			HttpOnly: true,
-			Secure:   true,
-			SameSite: http.SameSiteLaxMode,
-			Domain:   cfg.CookieDomain,
-		}
-		sessionCookie.Secure = cfg.CookieSecure
-		http.SetCookie(w, sessionCookie)
-
-		if tokens.RefreshToken != "" {
-			refreshCookie := &http.Cookie{
-				Name:     cfg.RefreshCookie,
-				Value:    tokens.RefreshToken,
-				Path:     "/api/v1",
-				MaxAge:   int(time.Until(verified.Expiry.Add(24 * time.Hour)).Seconds()),
-				HttpOnly: true,
-				Secure:   true,
-				SameSite: http.SameSiteLaxMode,
-				Domain:   cfg.CookieDomain,
-			}
-			refreshCookie.Secure = cfg.CookieSecure
-			http.SetCookie(w, refreshCookie)
-		}
+		return nil
 	}
 
-	return newCookieData, true
+	return &refreshOutcome{
+		session:      newCookieData,
+		cookieValue:  base64.RawURLEncoding.EncodeToString(cookieJSON),
+		refreshToken: tokens.RefreshToken,
+		csrf:         existingCSRF,
+		expiry:       verified.Expiry,
+	}
 }
 
-// scheduleAsyncRefresh refreshes in the background when the session is within 5 minutes of
-// expiry.
-func scheduleAsyncRefresh(r *http.Request, expiry int64, cfg AuthConfig, signingKey []byte) {
-	if time.Until(time.Unix(expiry, 0)) >= 5*time.Minute {
+// writeRefreshCookies writes the rotation the contract calls for: the session, the refresh token
+// that replaced the spent one, and the CSRF cookie.
+//
+// The CSRF cookie is rewritten even though its value does not change. Its lifetime was set from the
+// token that just expired, so leaving it alone would retire the double-submit anchor while the
+// session it belongs to lives on — GETs keep working and every state-changing request starts
+// failing 403, which reads as a permissions bug rather than an expired cookie.
+func writeRefreshCookies(w http.ResponseWriter, cfg AuthConfig, outcome refreshOutcome) {
+	if w == nil {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		_, _ = attemptRefresh(nil, r.WithContext(ctx), cfg, signingKey)
-	}()
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is set from cfg.CookieSecure, which gosec cannot prove constant
+		Name:     cfg.SessionCookie,
+		Value:    outcome.cookieValue,
+		Path:     "/",
+		MaxAge:   int(time.Until(outcome.expiry).Seconds()),
+		HttpOnly: true,
+		Secure:   cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+		Domain:   cfg.CookieDomain,
+	})
+	if outcome.refreshToken != "" {
+		http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is set from cfg.CookieSecure, which gosec cannot prove constant
+			Name:     cfg.RefreshCookie,
+			Value:    outcome.refreshToken,
+			Path:     "/api/v1",
+			MaxAge:   int(time.Until(outcome.expiry.Add(24 * time.Hour)).Seconds()),
+			HttpOnly: true,
+			Secure:   cfg.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+			Domain:   cfg.CookieDomain,
+		})
+	}
+	if outcome.csrf == "" {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly deliberately false for SPA CSRF readability
+		Name:     cfg.CSRFCookie,
+		Value:    outcome.csrf,
+		Path:     "/",
+		MaxAge:   int(time.Until(outcome.expiry).Seconds()),
+		HttpOnly: false,
+		Secure:   cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+		Domain:   cfg.CookieDomain,
+	})
 }
 
 func buildIdentity(cookieData sessionCookieData, resolve ...func([]string) CapabilityGrants) Identity {

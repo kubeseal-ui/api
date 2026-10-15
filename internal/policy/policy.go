@@ -599,7 +599,7 @@ func (g GitMapping) RenderPath(namespace, name string) string {
 	path := strings.ReplaceAll(g.PathTemplate, "{namespace}", namespace)
 	path = strings.ReplaceAll(path, "{name}", name)
 	clean := pathpkg.Clean(path)
-	if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." || strings.HasPrefix(clean, "/") {
+	if !safeRelativePath(clean) {
 		return ""
 	}
 	return clean
@@ -608,9 +608,17 @@ func (g GitMapping) RenderPath(namespace, name string) string {
 // IsPathAllowed reports whether targetPath may be written here. With AllowedPaths empty only
 // the exact RenderPath for this namespace/name is allowed; otherwise the target must sit
 // under one of the allowed directory prefixes.
+//
+// The path must arrive canonical — it is cleaned and compared before it is judged, and
+// anything `Clean` would rewrite is refused. The prefix test is a string test, so
+// `apps/../ci/x.yaml` passes a grant on `apps/` while the transport joins the *raw* string
+// onto the worktree, where the OS cleans it for real and the write lands in `ci/`.
 func (g GitMapping) IsPathAllowed(targetPath, namespace, name string) bool {
 	defaultPath := g.RenderPath(namespace, name)
 	if defaultPath == "" {
+		return false
+	}
+	if targetPath != pathpkg.Clean(targetPath) || !safeRelativePath(targetPath) {
 		return false
 	}
 	if len(g.AllowedPaths) == 0 {
@@ -618,19 +626,22 @@ func (g GitMapping) IsPathAllowed(targetPath, namespace, name string) bool {
 	}
 	for _, allowed := range g.AllowedPaths {
 		// An allowed prefix may itself carry {namespace}.
-		prefix := strings.ReplaceAll(allowed, "{namespace}", namespace)
+		prefix := pathpkg.Clean(strings.ReplaceAll(allowed, "{namespace}", namespace))
 		if !strings.HasSuffix(prefix, "/") {
 			prefix += "/"
 		}
 		if strings.HasPrefix(targetPath, prefix) {
-			clean := pathpkg.Clean(targetPath)
-			if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." || strings.HasPrefix(clean, "/") {
-				return false
-			}
-			return clean != "" && clean != "."
+			return true
 		}
 	}
 	return false
+}
+
+// safeRelativePath reports whether an already-cleaned path names a file inside the repository:
+// not the repository root, not a directory, and not above the checkout.
+func safeRelativePath(clean string) bool {
+	return clean != "" && clean != "." && clean != ".." &&
+		!strings.HasPrefix(clean, "../") && !strings.HasPrefix(clean, "/")
 }
 
 func safePathComponent(value string) bool {

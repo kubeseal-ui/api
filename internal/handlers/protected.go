@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -186,11 +187,32 @@ func (h *ProtectedHandlers) lookupManifest(ctx context.Context, transport gitops
 	return snapshot, false, nil
 }
 
+// mappedFileText reads back a file as Git holds it, which is what a view that says "Git, before"
+// has to show. The read is served from the request's branch snapshot, so a path the request has
+// already resolved is a map lookup rather than a second fetch.
+func (h *ProtectedHandlers) mappedFileText(ctx context.Context, transport gitops.GitTransport, namespace, path string) (string, error) {
+	if h.GitMappings == nil || transport == nil {
+		return "", errors.New("no Git mapping for this namespace")
+	}
+	mapping, ok := h.GitMappings.GetGitMapping(namespace)
+	if !ok {
+		return "", errors.New("no Git mapping for this namespace")
+	}
+	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}
+	snapshot, err := transport.ReadManifest(ctx, target, mapping.AuthRef)
+	if err != nil {
+		return "", err
+	}
+	return string(snapshot.Content), nil
+}
+
 // gitStatus resolves a Secret's Git state through the request's transport, so that resolving it for
 // thirty Secrets in one listing costs one fetch per branch rather than one per Secret. See
 // requestTransport. withHistory additionally asks which side moved when the two differ, at the cost
-// of a Git history read — worth it for one Secret, not for a listing.
-func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitTransport, namespace, name, liveYAML, baseCommit string, withHistory bool) (map[string]any, error) {
+// of a Git history read — worth it for one Secret, not for a listing. withGitText carries the file's
+// own text back on `diverged`, which only a view that is about to overwrite it can use: a listing
+// holds thirty of them and shows none.
+func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitTransport, namespace, name, liveYAML, baseCommit string, withHistory, withGitText bool) (map[string]any, error) {
 	status := map[string]any{"managed": false, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 	if h.GitMappings == nil || transport == nil {
 		return status, nil
@@ -240,11 +262,19 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 		status["drift"] = "git_only"
 		return status, nil
 	}
-	liveCanonical, err := canonicalSealedSecret(liveYAML)
+	liveDoc, err := canonicalDocument(liveYAML)
 	if err != nil {
 		return status, err
 	}
-	gitCanonical, err := canonicalSealedSecret(string(snapshot.Content))
+	gitDoc, err := canonicalDocument(string(snapshot.Content))
+	if err != nil {
+		return status, err
+	}
+	liveCanonical, err := json.Marshal(liveDoc)
+	if err != nil {
+		return status, err
+	}
+	gitCanonical, err := json.Marshal(gitDoc)
 	if err != nil {
 		return status, err
 	}
@@ -254,10 +284,41 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 		return status, nil
 	}
 	status["drift"] = string(kubernetes.DriftDiverged)
+	reason, fields := driftReason(liveDoc, gitDoc)
+	status["drift_reason"] = reason
+	if len(fields) > 0 {
+		status["drift_fields"] = fields
+	}
+	// Diverged is the only state that offers a sync, and a sync overwrites this file, so the copy it
+	// replaces travels with the drift. Every other state either agrees with Git or offers nothing.
+	if withGitText {
+		status["git_file_yaml"] = string(snapshot.Content)
+	}
 	if withHistory && h.gitMovedPastLive(ctx, transport, mapping, target, liveCanonical) {
 		status["git_moved_ahead"] = true
 	}
 	return status, nil
+}
+
+// refuseGitRead answers a Git read that failed and returns the audit outcome to record for it.
+//
+// A read failure has not established that Git and the cluster disagree, so it is never reported as
+// drift: that told the operator the two copies differ when Git had not answered at all. A stale
+// base commit is a conflict the caller can resolve, a deadline is the server's own bound rather
+// than a fact about Git, and everything else is a read that did not happen.
+func refuseGitRead(w http.ResponseWriter, r *http.Request, err error) string {
+	var base *gitops.BaseCommitError
+	switch {
+	case errors.As(err, &base):
+		writeError(w, r, http.StatusConflict, "BASE_COMMIT_CONFLICT", "Base commit conflict")
+		return opResultConflict
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		writeError(w, r, http.StatusGatewayTimeout, "TIMEOUT", "The request exceeded the server's time limit")
+		return opResultFailed
+	default:
+		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
+		return opResultFailed
+	}
 }
 
 // gitMovedPastLive reports whether the live manifest is the version the mapped file held before its
@@ -283,101 +344,148 @@ func (h *ProtectedHandlers) gitMovedPastLive(ctx context.Context, transport gito
 }
 
 func canonicalSealedSecret(manifest string) ([]byte, error) {
-	var m map[string]any
-	if err := yaml.Unmarshal([]byte(manifest), &m); err != nil {
+	m, err := canonicalDocument(manifest)
+	if err != nil {
 		return nil, err
-	}
-	// Strip volatile runtime and GitOps-tracking fields so comparison sees spec and stable metadata
-	// without false divergences.
-	delete(m, "status")
-	if meta, ok := m["metadata"].(map[string]any); ok {
-		delete(meta, "resourceVersion")
-		delete(meta, "uid")
-		delete(meta, "generation")
-		delete(meta, "creationTimestamp")
-		delete(meta, "managedFields")
-		cleanAnnotations(meta)
-		cleanLabels(meta)
-	}
-	if spec, ok := m["spec"].(map[string]any); ok {
-		if tpl, ok := spec["template"].(map[string]any); ok {
-			if tplMeta, ok := tpl["metadata"].(map[string]any); ok {
-				delete(tplMeta, "creationTimestamp")
-				cleanAnnotations(tplMeta)
-				cleanLabels(tplMeta)
-				if len(tplMeta) == 0 {
-					delete(tpl, "metadata")
-				}
-			}
-		}
 	}
 	return json.Marshal(m)
 }
 
-// gitopsAnnotationPrefixes are the annotation namespaces that record how a manifest was applied
-// rather than what it is. They are stripped from both a SealedSecret compared against Git and a
-// Secret being adopted, so the two agree. The concrete case:
-// kubectl.kubernetes.io/last-applied-configuration holds the whole object as JSON — noise once
-// sealed, and it would carry back every field the normalizer strips.
-var gitopsAnnotationPrefixes = []string{
-	"kubectl.kubernetes.io/",
-	"argocd.argoproj.io/",
-	"helm.sh/",
-	"meta.helm.sh/",
-	"fluxcd.io/",
-	"kustomize.toolkit.fluxcd.io/",
+// canonicalDocument is the document the drift comparison and its reason both read. The stripping
+// lives in the kubernetes package beside the projection that serves a live object as a manifest,
+// so one rule covers both sides rather than two that have to be kept in step.
+func canonicalDocument(manifest string) (map[string]any, error) {
+	return kubernetes.CanonicalManifest(manifest)
 }
 
-// gitopsLabelPrefixes are the label namespaces that record which tool owns a manifest; ownership
-// is the delivering tool's business, not the Secret's.
-var gitopsLabelPrefixes = []string{
-	"argocd.argoproj.io/",
-	"helm.sh/",
-}
+// The parts of a SealedSecret two sides can disagree about, most decisive first. `identity` is the
+// one the operator cannot resolve by syncing: the file at the mapped path belongs to another Secret.
+const (
+	driftReasonIdentity   = "identity"
+	driftReasonKeys       = "keys"
+	driftReasonCiphertext = "ciphertext"
+	driftReasonTemplate   = "template"
+	driftReasonMetadata   = "metadata"
+)
 
-// runtimeMetadataFields are assigned by the API server to one live object; carrying them into a
-// manifest records something that was never true of the file, and the next apply would fight them.
-var runtimeMetadataFields = []string{
-	"uid", "resourceVersion", "generation", "creationTimestamp", "managedFields", "selfLink",
-}
+// driftReason names which part of two canonical documents differs, and lists every differing path.
+// The name is the most decisive category and the list is not narrowed to it: a Secret whose
+// ciphertext and metadata both differ reports the ciphertext, and the namespace path alongside it, so
+// that a second cause is never hidden behind the first. The comparison is structural throughout — it
+// reads ciphertext, never plaintext, so this reason needs no controller key and reveals nothing
+// reveal itself withholds.
+func driftReason(live, git map[string]any) (string, []string) {
+	var fields []string
+	differingPaths(live, git, "", &fields)
+	sort.Strings(fields)
 
-func cleanAnnotations(meta map[string]any) {
-	ann, ok := meta["annotations"].(map[string]any)
-	if !ok {
-		return
-	}
-	for k := range ann {
-		if hasAnyPrefix(k, gitopsAnnotationPrefixes) {
-			delete(ann, k)
+	switch {
+	case identityDiffers(live, git):
+		return driftReasonIdentity, fields
+	case !reflect.DeepEqual(specSection(live, "encryptedData"), specSection(git, "encryptedData")):
+		// Same values sealed twice are different bytes — sealing is not deterministic — so the
+		// key names decide between "these are separate encryptions" and "a key was added".
+		if encryptedKeyNamesDiffer(live, git) {
+			return driftReasonKeys, fields
 		}
+		return driftReasonCiphertext, fields
+	case !reflect.DeepEqual(specSection(live, "template"), specSection(git, "template")):
+		return driftReasonTemplate, fields
 	}
-	if len(ann) == 0 {
-		delete(meta, "annotations")
-	}
+	return driftReasonMetadata, fields
 }
 
-func cleanLabels(meta map[string]any) {
-	labels, ok := meta["labels"].(map[string]any)
-	if !ok {
-		return
-	}
-	for k := range labels {
-		if hasAnyPrefix(k, gitopsLabelPrefixes) {
-			delete(labels, k)
-		}
-	}
-	if len(labels) == 0 {
-		delete(meta, "labels")
-	}
+// identityDiffers is true only when both sides declare a name and disagree: a manifest that omits
+// metadata.name is not claiming to be another Secret.
+func identityDiffers(live, git map[string]any) bool {
+	liveName, liveOK := nestedString(live, "metadata", "name")
+	gitName, gitOK := nestedString(git, "metadata", "name")
+	return liveOK && gitOK && liveName != gitName
 }
 
-func hasAnyPrefix(value string, prefixes []string) bool {
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(value, prefix) {
+func encryptedKeyNamesDiffer(live, git map[string]any) bool {
+	liveKeys, liveIsMap := specSection(live, "encryptedData").(map[string]any)
+	gitKeys, gitIsMap := specSection(git, "encryptedData").(map[string]any)
+	// One side carrying the section and the other not is itself a difference in key names. The
+	// caller only asks once the two sections are known to be unequal, so this is that case.
+	if liveIsMap != gitIsMap {
+		return true
+	}
+	if len(liveKeys) != len(gitKeys) {
+		return true
+	}
+	for key := range liveKeys {
+		if _, ok := gitKeys[key]; !ok {
 			return true
 		}
 	}
 	return false
+}
+
+// specSection reads one field of spec, or nil when either the field or spec itself is absent — which
+// is how a comparison distinguishes a missing section from an empty one that was stripped.
+func specSection(doc map[string]any, field string) any {
+	spec, ok := doc["spec"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return spec[field]
+}
+
+func nestedString(doc map[string]any, path ...string) (string, bool) {
+	var current any = doc
+	for _, key := range path {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		current, ok = m[key]
+		if !ok {
+			return "", false
+		}
+	}
+	value, ok := current.(string)
+	return value, ok && value != ""
+}
+
+// differingPaths appends the path of every leaf the two documents disagree about, and of every leaf
+// only one of them has. A list is compared whole and reported as one path: an encryptedData value is
+// a string, so a list that differs is simply a different list. A section only one side carries is
+// descended into rather than reported as itself, because which annotation or template field it holds
+// is the actionable half of the answer.
+func differingPaths(a, b any, prefix string, out *[]string) {
+	aMap, aIsMap := a.(map[string]any)
+	bMap, bIsMap := b.(map[string]any)
+	switch {
+	case aIsMap && bIsMap:
+		for key, aValue := range aMap {
+			differingPaths(aValue, bMap[key], joinPath(prefix, key), out)
+		}
+		for key, bValue := range bMap {
+			if _, ok := aMap[key]; !ok {
+				differingPaths(nil, bValue, joinPath(prefix, key), out)
+			}
+		}
+	case aIsMap:
+		for key, aValue := range aMap {
+			differingPaths(aValue, nil, joinPath(prefix, key), out)
+		}
+	case bIsMap:
+		for key, bValue := range bMap {
+			differingPaths(nil, bValue, joinPath(prefix, key), out)
+		}
+	default:
+		if !reflect.DeepEqual(a, b) {
+			*out = append(*out, prefix)
+		}
+	}
+}
+
+func joinPath(prefix, key string) string {
+	if prefix == "" {
+		return key
+	}
+	return prefix + "." + key
 }
 
 // normalizeSecretYAML reduces a manifest to the desired state of a Secret. Applied to every seal
@@ -404,15 +512,11 @@ func normalizeSecretYAML(secretYAML, namespace, name string) (string, error) {
 		meta = map[string]any{}
 		manifest["metadata"] = meta
 	}
-	for _, field := range runtimeMetadataFields {
-		delete(meta, field)
-	}
 	// Adoption copies a Secret's content, not its garbage-collection relationship to whatever
 	// created it: a manifest that arrived owning itself would be a claim about another cluster.
 	delete(meta, "ownerReferences")
 	delete(manifest, "status")
-	cleanAnnotations(meta)
-	cleanLabels(meta)
+	kubernetes.CleanMetadata(meta)
 
 	if declared, isString := meta["name"].(string); isString && declared != "" && declared != name {
 		return "", fmt.Errorf("manifest names %q, but this request names %q", declared, name)
@@ -452,7 +556,7 @@ func (h *ProtectedHandlers) SecretHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, "", true)
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, "", true, true)
 	if gitErr != nil {
 		writeError(w, r, http.StatusConflict, "GIT_STATE_UNAVAILABLE", "Git source unavailable")
 		return
@@ -584,7 +688,7 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 	started := time.Now()
 	result := opResultSuccess
 	for i := range secrets {
-		git, gitErr := h.gitStatus(r.Context(), transport, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "", false)
+		git, gitErr := h.gitStatus(r.Context(), transport, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "", false, false)
 		if gitErr != nil {
 			// Degraded, not silent: the listing still answers, because a Secret whose drift is
 			// unknown is more use to the rail than no listing at all. Only the first failure is
@@ -845,8 +949,12 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
-	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false, false)
+	if gitErr != nil {
+		result = refuseGitRead(w, r, gitErr)
+		return
+	}
+	if git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
@@ -979,8 +1087,13 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
-	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+	transport := h.requestTransport()
+	git, gitErr := h.gitStatus(r.Context(), transport, namespace, name, secret.YAML, req.BaseCommit, false, false)
+	if gitErr != nil {
+		result = refuseGitRead(w, r, gitErr)
+		return
+	}
+	if git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
@@ -999,6 +1112,19 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
+	// The pane this feeds is labelled "Git, before", so it shows the file as Git holds it — the same
+	// thing the dry run's Before means — rather than the live object. Those differ in formatting and
+	// in anything the file carries that the cluster's copy of the object does not, and a diff of the
+	// live object against the reseal says nothing about the file the commit will land in.
+	//
+	// The read is served from the branch snapshot gitStatus already pulled, so it costs a lookup
+	// rather than a second fetch.
+	before, readErr := h.mappedFileText(r.Context(), transport, namespace, targetPath)
+	if readErr != nil {
+		result = opResultFailed
+		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
+		return
+	}
 	after, err := h.Crypto.ResealMany(r.Context(), secret.YAML, mutations)
 	if err != nil {
 		if errors.Is(err, crypto.ErrInvalidMutation) {
@@ -1012,7 +1138,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	jsonResponse(w, http.StatusOK, map[string]any{"before": secret.YAML, "after": after, "mutations": mutationSummary(req.Mutations), "base_commit": req.BaseCommit, "checksum": encryptedChecksum(after), "target_path": targetPath})
+	jsonResponse(w, http.StatusOK, map[string]any{"before": before, "after": after, "mutations": mutationSummary(req.Mutations), "base_commit": req.BaseCommit, "checksum": encryptedChecksum(after), "target_path": targetPath})
 	result = opResultSuccess
 }
 
@@ -1074,8 +1200,12 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false)
-	if gitErr != nil || git["drift"] != string(kubernetes.DriftSync) {
+	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false, false)
+	if gitErr != nil {
+		result = refuseGitRead(w, r, gitErr)
+		return
+	}
+	if git["drift"] != string(kubernetes.DriftSync) {
 		result = opResultConflict
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return

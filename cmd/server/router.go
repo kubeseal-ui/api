@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -25,20 +24,26 @@ import (
 
 func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers) {
 	r.Use(middleware.BodyLimit(10 * 1024 * 1024))
-	r.Get("/namespaces", protected.NamespacesHandler)
-	r.Get("/secrets", protected.SecretsHandler)
-	r.Get("/secrets/{namespace}/{name}", protected.SecretHandler)
-	r.Get("/gitops/paths", protected.GitPathsHandler)
-	r.Post("/secrets/{namespace}/{name}/diff", protected.DiffHandler)
-	r.Post("/gitops/dry-run", protected.GitOpsDryRunHandler)
-	r.Post("/gitops/deliver", protected.GitOpsDeliverHandler)
-	r.Get("/gitops/sync", protected.GitOpsSyncStatusHandler)
-	r.Post("/gitops/sync", protected.GitOpsSyncHandler)
-	r.Post("/secrets/{namespace}/{name}/reveal", protected.DecryptHandler)
-	// A batch has no single key to name in the path, so the keys travel in the body; the route stays
-	// a PATCH on the Secret's values collection, which is what it edits.
-	r.Patch("/secrets/{namespace}/{name}/values", protected.ResealHandler)
-	r.Post("/secrets/encrypt", protected.EncryptHandler)
+	// A Group is an inline sub-router, so its middlewares are chained onto each route and run once
+	// the route has matched — which is what lets SetRoutePattern read the pattern chi chose. A
+	// plain r.Use here would run before the sub-router matches, where there is no pattern yet.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.SetRoutePattern)
+		r.Get("/namespaces", protected.NamespacesHandler)
+		r.Get("/secrets", protected.SecretsHandler)
+		r.Get("/secrets/{namespace}/{name}", protected.SecretHandler)
+		r.Get("/gitops/paths", protected.GitPathsHandler)
+		r.Post("/secrets/{namespace}/{name}/diff", protected.DiffHandler)
+		r.Post("/gitops/dry-run", protected.GitOpsDryRunHandler)
+		r.Post("/gitops/deliver", protected.GitOpsDeliverHandler)
+		r.Get("/gitops/sync", protected.GitOpsSyncStatusHandler)
+		r.Post("/gitops/sync", protected.GitOpsSyncHandler)
+		r.Post("/secrets/{namespace}/{name}/reveal", protected.DecryptHandler)
+		// A batch has no single key to name in the path, so the keys travel in the body; the route
+		// stays a PATCH on the Secret's values collection, which is what it edits.
+		r.Patch("/secrets/{namespace}/{name}/values", protected.ResealHandler)
+		r.Post("/secrets/encrypt", protected.EncryptHandler)
+	})
 }
 
 // routerOptions carries the router's dependencies. The transport and mapping specs are
@@ -68,14 +73,26 @@ type routerOptions struct {
 // fail-closed behavior of a boot without GitOps. A seeding failure is returned so main can refuse to
 // boot with a broken mapping list.
 func newRouter(options routerOptions) (http.Handler, error) {
+	// The documented API timeout bounds every request. chi's Timeout is a context deadline rather
+	// than a forcible stop, so the handler has to honour it — the Git and Kubernetes calls thread
+	// the request context and do. A cfg-less router, which is what the tests build, keeps the
+	// documented default.
+	apiTimeout := config.DefaultAPITimeout
+	if options.cfg != nil && options.cfg.APITimeout > 0 {
+		apiTimeout = options.cfg.APITimeout
+	}
 	r := chi.NewRouter()
 	// OTelSpan starts a server span per request and must wrap everything, including the logger, so
 	// log lines carry trace_id/span_id. Mounted unconditionally: with telemetry disabled the global
 	// tracer provider is a no-op and spans cost almost nothing.
 	r.Use(middleware.RequestID)
+	// RouteRecorder publishes the holder the matched route fills in, so the log line and the metric
+	// name the route that ran rather than collapsing every parameterized path to "unmatched". It
+	// must sit outside the router's matching, which is why it is not part of the route group below.
+	r.Use(middleware.RouteRecorder)
 	r.Use(middleware.OTelSpan)
 	r.Use(middleware.Recoverer)
-	r.Use(chimw.Timeout(30 * time.Second))
+	r.Use(chimw.Timeout(apiTimeout))
 	r.Use(middleware.RequestLogger(options.logger))
 	r.Get("/healthz", handlers.Healthz)
 	if options.readyCheck != nil {

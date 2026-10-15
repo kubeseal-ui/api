@@ -40,9 +40,33 @@ func TestReadyzWithoutOIDCConfigReports503(t *testing.T) {
 	}
 }
 
+// TestReadyzWithoutSigningKeyReports503: OIDC may be fully configured and the pod still unusable,
+// because the router mounts no /api/v1 routes without a session signing key. Reporting ready there
+// would hold the pod in the Service endpoints while every API call 404s.
+func TestReadyzWithoutSigningKeyReports503(t *testing.T) {
+	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
+	t.Setenv("SESSION_SIGNING_KEY", "")
+
+	rr := httptest.NewRecorder()
+	Readyz(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: want 503, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !strings.Contains(body["reason"], "signing key") {
+		t.Errorf("reason does not name the signing key: %q", body["reason"])
+	}
+}
+
 func TestReadyzWithOIDCConfigReports200(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
+	t.Setenv("SESSION_SIGNING_KEY", "signing-key-for-test")
 
 	rr := httptest.NewRecorder()
 	Readyz(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -80,6 +104,7 @@ func TestReadyzBodyIncludesReason(t *testing.T) {
 func TestReadyzWithCheckReportsADegradedReload(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
+	t.Setenv("SESSION_SIGNING_KEY", "signing-key-for-test")
 
 	failing := ReadyzWithCheck(func() error { return errors.New("version: must be 1, got 2") })
 	rr := httptest.NewRecorder()
