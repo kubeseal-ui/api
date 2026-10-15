@@ -484,7 +484,7 @@ stringData:
 		t.Fatal(err)
 	}
 	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", YAML: live}}}, w, true)
-	status, statusErr := h.gitStatus(t.Context(), h.requestTransport(), "ns", "name", live, "abc", false)
+	status, statusErr := h.gitStatus(t.Context(), h.requestTransport(), "ns", "name", live, "abc", false, false)
 	if statusErr != nil || status["drift"] != string(kubernetes.DriftSync) {
 		t.Fatalf("git status=%v err=%v", status, statusErr)
 	}
