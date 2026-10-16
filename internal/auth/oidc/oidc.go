@@ -407,7 +407,7 @@ func (p *Provider) RevokeToken(ctx context.Context, token string) error {
 	if err != nil {
 		return fmt.Errorf("revocation request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	if err != nil {
 		return fmt.Errorf("read revocation response: %w", err)

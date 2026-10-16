@@ -158,7 +158,7 @@ func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request Propo
 	// having created it — the same-content path in PushBranch, or a remote that already held the
 	// ref — and opening against a missing branch answers a GitHub 422 the operator cannot read as
 	// "the delivery did not land".
-	if err := p.verifyBranch(ctx, owner, repo, request.Push.Branch, token); err != nil {
+	if err = p.verifyBranch(ctx, owner, repo, request.Push.Branch, token); err != nil {
 		return ProposalResult{}, err
 	}
 	body := request.Body
