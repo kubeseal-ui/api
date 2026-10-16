@@ -29,6 +29,27 @@ import (
 
 const maxRequestBody = 10 * 1024 * 1024
 
+// decodeJSONBody applies the request body limit and decodes the body, writing the refusal itself and
+// reporting whether the caller should continue. The limit is enforced while reading, so a body over
+// it is answered 413 on every route rather than surfacing as a decode error and a 400.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	if r.ContentLength > maxRequestBody {
+		writeError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "Request body too large")
+		return false
+	}
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "Request body too large")
+			return false
+		}
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
+		return false
+	}
+	return true
+}
+
 type ProtectedHandlers struct {
 	Kubernetes     kubernetes.Client
 	Crypto         *crypto.Wrapper
@@ -741,24 +762,9 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusServiceUnavailable, "CRYPTO_UNAVAILABLE", "Crypto unavailable")
 		return
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-	}
-	if r.ContentLength > maxRequestBody {
-		result = opResultInvalidRequest
-		writeError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "Request body too large")
-		return
-	}
 	var req encryptRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			result = opResultInvalidRequest
-			writeError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "Request body too large")
-			return
-		}
+	if !decodeJSONBody(w, r, &req) {
 		result = opResultInvalidRequest
-		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
 	if req.Namespace == "" || req.Name == "" || req.YAML == "" || !validName(req.Namespace) || !validName(req.Name) {
@@ -930,14 +936,15 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusForbidden, "DECRYPT_DISABLED", "Decrypt is disabled")
 		return
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-	}
 	var req struct {
 		Key        string `json:"key"`
 		BaseCommit string `json:"base_commit"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Key) == "" || strings.TrimSpace(req.BaseCommit) == "" {
+	if !decodeJSONBody(w, r, &req) {
+		result = opResultInvalidRequest
+		return
+	}
+	if strings.TrimSpace(req.Key) == "" || strings.TrimSpace(req.BaseCommit) == "" {
 		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
@@ -966,14 +973,14 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadGateway, "DECRYPTION_FAILED", "Unable to decrypt secret")
 		return
 	}
-	value, ok := extractStringDataKey(plain, req.Key)
+	value, ok := extractStringDataKey(plain, key)
 	if !ok {
 		result = opResultNotFound
 		writeError(w, r, http.StatusNotFound, "KEY_NOT_FOUND", "Key not found")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	jsonResponse(w, http.StatusOK, map[string]string{"key": req.Key, "value": value})
+	jsonResponse(w, http.StatusOK, map[string]string{"key": key, "value": value})
 	result = opResultSuccess
 }
 
@@ -1057,7 +1064,11 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		Mutations  []mutationRequest `json:"mutations"`
 		BaseCommit string            `json:"base_commit"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil || strings.TrimSpace(req.BaseCommit) == "" {
+	if !decodeJSONBody(w, r, &req) {
+		result = opResultInvalidRequest
+		return
+	}
+	if strings.TrimSpace(req.BaseCommit) == "" {
 		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
@@ -1165,14 +1176,15 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusForbidden, "DECRYPT_DISABLED", "Decrypt is disabled")
 		return
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-	}
 	var req struct {
 		Mutations  []mutationRequest `json:"mutations"`
 		BaseCommit string            `json:"base_commit"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BaseCommit) == "" {
+	if !decodeJSONBody(w, r, &req) {
+		result = opResultInvalidRequest
+		return
+	}
+	if strings.TrimSpace(req.BaseCommit) == "" {
 		result = opResultInvalidRequest
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return

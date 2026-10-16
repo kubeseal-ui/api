@@ -223,7 +223,9 @@ func (w *Wrapper) unseal(ctx context.Context, sealedYAML string) (*corev1.Secret
 		return nil, err
 	}
 
-	secret, err := sealed.Unseal(w.codecs, privKeys)
+	// UnsealWithoutTemplate rather than Unseal: spec.template.data is unauthenticated and is not
+	// ciphertext, so rendering it would let a document in Git dictate values the reveal path shows.
+	secret, err := sealed.UnsealWithoutTemplate(w.codecs, privKeys)
 	if err != nil {
 		return nil, fmt.Errorf("crypto: unseal: %w", err)
 	}
@@ -282,6 +284,17 @@ func (w *Wrapper) ResealMany(ctx context.Context, sealedYAML string, mutations [
 	}
 	if len(mutations) == 0 {
 		return "", fmt.Errorf("%w: no mutations given", ErrInvalidMutation)
+	}
+
+	// spec.template.data is plaintext that the controller merges into the Secret at unseal time,
+	// and NewSealedSecret does not carry it forward. Resealing would drop those entries from the
+	// manifest without saying so, so a document that carries any is refused rather than rewritten.
+	sealed, err := parseSealedSecret(sealedYAML)
+	if err != nil {
+		return "", err
+	}
+	if len(sealed.Spec.Template.Data) > 0 {
+		return "", fmt.Errorf("%w: spec.template.data is not carried across a reseal", ErrInvalidMutation)
 	}
 
 	secretYAML, err := w.DecryptYAML(ctx, sealedYAML)
@@ -425,6 +438,7 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 			OwnerReferences: secret.OwnerReferences,
 		},
 		Type:       secret.Type,
+		Immutable:  secret.Immutable,
 		StringData: data,
 	}
 

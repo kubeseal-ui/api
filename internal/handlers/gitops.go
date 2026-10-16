@@ -47,7 +47,18 @@ func (cr gitChangeRequest) validateManifest() error {
 	return nil
 }
 
-func (h *ProtectedHandlers) gitChange(r *http.Request) (gitChangeRequest, error) {
+// Sentinel refusals from gitChange, kept distinct so a handler answers the real cause: a
+// misconfigured server and a malformed body are not the same event, and collapsing them into one
+// 400 told the caller to fix a request that was fine.
+var (
+	errGitChangeInvalidRequest = errors.New("invalid request")
+	errGitOpsUnavailable       = errors.New("gitops unavailable")
+	errMappingNotFound         = errors.New("mapping not found")
+	errInvalidMapping          = errors.New("invalid mapping")
+	errRequestBodyTooLarge     = errors.New("request body too large")
+)
+
+func (h *ProtectedHandlers) gitChange(w http.ResponseWriter, r *http.Request) (gitChangeRequest, error) {
 	var req struct {
 		Namespace  string `json:"namespace"`
 		Name       string `json:"name"`
@@ -55,15 +66,22 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitChangeRequest, error)
 		BaseCommit string `json:"base_commit"`
 		TargetPath string `json:"target_path,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !validName(req.Namespace) || !validName(req.Name) || req.YAML == "" || req.BaseCommit == "" {
-		return gitChangeRequest{}, errors.New("invalid request")
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return gitChangeRequest{}, errRequestBodyTooLarge
+		}
+		return gitChangeRequest{}, errGitChangeInvalidRequest
+	}
+	if !validName(req.Namespace) || !validName(req.Name) || req.YAML == "" || req.BaseCommit == "" {
+		return gitChangeRequest{}, errGitChangeInvalidRequest
 	}
 	if h.GitMappings == nil || h.GitTransport == nil {
-		return gitChangeRequest{}, errors.New("gitops unavailable")
+		return gitChangeRequest{}, errGitOpsUnavailable
 	}
 	mapping, ok := h.GitMappings.GetGitMapping(req.Namespace)
 	if !ok {
-		return gitChangeRequest{}, errors.New("mapping not found")
+		return gitChangeRequest{}, errMappingNotFound
 	}
 
 	// The path is *not* settled here. Whether a client-named file is usable depends on the
@@ -74,7 +92,7 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitChangeRequest, error)
 		path = mapping.RenderPath(req.Namespace, req.Name)
 	}
 	if path == "" {
-		return gitChangeRequest{}, errors.New("invalid mapping")
+		return gitChangeRequest{}, errInvalidMapping
 	}
 	return gitChangeRequest{
 		Change:        gitops.Change{Target: gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}, BaseCommit: req.BaseCommit, Content: []byte(req.YAML)},
@@ -83,6 +101,29 @@ func (h *ProtectedHandlers) gitChange(r *http.Request) (gitChangeRequest, error)
 		Name:          req.Name,
 		RequestedPath: req.TargetPath,
 	}, nil
+}
+
+// refuseGitChange answers a gitChange failure with the cause it actually has, and returns the audit
+// outcome to record. A server with no Git configured and a namespace with no mapping are not the
+// caller's malformed request, and answering 400 for them sent the operator to fix a body that was fine.
+func refuseGitChange(w http.ResponseWriter, r *http.Request, err error) string {
+	switch {
+	case errors.Is(err, errGitOpsUnavailable):
+		writeError(w, r, http.StatusServiceUnavailable, "GITOPS_UNAVAILABLE", "GitOps not configured")
+		return "failed"
+	case errors.Is(err, errRequestBodyTooLarge):
+		writeError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "Request body too large")
+		return "invalid_request"
+	case errors.Is(err, errMappingNotFound):
+		writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
+		return "not_found"
+	case errors.Is(err, errInvalidMapping):
+		writeError(w, r, http.StatusInternalServerError, "INVALID_MAPPING", "Git path could not be resolved")
+		return "failed"
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
+		return "invalid_request"
+	}
 }
 
 // errTargetPathNotAllowed marks a delivery destination the mapping does not permit: a named path
@@ -249,10 +290,10 @@ func proposalBranch(namespace, name string) string {
 }
 
 func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.Request) {
-	cr, err := h.gitChange(r)
+	cr, err := h.gitChange(w, r)
 	if err != nil {
-		h.emitSecurityEvent(r, "gitops_dry_run", "", "", "", "", "failed")
-		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
+		outcome := refuseGitChange(w, r, err)
+		h.emitSecurityEvent(r, "gitops_dry_run", "", "", "", "", outcome)
 		return
 	}
 	mapping := cr.Mapping
@@ -339,10 +380,10 @@ func gitDeliveryLog(r *http.Request, cr gitChangeRequest, change gitops.Change, 
 }
 
 func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.Request) {
-	cr, err := h.gitChange(r)
+	cr, err := h.gitChange(w, r)
 	if err != nil {
-		h.emitSecurityEvent(r, "gitops_delivery", "", "", "", "", "failed")
-		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
+		outcome := refuseGitChange(w, r, err)
+		h.emitSecurityEvent(r, "gitops_delivery", "", "", "", "", outcome)
 		return
 	}
 	change, mapping := cr.Change, cr.Mapping
@@ -426,14 +467,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 	}
 	result := map[string]any{"mode": mapping.Mode, "commit_sha": pushed.Commit, "branch": pushed.Branch, "file_path": change.Target.Path, "argocd_sync_verified": false}
 	if mapping.Mode == policy.GitDeliveryProposal {
-		provider := mapping.ProposalAdapter
-		if provider == nil {
-			gitDeliveryLog(r, cr, change, pushed.Branch, "proposal_unavailable", nil)
-			h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "proposal_unavailable")
-			writeError(w, r, http.StatusServiceUnavailable, "PROPOSAL_UNAVAILABLE", "Proposal provider unavailable")
-			return
-		}
-		proposal, err := provider.OpenProposal(r.Context(), gitops.ProposalRequest{Change: change, Push: pushed})
+		proposal, err := mapping.ProposalAdapter.OpenProposal(r.Context(), gitops.ProposalRequest{Change: change, Push: pushed})
 		if err != nil {
 			gitDeliveryLog(r, cr, change, pushed.Branch, "proposal_failed", err)
 			h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "proposal_failed")
@@ -546,9 +580,8 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		BaseCommit string `json:"base_commit"`
 		TargetPath string `json:"target_path,omitempty"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
+	if !decodeJSONBody(w, r, &req) {
 		h.emitSecurityEvent(r, "gitops_sync", "", "", "", "", "failed")
-		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
 	if !validName(req.Namespace) || !validName(req.Name) || req.BaseCommit == "" {
@@ -676,8 +709,7 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	if mapping.Mode == policy.GitDeliveryProposal {
-		provider := mapping.ProposalAdapter
-		proposal, err := provider.OpenProposal(r.Context(), gitops.ProposalRequest{Change: change, Push: pushed})
+		proposal, err := mapping.ProposalAdapter.OpenProposal(r.Context(), gitops.ProposalRequest{Change: change, Push: pushed})
 		if err != nil {
 			h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "proposal_failed")
 			metrics.RecordGitOpsDelivery(string(mapping.Mode), "proposal_failed")

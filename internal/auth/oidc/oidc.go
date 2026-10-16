@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -376,14 +377,50 @@ func (p *Provider) RefreshTokens(ctx context.Context, refreshToken string) (*Tok
 	}, nil
 }
 
-// RevokeToken is a best-effort stub: revocation is optional per RFC 7009, and the
-// revocation endpoint is not implemented.
+// revocationHTTPClient bounds the RFC 7009 call so logout cannot hang on a slow issuer.
+var revocationHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+// RevokeToken posts the refresh token to the issuer's RFC 7009 revocation endpoint, discovered
+// from the same metadata document as the other endpoints. Revocation is optional, so a missing
+// endpoint is not an error and every failure is returned rather than fatal: the caller logs it.
 func (p *Provider) RevokeToken(ctx context.Context, token string) error {
-	revokeURL := p.provider.Endpoint().TokenURL
-	if revokeURL == "" {
+	if token == "" {
 		return nil
 	}
-	return nil
+	var metadata struct {
+		RevocationEndpoint string `json:"revocation_endpoint"`
+	}
+	if err := p.provider.Claims(&metadata); err != nil {
+		return fmt.Errorf("read provider metadata: %w", err)
+	}
+	if metadata.RevocationEndpoint == "" {
+		return nil
+	}
+	form := url.Values{"token": {token}, "token_type_hint": {"refresh_token"}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, metadata.RevocationEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("build revocation request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(p.cfg.ClientID), url.QueryEscape(p.cfg.ClientSecret))
+	resp, err := revocationHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("revocation request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if err != nil {
+		return fmt.Errorf("read revocation response: %w", err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	// An unknown or already-invalidated token is answered 400 invalid_token, which means the
+	// token is not usable: the logout goal is met even though the status is not 200.
+	if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body), "invalid_token") {
+		return nil
+	}
+	return fmt.Errorf("revocation endpoint returned %s", resp.Status)
 }
 
 const (

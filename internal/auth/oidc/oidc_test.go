@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -205,6 +206,124 @@ type mockVerifier struct{}
 
 func (m *mockVerifier) Verify(ctx context.Context, rawIDToken string) (*oidc.IDToken, error) {
 	return nil, nil
+}
+
+// revocationTestProvider serves a discovery document naming a revocation endpoint, and records
+// what the POST carried.
+type revocationTestProvider struct {
+	server   *httptest.Server
+	status   int
+	body     string
+	lastForm url.Values
+	lastUser string
+	lastPass string
+	hasAuth  bool
+}
+
+func newRevocationTestProvider(t *testing.T, withEndpoint bool) *revocationTestProvider {
+	t.Helper()
+	rv := &revocationTestProvider{status: http.StatusOK}
+	mux := http.NewServeMux()
+	rv.server = httptest.NewServer(mux)
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		doc := map[string]any{
+			"issuer":                 rv.server.URL,
+			"authorization_endpoint": rv.server.URL + "/auth",
+			"token_endpoint":         rv.server.URL + "/token",
+			"jwks_uri":               rv.server.URL + "/keys",
+		}
+		if withEndpoint {
+			doc["revocation_endpoint"] = rv.server.URL + "/revoke"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(doc); err != nil {
+			t.Errorf("encode discovery document: %v", err)
+		}
+	})
+	mux.HandleFunc("/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse revocation form: %v", err)
+		}
+		rv.lastForm = r.PostForm
+		rv.lastUser, rv.lastPass, rv.hasAuth = r.BasicAuth()
+		w.WriteHeader(rv.status)
+		if rv.body != "" {
+			_, _ = w.Write([]byte(rv.body))
+		}
+	})
+	t.Cleanup(rv.server.Close)
+	return rv
+}
+
+func (rv *revocationTestProvider) provider(t *testing.T) *Provider {
+	t.Helper()
+	cfg := testConfig()
+	cfg.IssuerURL = rv.server.URL
+	p, err := NewProvider(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	return p
+}
+
+func TestRevokeTokenPostsToDiscoveredEndpoint(t *testing.T) {
+	rv := newRevocationTestProvider(t, true)
+	if err := rv.provider(t).RevokeToken(context.Background(), "refresh-abc"); err != nil {
+		t.Fatalf("RevokeToken: %v", err)
+	}
+	if rv.lastForm == nil {
+		t.Fatal("revocation endpoint was not called")
+	}
+	if got := rv.lastForm.Get("token"); got != "refresh-abc" {
+		t.Errorf("token = %q, want %q", got, "refresh-abc")
+	}
+	if got := rv.lastForm.Get("token_type_hint"); got != "refresh_token" {
+		t.Errorf("token_type_hint = %q, want refresh_token", got)
+	}
+	if !rv.hasAuth {
+		t.Fatal("expected client credentials on the revocation request")
+	}
+	// Basic auth percent-decodes, so the credentials arrive unescaped.
+	if rv.lastUser != "kubeseal-ui" || rv.lastPass != "test-secret" {
+		t.Errorf("basic auth = %q/%q, want kubeseal-ui/test-secret", rv.lastUser, rv.lastPass)
+	}
+}
+
+func TestRevokeTokenWithoutEndpointIsNotAnError(t *testing.T) {
+	rv := newRevocationTestProvider(t, false)
+	if err := rv.provider(t).RevokeToken(context.Background(), "refresh-abc"); err != nil {
+		t.Fatalf("RevokeToken: %v", err)
+	}
+	if rv.lastForm != nil {
+		t.Error("revocation endpoint should not have been called")
+	}
+}
+
+func TestRevokeTokenTreatsInvalidTokenAsSuccess(t *testing.T) {
+	rv := newRevocationTestProvider(t, true)
+	rv.status = http.StatusBadRequest
+	rv.body = `{"error":"invalid_token"}`
+	if err := rv.provider(t).RevokeToken(context.Background(), "refresh-abc"); err != nil {
+		t.Fatalf("invalid_token should count as revoked, got %v", err)
+	}
+}
+
+func TestRevokeTokenReportsUnexpectedStatus(t *testing.T) {
+	rv := newRevocationTestProvider(t, true)
+	rv.status = http.StatusInternalServerError
+	if err := rv.provider(t).RevokeToken(context.Background(), "refresh-abc"); err == nil {
+		t.Fatal("expected an error for a 500 from the revocation endpoint")
+	}
+}
+
+func TestRevokeTokenEmptyTokenIsNoOp(t *testing.T) {
+	rv := newRevocationTestProvider(t, true)
+	if err := rv.provider(t).RevokeToken(context.Background(), ""); err != nil {
+		t.Fatalf("RevokeToken: %v", err)
+	}
+	if rv.lastForm != nil {
+		t.Error("revocation endpoint should not be called for an empty token")
+	}
 }
 
 func TestExchangeCodeCallsTokenEndpoint(t *testing.T) {

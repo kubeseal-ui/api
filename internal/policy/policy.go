@@ -545,42 +545,6 @@ func (s *PolicyStore) ResolveGitMapping(namespace string) (GitMapping, error) {
 	return m, nil
 }
 
-func RequiredCapabilitiesForOperation(op string) []Capability {
-	switch op {
-	case "list_namespaces", "get_sealedsecret", "list_sealedsecrets":
-		return []Capability{MetadataRead}
-	case "encrypt":
-		return []Capability{SecretSeal}
-	case "decrypt":
-		return []Capability{SecretDecrypt}
-	case "reseal":
-		return []Capability{SecretSeal, SecretDecrypt}
-	case "gitops_dry_run", "gitops_propose":
-		return []Capability{GitOpsPropose}
-	case "gitops_push":
-		return []Capability{GitOpsPush}
-	case "manage_acl":
-		return []Capability{AccessManage}
-	default:
-		return nil // Unknown operation = deny
-	}
-}
-
-// CheckAuthorization checks if an identity has all required capabilities for an operation.
-// Decrypt and reseal additionally require ENABLE_DECRYPT, which the handler enforces.
-func CheckAuthorization(identity Identity, operation string) error {
-	required := RequiredCapabilitiesForOperation(operation)
-	if required == nil {
-		return errors.New("unknown operation: " + operation)
-	}
-	for _, cap := range required {
-		if !identity.Has(cap) {
-			return fmt.Errorf("missing capability %q for operation %q", cap, operation)
-		}
-	}
-	return nil
-}
-
 func GitOpsCapabilityRequired(mode GitDeliveryMode) Capability {
 	switch mode {
 	case GitDeliveryDirect:

@@ -6,6 +6,8 @@ package gitops
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -70,8 +72,18 @@ func NewGoGitTransport(options GoGitOptions) (*GoGitTransport, error) {
 	}, nil
 }
 
-// worktreePath derives a filesystem-safe directory per repository+branch.
+// worktreePath derives a filesystem-safe directory per repository+branch. The sanitized name is
+// readable but not injective — every rune outside [a-zA-Z0-9-_.] becomes '_', so `feature/x` and
+// `feature_x` collide — and the digest of the raw pair is what keeps two different branches out of
+// one checkout, where one would pull over the other's working tree.
 func (t *GoGitTransport) worktreePath(target Target) string {
+	return t.checkoutPath(target, "worktree")
+}
+
+// checkoutPath builds the directory for one kind of checkout. The kind is a path component of its
+// own rather than a suffix appended to another path, so no branch name can produce it and land two
+// checkouts in one directory.
+func (t *GoGitTransport) checkoutPath(target Target, kind string) string {
 	safe := func(value string) string {
 		replaced := strings.Map(func(r rune) rune {
 			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
@@ -81,7 +93,8 @@ func (t *GoGitTransport) worktreePath(target Target) string {
 		}, value)
 		return replaced
 	}
-	return filepath.Join(t.scratch, safe(target.Repository), safe(target.Branch))
+	digest := sha256.Sum256([]byte(target.Repository + "\x00" + target.Branch))
+	return filepath.Join(t.scratch, kind, safe(target.Repository), safe(target.Branch)+"-"+hex.EncodeToString(digest[:8]))
 }
 
 // authFor resolves credentials for a target. An explicitly configured "none" mode yields nil
@@ -122,7 +135,7 @@ func (t *GoGitTransport) openOrClone(ctx context.Context, path string, target Ta
 // historyPath is a second checkout of the same repository+branch for PreviousManifest, which needs
 // the commits behind the head that the read worktree does not carry two of.
 func (t *GoGitTransport) historyPath(target Target) string {
-	return t.worktreePath(target) + "-history"
+	return t.checkoutPath(target, "history")
 }
 
 func remoteURL(target Target) string {
@@ -377,6 +390,12 @@ func readBlob(file *object.File) ([]byte, error) {
 
 // SearchManifest walks the repository tree at branch head and finds a SealedSecret matching the
 // name and namespace across all .yaml and .yml files.
+//
+// A tree that holds more than one document for the same identity resolves to whichever the tree
+// iterator reaches first. Tree order is deterministic for a given tree, so the answer is stable, but
+// it is not a rule the caller chose: nothing prefers the templated path, the shallowest file, or the
+// newest commit. Duplicated identities are therefore reported by the write path, which refuses a
+// templated path occupied by another identity, rather than resolved here.
 func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch, namespace, name, authRef string) (ManifestSnapshot, error) {
 	target := Target{Repository: repository, Branch: branch}
 	auth, err := t.authFor(ctx, target, authRef)
@@ -423,6 +442,9 @@ func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch,
 
 	var matchedSnapshot ManifestSnapshot
 	var matched bool
+	// A blob that cannot be read is not a blob that does not match: the identity's manifest may be
+	// exactly the one that failed, so the errors are kept and reported with the not-found answer.
+	var readErrs []error
 
 	err = fileIter.ForEach(func(f *object.File) error {
 		if matched {
@@ -433,10 +455,12 @@ func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch,
 		}
 		rc, openErr := f.Reader()
 		if openErr != nil {
+			readErrs = append(readErrs, fmt.Errorf("open %s: %w", f.Name, openErr))
 			return nil
 		}
 		content, readErr := io.ReadAll(rc)
 		if closeErr := rc.Close(); closeErr != nil || readErr != nil {
+			readErrs = append(readErrs, fmt.Errorf("read %s: %w", f.Name, errors.Join(readErr, closeErr)))
 			return nil
 		}
 		if MatchesSealedSecret(content, namespace, name) {
@@ -453,6 +477,9 @@ func (t *GoGitTransport) SearchManifest(ctx context.Context, repository, branch,
 		return ManifestSnapshot{}, err
 	}
 	if !matched {
+		if len(readErrs) > 0 {
+			return ManifestSnapshot{}, errors.Join(append([]error{ErrNotFound}, readErrs...)...)
+		}
 		return ManifestSnapshot{}, ErrNotFound
 	}
 	return matchedSnapshot, nil
@@ -542,12 +569,41 @@ func (t *GoGitTransport) PushBranch(ctx context.Context, change Change, authRef 
 		branch = change.Target.Branch
 	}
 
+	// A proposal pushes a branch that does not exist locally: the clone is single-branch on the
+	// target and go-git resolves a refspec source against the local refs, so without this ref the
+	// push carries no command and returns NoErrAlreadyUpToDate — success for a push that never
+	// happened. Shared with the short-circuit below, which returns before the commit exists and so
+	// must push the head it found rather than a commit it never made.
+	//
+	// NoErrAlreadyUpToDate is not a failure here: the commit is on the remote either way, so the
+	// caller still gets the commit it delivered rather than a zero PushResult.
+	deliver := func(commit plumbing.Hash) (PushResult, error) {
+		if branch != change.Target.Branch {
+			refErr := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(branch), commit))
+			if refErr != nil {
+				return PushResult{}, fmt.Errorf("create proposal ref %s: %w", branch, refErr)
+			}
+		}
+		// Proposal pushes go to a dedicated branch, direct pushes to the mapped branch. The
+		// refspec is a plain non-forcing push.
+		pushErr := repo.PushContext(ctx, &git.PushOptions{
+			RemoteName: "origin",
+			RefSpecs:   []config.RefSpec{config.RefSpec("refs/heads/" + branch + ":refs/heads/" + branch)},
+			Auth:       auth,
+		})
+		if mapped := t.mapPushError(pushErr, change); mapped != nil {
+			return PushResult{}, mapped
+		}
+		return PushResult{Repository: change.Target.Repository, Branch: branch, Commit: commit.String()}, nil
+	}
+
 	// Same-content short-circuit, checked before the stale-base guard: a file that already holds the
 	// requested content is delivered whatever base the caller holds, because there is nothing left to
 	// write. Guarding first turned a retry of a push that had landed into a conflict against the base
-	// that push had moved.
+	// that push had moved. The branch still has to be pushed: a proposal reports the branch it opened
+	// against, and skipping the push left the handler naming a branch that was never created.
 	if existing, readErr := readFileAtHead(repo, change.Target.Path); readErr == nil && bytes.Equal(existing, change.Content) {
-		return PushResult{Repository: change.Target.Repository, Branch: branch, Commit: head.Hash().String()}, nil
+		return deliver(head.Hash())
 	}
 
 	// Stale base guard before any write: never build on an obsolete base.
@@ -577,26 +633,7 @@ func (t *GoGitTransport) PushBranch(ctx context.Context, change Change, authRef 
 	if err != nil {
 		return PushResult{}, fmt.Errorf("commit: %w", err)
 	}
-	// A proposal pushes a branch that does not exist locally: the clone is single-branch on the
-	// target and go-git resolves a refspec source against the local refs, so without this ref the
-	// push carries no command and returns NoErrAlreadyUpToDate — success for a push that never
-	// happened.
-	if branch != change.Target.Branch {
-		refErr := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(branch), commitHash))
-		if refErr != nil {
-			return PushResult{}, fmt.Errorf("create proposal ref %s: %w", branch, refErr)
-		}
-	}
-	// Proposal pushes go to a dedicated branch, direct pushes to the mapped branch. The
-	// refspec is a plain non-forcing push.
-	if err := repo.PushContext(ctx, &git.PushOptions{
-		RemoteName: "origin",
-		RefSpecs:   []config.RefSpec{config.RefSpec("refs/heads/" + branch + ":refs/heads/" + branch)},
-		Auth:       auth,
-	}); err != nil {
-		return PushResult{}, t.mapPushError(err, change)
-	}
-	return PushResult{Repository: change.Target.Repository, Branch: branch, Commit: commitHash.String()}, nil
+	return deliver(commitHash)
 }
 
 func (c Change) commitMessage() string {

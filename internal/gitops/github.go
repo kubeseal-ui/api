@@ -17,9 +17,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -86,6 +88,54 @@ func NewGitHubProposalProvider(opts GitHubProposalOptions) (*GitHubProposalProvi
 	return &GitHubProposalProvider{tokenFile: opts.TokenFile, baseURL: strings.TrimRight(baseURL, "/"), client: client}, nil
 }
 
+// verifyBranch confirms the proposal branch exists on the remote before a PR is opened against it.
+// A 404 is reported as a missing branch rather than as a GitHub failure, because it means the push
+// that was supposed to create it did not.
+func (p *GitHubProposalProvider) verifyBranch(ctx context.Context, owner, repo, branch, token string) error {
+	url := fmt.Sprintf("%s/repos/%s/%s/branches/%s", p.baseURL, owner, repo, url.PathEscape(branch))
+	ctx, span := otelTracer().Start(ctx, "GitHub.GetBranch",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("http.request.method", http.MethodGet),
+			attribute.String("url.full", url),
+			attribute.String("server.address", p.baseURL),
+			attribute.String("kubeseal_ui.adapter", "github"),
+		))
+	defer span.End()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build github branch request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	otel.GetTextMapPropagator().Inject(ctx, propagationHeaderCarrier{header: req.Header})
+	resp, err := p.client.Do(req)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("github branch lookup: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("github proposal adapter: close response body", "error", closeErr)
+		}
+	}()
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxGitHubResponseBody+1))
+	if readErr != nil {
+		return fmt.Errorf("read github response: %w", readErr)
+	}
+	if int64(len(raw)) > maxGitHubResponseBody {
+		return fmt.Errorf("github response exceeded %d bytes", maxGitHubResponseBody)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("github branch %s does not exist: the push did not create it", branch)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("github branch lookup failed: %s: %s", resp.Status, truncate(string(raw), 512))
+	}
+	return nil
+}
+
 // OpenProposal opens a pull request on the already-pushed proposal branch, so the push commit
 // exists on the remote by the time this runs.
 func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request ProposalRequest) (ProposalResult, error) {
@@ -103,6 +153,13 @@ func (p *GitHubProposalProvider) OpenProposal(ctx context.Context, request Propo
 	title := request.Title
 	if title == "" {
 		title = defaultProposalTitle(request.Change.Target.Path)
+	}
+	// The branch is confirmed to exist before the PR is opened. A push can report success without
+	// having created it — the same-content path in PushBranch, or a remote that already held the
+	// ref — and opening against a missing branch answers a GitHub 422 the operator cannot read as
+	// "the delivery did not land".
+	if err := p.verifyBranch(ctx, owner, repo, request.Push.Branch, token); err != nil {
+		return ProposalResult{}, err
 	}
 	body := request.Body
 	if body == "" {
@@ -205,9 +262,14 @@ func defaultProposalTitle(path string) string {
 	return fmt.Sprintf("[kubeseal-ui] sealed secret update at %s", path)
 }
 
+// truncate cuts s to at most n bytes without splitting a UTF-8 sequence, so an error body quoted
+// into a message stays printable whatever the upstream returned.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n]
 }
