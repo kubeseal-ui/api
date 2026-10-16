@@ -500,12 +500,38 @@ func TestResealManyRejectsInvalidBatches(t *testing.T) {
 			{Key: "two", Op: ResealDelete},
 		}},
 		{"empty key", []Mutation{{Key: "", Value: "a", Op: ResealAdd}}},
+		{"add a key with a space", []Mutation{{Key: "my key", Value: "a", Op: ResealAdd}}},
+		{"replace onto a key with a leading dash", []Mutation{{Key: "-lead", Value: "a", Op: ResealReplace}}},
 		{"unknown operation", []Mutation{{Key: "one", Value: "a", Op: ResealOp("merge")}}},
 	}
 	for _, tc := range cases {
 		if _, err := w.ResealMany(t.Context(), sealed, tc.mutations); err == nil {
 			t.Errorf("%s: expected an error, got nil", tc.name)
 		}
+	}
+}
+
+// A Secret sealed before key-name validation may carry a key the rule now refuses; removing
+// that key must stay possible, so the delete op is exempt from the check.
+func TestResealManyAllowsDeletingAnInvalidKeyName(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := SecretYAML("secret", "default", map[string]string{"bad key": "v", "good": "v"}, "")
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	out, err := w.ResealMany(t.Context(), sealed, []Mutation{{Key: "bad key", Op: ResealDelete}})
+	if err != nil {
+		t.Fatalf("ResealMany delete of an invalid key name: %v", err)
+	}
+	keys, err := w.ExtractKeys(out)
+	if err != nil {
+		t.Fatalf("ExtractKeys: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != "good" {
+		t.Errorf("expected only 'good' left, got %v", keys)
 	}
 }
 

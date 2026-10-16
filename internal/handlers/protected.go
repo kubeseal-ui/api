@@ -546,6 +546,21 @@ func normalizeSecretYAML(secretYAML, namespace, name string) (string, error) {
 		return "", fmt.Errorf("manifest is for namespace %q, but this request is for %q", declared, namespace)
 	}
 
+	// The API server refuses data keys outside the ConfigMap-key rule when the unsealed Secret
+	// lands, which would surface as drift after delivery. Refusing the manifest here keeps the
+	// failure at seal time, where the sender can still fix it.
+	for _, field := range []string{"data", "stringData"} {
+		entries, ok := manifest[field].(map[string]any)
+		if !ok {
+			continue
+		}
+		for key := range entries {
+			if msgs := validation.IsConfigMapKey(key); len(msgs) > 0 {
+				return "", fmt.Errorf("%s key %q is not a valid Secret key: %s", field, key, msgs[0])
+			}
+		}
+	}
+
 	normalized, err := yaml.Marshal(manifest)
 	if err != nil {
 		return "", fmt.Errorf("re-encode manifest: %w", err)

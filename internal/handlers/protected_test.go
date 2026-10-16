@@ -1095,6 +1095,8 @@ stringData:
 		{"no kind at all", "metadata:\n  name: adopted\n", `kind ""`},
 		{"a different name", strings.Replace(strings.Replace(secretFor, "NAME", "other", 1), "NS", "ns", 1), `names "other"`},
 		{"a different namespace", strings.Replace(strings.Replace(secretFor, "NAME", "adopted", 1), "NS", "other", 1), `namespace "other"`},
+		{"a data key with a space", strings.NewReplacer("NAME", "adopted", "NS", "ns", "password", "my password").Replace(secretFor), `key "my password" is not a valid Secret key`},
+		{"a stringData key with a slash", strings.NewReplacer("NAME", "adopted", "NS", "ns", "password", "path/edge").Replace(secretFor), `key "path/edge" is not a valid Secret key`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -24,6 +24,7 @@ import (
 	ssv1alpha1 "github.com/bitnami/sealed-secrets/pkg/apis/sealedsecrets/v1alpha1"
 	"github.com/bitnami/sealed-secrets/pkg/crypto"
 	"github.com/bitnami/sealed-secrets/pkg/kubeseal"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	sigsyaml "sigs.k8s.io/yaml"
 )
@@ -393,11 +394,20 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 		seen[m.Key] = true
 		switch m.Op {
 		case ResealAdd:
+			// The API server refuses data keys outside the ConfigMap-key rule at unseal, so the
+			// write is refused here rather than after delivery. Delete stays unvalidated: a Secret
+			// sealed before this rule existed may carry a bad key, and removing it must work.
+			if msgs := validation.IsConfigMapKey(m.Key); len(msgs) > 0 {
+				return "", StrictScope, fmt.Errorf("%w: key %q is not a valid Secret key: %s", ErrInvalidMutation, m.Key, msgs[0])
+			}
 			if present[m.Key] {
 				return "", StrictScope, fmt.Errorf("%w: key %q already exists (use replace)", ErrInvalidMutation, m.Key)
 			}
 			finalCount++
 		case ResealReplace:
+			if msgs := validation.IsConfigMapKey(m.Key); len(msgs) > 0 {
+				return "", StrictScope, fmt.Errorf("%w: key %q is not a valid Secret key: %s", ErrInvalidMutation, m.Key, msgs[0])
+			}
 			if !present[m.Key] {
 				return "", StrictScope, fmt.Errorf("%w: key %q does not exist (use add)", ErrInvalidMutation, m.Key)
 			}
