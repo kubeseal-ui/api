@@ -7,21 +7,14 @@ import (
 	"time"
 )
 
-// cachingTransport wraps a GitTransport and serves ReadBranch from a process-lived, per-branch
-// snapshot held across requests. A drift-resolving listing pulls the remote once per branch per
-// freshness window instead of once per request — the per-request SnapshotTransport still gives one
-// request a single consistent commit; this is what keeps that request's cold ReadBranch from being a
-// network fetch every time.
-//
-// Reads are safe to serve slightly stale: drift status is advisory. Writes are not cached — DryRun
-// and PushBranch pass straight through to the live transport, so the BaseCommit check still runs
-// against the real head, and a successful push drops the branch entry so a read-after-write re-pulls.
+// cachingTransport serves ReadBranch from a process-lived per-branch snapshot: one remote pull per
+// branch per TTL (stale-while-revalidate) instead of one per request. Writes pass straight through
+// so the BaseCommit check always sees the live head; a successful push drops the branch entry.
 type cachingTransport struct {
 	inner  GitTransport
 	reader BranchReader // inner as a BranchReader, or nil when it cannot enumerate a branch
 	ttl    time.Duration
-	// now and refreshDone are injection points for tests: a fake clock, and a signal fired when a
-	// background refresh finishes so a test need not sleep. Both are nil in production.
+	// now and refreshDone are test injection points (fake clock, refresh-finished signal); nil in production.
 	now         func() time.Time
 	refreshDone func()
 
@@ -29,9 +22,7 @@ type cachingTransport struct {
 	entries map[string]*branchEntry
 }
 
-// branchEntry is one branch's cached snapshot. entry.mu serialises the cold fetch (so concurrent
-// first-readers share one pull) and guards refreshing (so at most one background refresh runs per
-// branch at a time).
+// branchEntry is one branch's cached snapshot; entry.mu serialises the cold fetch and the background refresh.
 type branchEntry struct {
 	mu         sync.Mutex
 	loaded     bool
@@ -40,9 +31,7 @@ type branchEntry struct {
 	refreshing bool
 }
 
-// NewCachingTransport wraps a transport with a cross-request branch cache. A non-positive ttl, a nil
-// inner, or an inner that cannot enumerate a branch returns the inner unchanged, so the caller needs
-// no special case and GitOps-disabled or mock boots keep their exact behaviour.
+// NewCachingTransport returns inner unchanged for a non-positive ttl, a nil inner, or one that cannot enumerate a branch.
 func NewCachingTransport(inner GitTransport, ttl time.Duration) GitTransport {
 	if inner == nil || ttl <= 0 {
 		return inner
@@ -78,11 +67,8 @@ func (t *cachingTransport) entryFor(repository, branch string) *branchEntry {
 	return entry
 }
 
-// ReadBranch answers from the cache. Fresh within the TTL: a map lookup, no network. Expired but
-// loaded: serve the stale snapshot now and refresh in the background (stale-while-revalidate), so no
-// request waits on a pull except the first. Cold: block all callers on one fetch (single-flight) and
-// surface its error — the listing handler then degrades that branch to drift-unknown rather than
-// failing, which is the pre-existing contract.
+// ReadBranch serves fresh entries from the cache, expired ones stale-while-revalidate, and blocks cold
+// callers on a single shared fetch whose error surfaces to the listing handler.
 func (t *cachingTransport) ReadBranch(ctx context.Context, repository, branch, authRef string) (BranchSnapshot, error) {
 	entry := t.entryFor(repository, branch)
 	entry.mu.Lock()
@@ -95,17 +81,13 @@ func (t *cachingTransport) ReadBranch(ctx context.Context, repository, branch, a
 		snapshot := entry.snapshot
 		if !entry.refreshing {
 			entry.refreshing = true
-			// Detached from the request, not torn from it: WithoutCancel keeps the request's trace
-			// and span values so the background pull stays attributable, while dropping its
-			// cancellation so the refresh outlives the request that triggered it — the whole point of
-			// stale-while-revalidate.
+			// Detached, not torn: WithoutCancel keeps the request's trace values while dropping its cancellation.
 			go t.refresh(context.WithoutCancel(ctx), entry, repository, branch, authRef)
 		}
 		entry.mu.Unlock()
 		return snapshot, nil
 	}
-	// Cold: the fetch runs under entry.mu, so a second caller for the same cold branch blocks here
-	// and then finds the entry loaded rather than racing a duplicate pull.
+	// Cold: the fetch runs under entry.mu, so a second caller blocks and then finds the entry loaded.
 	defer entry.mu.Unlock()
 	snapshot, err := t.reader.ReadBranch(ctx, repository, branch, authRef)
 	if err != nil {
@@ -115,10 +97,7 @@ func (t *cachingTransport) ReadBranch(ctx context.Context, repository, branch, a
 	return snapshot, nil
 }
 
-// refresh re-pulls a stale branch off the request path. It runs on a detached, bounded context
-// because the request that triggered it may already have returned. fetchedAt advances only on
-// success, so a failed refresh keeps serving the last-good snapshot and is retried on the next read;
-// the refreshing flag means a persistent failure costs one background pull per read, not a herd.
+// refresh re-pulls a stale branch off the request path; fetchedAt advances only on success, so failures keep serving last-good.
 func (t *cachingTransport) refresh(ctx context.Context, entry *branchEntry, repository, branch, authRef string) {
 	defer func() {
 		if t.refreshDone != nil {
@@ -137,8 +116,7 @@ func (t *cachingTransport) refresh(ctx context.Context, entry *branchEntry, repo
 	entry.snapshot, entry.fetchedAt = snapshot, t.clock()
 }
 
-// invalidate drops a branch entry so the next read re-pulls. Called after a push so a user sees the
-// change they just delivered rather than the pre-push snapshot.
+// invalidate drops a branch entry after a push, so the next read re-pulls.
 func (t *cachingTransport) invalidate(repository, branch string) {
 	key := branchKey(repository, branch)
 	t.mu.Lock()
@@ -146,9 +124,7 @@ func (t *cachingTransport) invalidate(repository, branch string) {
 	delete(t.entries, key)
 }
 
-// ReadManifest, SearchManifest, and DryRun pass through. The per-request SnapshotTransport serves its
-// reads from ReadBranch, so these are reached only by a caller using this transport unwrapped; DryRun
-// must always see the live head for its base check.
+// ReadManifest, SearchManifest, and DryRun pass through; DryRun must always see the live head.
 func (t *cachingTransport) ReadManifest(ctx context.Context, target Target, authRef string) (ManifestSnapshot, error) {
 	return t.inner.ReadManifest(ctx, target, authRef)
 }
@@ -161,9 +137,7 @@ func (t *cachingTransport) DryRun(ctx context.Context, change Change, authRef st
 	return t.inner.DryRun(ctx, change, authRef)
 }
 
-// PushBranch passes through and then drops the branch's cached snapshot, so a read after the write
-// re-pulls. Both branches are dropped: a proposal writes change.Branch while reading
-// change.Target.Branch.
+// PushBranch passes through, then drops both the written branch and the read branch (a proposal writes change.Branch, reads change.Target.Branch).
 func (t *cachingTransport) PushBranch(ctx context.Context, change Change, authRef string) (PushResult, error) {
 	result, err := t.inner.PushBranch(ctx, change, authRef)
 	if err != nil {
@@ -180,9 +154,7 @@ func (t *cachingTransport) PushBranch(ctx context.Context, change Change, authRe
 	return result, nil
 }
 
-// PreviousManifest delegates to the wrapped transport's history when it has one, so the "which side
-// moved" explanation keeps working through the cache. Nothing here is cached: it reads once, for the
-// one Secret whose divergence is being explained.
+// PreviousManifest delegates to the wrapped transport's history when it has one; nothing here is cached.
 func (t *cachingTransport) PreviousManifest(ctx context.Context, target Target, authRef string) ([]byte, error) {
 	history, ok := t.inner.(ManifestHistory)
 	if !ok {
@@ -194,11 +166,8 @@ func (t *cachingTransport) PreviousManifest(ctx context.Context, target Target, 
 // WarmTarget names one branch to pull before any user asks for it.
 type WarmTarget struct{ Repository, Branch, AuthRef string }
 
-// PrewarmBranches pulls each distinct branch once, in the background and bounded in parallel, so the
-// per-branch cache is warm before the first request rather than making that request wait on a cold
-// clone. Call it at startup, off the serving path. A transport that cannot enumerate branches is a
-// no-op; even with caching disabled the pull still lands the on-disk worktree, so the first real
-// read is a fetch rather than a clone.
+// PrewarmBranches pulls each distinct branch once, bounded in parallel, off the serving path; call at startup.
+// A transport that cannot enumerate branches is a no-op.
 func PrewarmBranches(ctx context.Context, transport GitTransport, targets []WarmTarget, logger *slog.Logger) {
 	reader, ok := transport.(BranchReader)
 	if !ok || len(targets) == 0 {
@@ -228,8 +197,7 @@ func PrewarmBranches(ctx context.Context, transport GitTransport, targets []Warm
 			defer wg.Done()
 			defer func() { <-sem }()
 			if _, err := reader.ReadBranch(ctx, target.Repository, target.Branch, target.AuthRef); err != nil && logger != nil {
-				// Not fatal: a branch that fails to warm stays cold and the first request that needs
-				// it pays the pull, exactly as it would have without prewarming.
+				// Not fatal: a branch that fails to warm stays cold and the first request pays the pull.
 				logger.Warn("gitops branch prewarm failed", "repository", target.Repository, "branch", target.Branch, "error", err)
 			}
 		}(target)

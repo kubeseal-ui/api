@@ -29,9 +29,7 @@ import (
 
 const maxRequestBody = 10 * 1024 * 1024
 
-// decodeJSONBody applies the request body limit and decodes the body, writing the refusal itself and
-// reporting whether the caller should continue. The limit is enforced while reading, so a body over
-// it is answered 413 on every route rather than surfacing as a decode error and a 400.
+// decodeJSONBody enforces the body limit while reading, so an oversized body answers 413 on every route.
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	if r.ContentLength > maxRequestBody {
@@ -73,10 +71,7 @@ func (h *ProtectedHandlers) emitSecurityEvent(r *http.Request, operation, namesp
 	metrics.RecordSecretOperation(operation, result)
 }
 
-// Bounded outcomes for sealed-secret operations: the only values the `result` label of
-// kubeseal_ui_sealed_secret_operations_total and the security event stream may carry. They must
-// reflect what actually happened — a constant value makes success, failure, and denial
-// indistinguishable in the metric and the audit trail, hiding failures from alerting.
+// Bounded outcomes: the only values the operations_total result label and audit stream may carry.
 const (
 	opResultSuccess        = "success"
 	opResultDenied         = "denied"
@@ -87,10 +82,7 @@ const (
 	opResultFailed         = "failed"
 )
 
-// opResultDegraded is the listing's own outcome, outside the operation vocabulary above: it
-// answered with less than it was asked for, because some Secret's Git state could not be read. Not
-// "failed" — the response is a success — and not "success", because an alert on this is how a Git
-// outage becomes visible.
+// Degraded: the listing answered with less than asked; alerting on it is how a Git outage shows.
 const opResultDegraded = "degraded"
 
 func NewProtectedHandlers(k8s kubernetes.Client, cryptoWrapper *crypto.Wrapper, enableDecrypt bool) *ProtectedHandlers {
@@ -101,8 +93,7 @@ func NewProtectedHandlersWithGitOps(store *policy.PolicyStore, transport gitops.
 	return &ProtectedHandlers{Kubernetes: k8s, Crypto: cryptoWrapper, EnableDecrypt: enableDecrypt, GitMappings: store, GitTransport: transport, idempotency: newIdempotencyStore()}
 }
 
-// idempotencyKey is the Idempotency-Key namespaced by the subject that sent it, so one caller
-// cannot spend or block another's key. Empty when the header is absent.
+// idempotencyKey is the header key namespaced by subject, so one caller cannot spend another's.
 func (h *ProtectedHandlers) idempotencyKey(r *http.Request) string {
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if key == "" {
@@ -112,9 +103,7 @@ func (h *ProtectedHandlers) idempotencyKey(r *http.Request) string {
 	return id.Subject + "\x00" + key
 }
 
-// claimIdempotency reports whether this request may proceed, or whether it repeats one already
-// claimed by the same subject. Delivery endpoints use beginDelivery instead, so a retry is
-// answered with the original outcome.
+// claimIdempotency: delivery endpoints use beginDelivery instead, so a retry gets the original outcome.
 func (h *ProtectedHandlers) claimIdempotency(r *http.Request) bool {
 	key := h.idempotencyKey(r)
 	if key == "" {
@@ -123,16 +112,12 @@ func (h *ProtectedHandlers) claimIdempotency(r *http.Request) bool {
 	return h.idempotency.claim(key)
 }
 
-// capabilityDeniedMessage names the capability the request was refused for, so a 403 maps
-// straight to the grant the identity lacks instead of a generic denial.
+// capabilityDeniedMessage names the missing capability so a 403 maps to the grant to fix.
 func capabilityDeniedMessage(want policy.Capability) string {
 	return "Access denied: missing capability " + string(want)
 }
 
-// requireCapability authorizes a request against the capabilities the identity holds in namespace.
-// policy.AnyNamespace is for platform-level checks such as cluster-wide creation, which a
-// namespace-scoped grant deliberately does not satisfy; a request that cannot name a namespace at
-// all uses hasCapabilityAnywhere instead.
+// requireCapability: AnyNamespace is for platform checks; a request that cannot name a namespace uses hasCapabilityAnywhere.
 func requireCapability(w http.ResponseWriter, r *http.Request, namespace string, required ...policy.Capability) bool {
 	identity, ok := authmw.GetIdentity(r.Context())
 	if !ok {
@@ -148,9 +133,7 @@ func requireCapability(w http.ResponseWriter, r *http.Request, namespace string,
 	return true
 }
 
-// hasCapabilityAnywhere authorizes a request that spans namespaces and cannot name one — a listing,
-// or a body not yet parsed. It is a gate rather than a grant: what the caller may see or do is
-// decided per namespace afterwards.
+// hasCapabilityAnywhere gates requests spanning namespaces; per-namespace decisions happen after.
 func hasCapabilityAnywhere(w http.ResponseWriter, r *http.Request, required ...policy.Capability) bool {
 	identity, ok := authmw.GetIdentity(r.Context())
 	if !ok {
@@ -175,13 +158,7 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-// requestTransport is the Git transport for one request: the configured one, wrapped so every read
-// comes from a single per-branch snapshot. Build it once per request — a namespace listing resolves
-// drift for every Secret it returns, and against a real remote each of those reads is a network
-// fetch.
-//
-// It must not outlive the request: it answers from the head it read at the start, and a BaseCommit
-// check against a head older than the request would let a conflicting push through.
+// requestTransport wraps the configured transport in a per-request snapshot; it must not outlive the request.
 func (h *ProtectedHandlers) requestTransport() gitops.GitTransport {
 	if h.GitTransport == nil {
 		return nil
@@ -189,12 +166,7 @@ func (h *ProtectedHandlers) requestTransport() gitops.GitTransport {
 	return gitops.NewSnapshotTransport(h.GitTransport)
 }
 
-// lookupManifest locates a Git manifest by identity using two-tier discovery: tier 1 reads the
-// fast-path target rendered from the namespace's pathTemplate, tier 2 walks the repository tree.
-//
-// found=false with a nil error means the path is vacant — the documented new-file case — and the
-// snapshot is still meaningful there: it carries the branch head a BaseCommit check compares
-// against. Tier 1's snapshot is kept when tier 2 also finds nothing, so the head is not lost.
+// lookupManifest: two-tier discovery; found=false means vacant, with tier 1's snapshot kept for its branch head.
 func (h *ProtectedHandlers) lookupManifest(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, target gitops.Target, namespace, name string) (gitops.ManifestSnapshot, bool, error) {
 	snapshot, err := transport.ReadManifest(ctx, target, mapping.AuthRef)
 	if err == nil {
@@ -214,9 +186,7 @@ func (h *ProtectedHandlers) lookupManifest(ctx context.Context, transport gitops
 	return snapshot, false, nil
 }
 
-// mappedFileText reads back a file as Git holds it, which is what a view that says "Git, before"
-// has to show. The read is served from the request's branch snapshot, so a path the request has
-// already resolved is a map lookup rather than a second fetch.
+// mappedFileText reads a file as Git holds it, served from the request's snapshot.
 func (h *ProtectedHandlers) mappedFileText(ctx context.Context, transport gitops.GitTransport, namespace, path string) (string, error) {
 	if h.GitMappings == nil || transport == nil {
 		return "", errors.New("no Git mapping for this namespace")
@@ -233,12 +203,7 @@ func (h *ProtectedHandlers) mappedFileText(ctx context.Context, transport gitops
 	return string(snapshot.Content), nil
 }
 
-// gitStatus resolves a Secret's Git state through the request's transport, so that resolving it for
-// thirty Secrets in one listing costs one fetch per branch rather than one per Secret. See
-// requestTransport. withHistory additionally asks which side moved when the two differ, at the cost
-// of a Git history read — worth it for one Secret, not for a listing. withGitText carries the file's
-// own text back on `diverged`, which only a view that is about to overwrite it can use: a listing
-// holds thirty of them and shows none.
+// gitStatus resolves a Secret's Git state through the request snapshot; withHistory and withGitText cost extra reads, so listings skip them.
 func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitTransport, namespace, name, liveYAML, baseCommit string, withHistory, withGitText bool) (map[string]any, error) {
 	status := map[string]any{"managed": false, "in_sync_with_live": false, "drift": string(kubernetes.DriftUnknown)}
 	if h.GitMappings == nil || transport == nil {
@@ -264,11 +229,7 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 		return status, err
 	}
 	if !found {
-		// The snapshot still carries the branch head, and that head is the point of the sync
-		// endpoint: a live Secret with no manifest is `live_only`, and syncing it means creating
-		// that file built on the head. Dropping the head left the client in a contradiction — the
-		// status endpoint calls this drift `can_sync` while the sync endpoint refuses an empty base
-		// commit. A branch nothing has been seeded on has no head, so the guard is on the value.
+		// The branch head is what lets the sync endpoint create a live_only file; dropping it contradicted can_sync.
 		if snapshot.Commit != "" {
 			status["base_commit"] = snapshot.Commit
 		}
@@ -316,8 +277,7 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 	if len(fields) > 0 {
 		status["drift_fields"] = fields
 	}
-	// Diverged is the only state that offers a sync, and a sync overwrites this file, so the copy it
-	// replaces travels with the drift. Every other state either agrees with Git or offers nothing.
+	// Diverged is the only state that offers a sync, so the copy it replaces travels with the drift.
 	if withGitText {
 		status["git_file_yaml"] = string(snapshot.Content)
 	}
@@ -327,12 +287,7 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 	return status, nil
 }
 
-// refuseGitRead answers a Git read that failed and returns the audit outcome to record for it.
-//
-// A read failure has not established that Git and the cluster disagree, so it is never reported as
-// drift: that told the operator the two copies differ when Git had not answered at all. A stale
-// base commit is a conflict the caller can resolve, a deadline is the server's own bound rather
-// than a fact about Git, and everything else is a read that did not happen.
+// refuseGitRead: a failed read is never reported as drift — conflict, timeout, and unavailable are distinct outcomes.
 func refuseGitRead(w http.ResponseWriter, r *http.Request, err error) string {
 	var base *gitops.BaseCommitError
 	switch {
@@ -348,12 +303,7 @@ func refuseGitRead(w http.ResponseWriter, r *http.Request, err error) string {
 	}
 }
 
-// gitMovedPastLive reports whether the live manifest is the version the mapped file held before its
-// most recent change — Git moved on and the cluster did not, so overwriting the file would discard
-// the change that moved it. A Secret edited in place matches nothing in that history, so it is never
-// mistaken for one. Every uncertainty — no earlier version, an unreadable history, a capability the
-// transport does not have — answers false, because withholding the only recovery control on a guess
-// is worse than offering a sync the operator can see is a real change.
+// gitMovedPastLive: true when live matches the file's previous version; every uncertainty answers false.
 func (h *ProtectedHandlers) gitMovedPastLive(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, target gitops.Target, liveCanonical []byte) bool {
 	history, ok := transport.(gitops.ManifestHistory)
 	if !ok {
@@ -378,15 +328,12 @@ func canonicalSealedSecret(manifest string) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// canonicalDocument is the document the drift comparison and its reason both read. The stripping
-// lives in the kubernetes package beside the projection that serves a live object as a manifest,
-// so one rule covers both sides rather than two that have to be kept in step.
+// canonicalDocument: the stripping lives in the kubernetes package, so one rule covers both sides.
 func canonicalDocument(manifest string) (map[string]any, error) {
 	return kubernetes.CanonicalManifest(manifest)
 }
 
-// The parts of a SealedSecret two sides can disagree about, most decisive first. `identity` is the
-// one the operator cannot resolve by syncing: the file at the mapped path belongs to another Secret.
+// Most decisive first; identity is the one a sync cannot resolve.
 const (
 	driftReasonIdentity   = "identity"
 	driftReasonKeys       = "keys"
@@ -395,12 +342,7 @@ const (
 	driftReasonMetadata   = "metadata"
 )
 
-// driftReason names which part of two canonical documents differs, and lists every differing path.
-// The name is the most decisive category and the list is not narrowed to it: a Secret whose
-// ciphertext and metadata both differ reports the ciphertext, and the namespace path alongside it, so
-// that a second cause is never hidden behind the first. The comparison is structural throughout — it
-// reads ciphertext, never plaintext, so this reason needs no controller key and reveals nothing
-// reveal itself withholds.
+// driftReason names the most decisive differing category; the field list is never narrowed to it, and it reads ciphertext only.
 func driftReason(live, git map[string]any) (string, []string) {
 	var fields []string
 	differingPaths(live, git, "", &fields)
@@ -410,8 +352,7 @@ func driftReason(live, git map[string]any) (string, []string) {
 	case identityDiffers(live, git):
 		return driftReasonIdentity, fields
 	case !reflect.DeepEqual(specSection(live, "encryptedData"), specSection(git, "encryptedData")):
-		// Same values sealed twice are different bytes — sealing is not deterministic — so the
-		// key names decide between "these are separate encryptions" and "a key was added".
+		// Sealing is not deterministic, so key names decide between separate encryptions and an added key.
 		if encryptedKeyNamesDiffer(live, git) {
 			return driftReasonKeys, fields
 		}
@@ -422,8 +363,7 @@ func driftReason(live, git map[string]any) (string, []string) {
 	return driftReasonMetadata, fields
 }
 
-// identityDiffers is true only when both sides declare a name and disagree: a manifest that omits
-// metadata.name is not claiming to be another Secret.
+// identityDiffers is true only when both sides declare a name and disagree.
 func identityDiffers(live, git map[string]any) bool {
 	liveName, liveOK := nestedString(live, "metadata", "name")
 	gitName, gitOK := nestedString(git, "metadata", "name")
@@ -433,8 +373,7 @@ func identityDiffers(live, git map[string]any) bool {
 func encryptedKeyNamesDiffer(live, git map[string]any) bool {
 	liveKeys, liveIsMap := specSection(live, "encryptedData").(map[string]any)
 	gitKeys, gitIsMap := specSection(git, "encryptedData").(map[string]any)
-	// One side carrying the section and the other not is itself a difference in key names. The
-	// caller only asks once the two sections are known to be unequal, so this is that case.
+	// One side carrying the section is itself a key-name difference.
 	if liveIsMap != gitIsMap {
 		return true
 	}
@@ -449,8 +388,7 @@ func encryptedKeyNamesDiffer(live, git map[string]any) bool {
 	return false
 }
 
-// specSection reads one field of spec, or nil when either the field or spec itself is absent — which
-// is how a comparison distinguishes a missing section from an empty one that was stripped.
+// specSection distinguishes a missing section from an empty one that was stripped.
 func specSection(doc map[string]any, field string) any {
 	spec, ok := doc["spec"].(map[string]any)
 	if !ok {
@@ -475,11 +413,7 @@ func nestedString(doc map[string]any, path ...string) (string, bool) {
 	return value, ok && value != ""
 }
 
-// differingPaths appends the path of every leaf the two documents disagree about, and of every leaf
-// only one of them has. A list is compared whole and reported as one path: an encryptedData value is
-// a string, so a list that differs is simply a different list. A section only one side carries is
-// descended into rather than reported as itself, because which annotation or template field it holds
-// is the actionable half of the answer.
+// differingPaths reports every differing leaf path; one-sided sections are descended into, not reported whole.
 func differingPaths(a, b any, prefix string, out *[]string) {
 	aMap, aIsMap := a.(map[string]any)
 	bMap, bIsMap := b.(map[string]any)
@@ -515,13 +449,7 @@ func joinPath(prefix, key string) string {
 	return prefix + "." + key
 }
 
-// normalizeSecretYAML reduces a manifest to the desired state of a Secret. Applied to every seal
-// request, typed manifests included, so the create path has one shape rather than two, and it is
-// what lets a live Secret be adopted without a new Kubernetes permission: the operator's own
-// `kubectl get secret -o yaml` is the source.
-//
-// It refuses a manifest that is not a Secret, or one naming a different resource than the request:
-// sealing Secret A's content under Secret B's name is the likeliest mistake in a copy-paste flow.
+// normalizeSecretYAML reduces any manifest to a Secret's desired state and refuses one naming a different resource.
 func normalizeSecretYAML(secretYAML, namespace, name string) (string, error) {
 	var manifest map[string]any
 	if err := yaml.Unmarshal([]byte(secretYAML), &manifest); err != nil {
@@ -539,8 +467,7 @@ func normalizeSecretYAML(secretYAML, namespace, name string) (string, error) {
 		meta = map[string]any{}
 		manifest["metadata"] = meta
 	}
-	// Adoption copies a Secret's content, not its garbage-collection relationship to whatever
-	// created it: a manifest that arrived owning itself would be a claim about another cluster.
+	// Adoption copies content, not ownership: a self-owning manifest claims another cluster.
 	delete(meta, "ownerReferences")
 	delete(manifest, "status")
 	kubernetes.CleanMetadata(meta)
@@ -552,9 +479,7 @@ func normalizeSecretYAML(secretYAML, namespace, name string) (string, error) {
 		return "", fmt.Errorf("manifest is for namespace %q, but this request is for %q", declared, namespace)
 	}
 
-	// The API server refuses data keys outside the ConfigMap-key rule when the unsealed Secret
-	// lands, which would surface as drift after delivery. Refusing the manifest here keeps the
-	// failure at seal time, where the sender can still fix it.
+	// Invalid keys would surface as drift after delivery; refusing here keeps the failure at seal time.
 	for _, field := range []string{"data", "stringData"} {
 		entries, ok := manifest[field].(map[string]any)
 		if !ok {
@@ -610,11 +535,9 @@ func (h *ProtectedHandlers) SecretHandler(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// NamespacesHandler lists the namespaces this caller may read, each with the Git delivery mode and
-// target repository the UI needs to tell managed from unmanaged.
+// NamespacesHandler lists the namespaces this caller may read, each with its Git delivery mode and repository.
 func (h *ProtectedHandlers) NamespacesHandler(w http.ResponseWriter, r *http.Request) {
-	// The gate is "may read somewhere", not "may read everywhere": a grant scoped to one namespace
-	// is a reason to list, and the filter below decides which namespaces it covers.
+	// The gate is "may read somewhere"; the filter below decides which namespaces.
 	if !hasCapabilityAnywhere(w, r, policy.MetadataRead) {
 		return
 	}
@@ -643,14 +566,7 @@ func (h *ProtectedHandlers) NamespacesHandler(w http.ResponseWriter, r *http.Req
 	jsonResponse(w, http.StatusOK, map[string]any{"namespaces": visible})
 }
 
-// GitPathsHandler returns the allowed target paths for the namespaces the caller can read, for the
-// frontend's folder picker. The destinations are the namespaces the caller holds metadata:read in
-// rather than gitops:push in: the capability authorizing a seal is checked on the encrypt request.
-//
-// The path template travels raw rather than rendered: a per-namespace listing has no Secret name to
-// fill `{name}` with, so a rendered path here could only ever be empty. The client substitutes the
-// name it has and joins the file to one of AllowedPaths, which are directories — a bare directory
-// is not a destination any write endpoint accepts.
+// GitPathsHandler returns allowed target paths per readable namespace; templates travel raw (no name to render) and AllowedPaths are directories.
 func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Request) {
 	if !hasCapabilityAnywhere(w, r, policy.MetadataRead) {
 		return
@@ -660,9 +576,7 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// The identity already resolved its grants when the session was read for this request; asking
-	// the store again here would be a second resolution path, free to disagree with the one
-	// authorizing every other endpoint.
+	// Grants were resolved once at session read; re-asking the store would be a second resolution path.
 	identity, _ := authmw.GetIdentity(r.Context())
 
 	type nsPaths struct {
@@ -674,9 +588,7 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 		Mode         string   `json:"mode"`
 	}
 
-	// A namespace the caller cannot read is not a destination to offer, whatever the Git mapping
-	// says. The wildcard entry is the exception: it is the mapping every unmapped namespace falls
-	// back to, and dropping it would leave an all-wildcard deployment with no mode to show.
+	// Unreadable namespaces are not destinations; the wildcard mapping stays as every unmapped namespace's fallback.
 	result := make([]nsPaths, 0)
 	for ns, mapping := range h.GitMappings.GetAllMappings() {
 		if ns != policy.AnyNamespace && !containsString(identity.CapabilitiesFor(ns), string(policy.MetadataRead)) {
@@ -698,8 +610,7 @@ func (h *ProtectedHandlers) GitPathsHandler(w http.ResponseWriter, r *http.Reque
 func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
 	if namespace == "" {
-		// No namespace named: the caller is asking across all of them, a question about where they
-		// hold metadata:read rather than about any one namespace. The listing below is filtered.
+		// A question about where the caller holds metadata:read; the listing below is filtered.
 		if !hasCapabilityAnywhere(w, r, policy.MetadataRead) {
 			return
 		}
@@ -711,8 +622,7 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadGateway, "DEPENDENCY_UNAVAILABLE", "Kubernetes unavailable")
 		return
 	}
-	// Filter before the drift loop: resolving drift reads Git, and a namespace this caller cannot
-	// see is not one worth a fetch.
+	// Filter before the drift loop: an invisible namespace is not worth a Git fetch.
 	if namespace == "" {
 		identity, _ := authmw.GetIdentity(r.Context())
 		visible := secrets[:0]
@@ -724,18 +634,14 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 		secrets = visible
 	}
 	items := make([]map[string]any, 0, len(secrets))
-	// One transport for the whole listing: the shared snapshot is what keeps this loop from turning
-	// into one Git fetch per Secret.
+	// One transport per listing: the shared snapshot keeps this from being a fetch per Secret.
 	transport := h.requestTransport()
 	started := time.Now()
 	result := opResultSuccess
 	for i := range secrets {
 		git, gitErr := h.gitStatus(r.Context(), transport, secrets[i].Namespace, secrets[i].Name, secrets[i].YAML, "", false, false)
 		if gitErr != nil {
-			// Degraded, not silent: the listing still answers, because a Secret whose drift is
-			// unknown is more use to the rail than no listing at all. Only the first failure is
-			// logged — they share one cause, and this endpoint is a rail's poll, so a line per
-			// Secret per focus is a flood that says the same thing 300 times.
+			// Degraded, not silent; only the first failure is logged — they share one cause.
 			if result != opResultDegraded {
 				slog.Warn("listing git status failed",
 					"namespace", secrets[i].Namespace, "name", secrets[i].Name,
@@ -746,8 +652,7 @@ func (h *ProtectedHandlers) SecretsHandler(w http.ResponseWriter, r *http.Reques
 		}
 		items = append(items, map[string]any{
 			"name": secrets[i].Name, "namespace": secrets[i].Namespace,
-			// Key names travel with the listing so a client can search them without a fetch per
-			// Secret. They are read from spec.encryptedData and never decrypted.
+			// Key names travel with the listing; read from spec.encryptedData, never decrypted.
 			"keys": secrets[i].Keys, "key_count": secrets[i].KeyCount,
 			"scope": secrets[i].Scope, "created_at": secrets[i].CreatedAt, "git": git,
 		})
@@ -766,10 +671,7 @@ type encryptRequest struct {
 
 // EncryptHandler encrypts a Secret manifest without persisting it.
 func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Request) {
-	// The resource is named in the body rather than the URL, so these are populated after the decode
-	// below. Every refusal before then — an unauthenticated caller, or one without secret:seal —
-	// records an event with no namespace and no name: at the point of refusal nothing had been named,
-	// and parsing untrusted input for a caller who cannot act on it would be the worse trade.
+	// namespace/name populate only after the decode, so earlier refusals record an event with nothing named.
 	var namespace, name string
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "seal", namespace, name, "", "", result) }()
@@ -796,16 +698,13 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	// Past validation the request names a resource, so the audit record can too.
 	namespace, name = req.Namespace, req.Name
 
-	// The early gate could only ask whether the caller holds secret:seal somewhere, before the body
-	// was read. Now the target namespace is known and validated, so the real question can be asked:
-	// a grant scoped to another namespace does not authorize this one.
+	// The real namespace question, now that the body has named and validated the target.
 	if !requireCapability(w, r, req.Namespace, policy.SecretSeal) {
 		result = opResultDenied
 		return
 	}
 
-	// Reduce to desired state before anything reads it, and refuse a non-Secret here so a manifest
-	// that cannot be adopted never reaches policy resolution or Git.
+	// Refuse a non-Secret before it reaches policy resolution or Git.
 	normalized, err := normalizeSecretYAML(req.YAML, req.Namespace, req.Name)
 	if err != nil {
 		result = opResultInvalidRequest
@@ -814,9 +713,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 	}
 	req.YAML = normalized
 
-	// Resolve the mapped target once, so the vacancy gate below and the response's base commit use
-	// the same path. The helper writes its own error response, so it reports the bounded outcome
-	// back through result.
+	// Resolved once so the vacancy gate and the response's base_commit use the same path.
 	mapping, mapped, mappedPath, ok := h.resolveEncryptTarget(w, r, &req, &result)
 	if !ok {
 		return
@@ -830,9 +727,7 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	// A cluster-wide SealedSecret can be decrypted in any namespace, so it widens the blast radius
-	// beyond the caller's namespace mappings: crypto-wrapper contract requires access:manage on top
-	// of secret:seal to create one.
+	// Cluster-wide widens the blast radius, so it also requires access:manage.
 	if scope == crypto.ClusterWideScope && !requireCapability(w, r, policy.AnyNamespace, policy.AccessManage) {
 		result = opResultDenied
 		return
@@ -855,20 +750,12 @@ func (h *ProtectedHandlers) EncryptHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	// target_path is the path the vacancy gate actually read, so it is the path the client names
-	// back to /gitops/dry-run and /gitops/deliver. Echoing it keeps a create whose operator picked
-	// a non-default path from being delivered to the default, whose occupancy was never checked.
+	// The path the vacancy gate read; echoing it keeps a create from being delivered to an unchecked default.
 	jsonResponse(w, http.StatusOK, map[string]string{"yaml": sealed, "base_commit": baseCommit, "target_path": mappedPath})
 	result = opResultSuccess
 }
 
-// resolveEncryptTarget decides which mapped file a new Secret would occupy, returning its mapping,
-// the rendered path, and whether the path is mapped at all.
-//
-// mapped is false when the namespace has no mapping, the mapping renders no path, or there is no
-// transport: a namespace with no mapped path has nothing to occupy, so encrypt keeps working
-// unmapped. It writes its own error response and reports the bounded outcome through result, the
-// caller having no other way to see which refusal it was.
+// resolveEncryptTarget decides which mapped file a new Secret would occupy; mapped=false when there is none, and encrypt keeps working unmapped.
 func (h *ProtectedHandlers) resolveEncryptTarget(w http.ResponseWriter, r *http.Request, req *encryptRequest, result *string) (policy.GitMapping, bool, string, bool) {
 	if req.TargetPath == "" {
 		if h.GitMappings == nil || h.GitTransport == nil {
@@ -897,27 +784,19 @@ func (h *ProtectedHandlers) resolveEncryptTarget(w http.ResponseWriter, r *http.
 		return policy.GitMapping{}, false, "", false
 	}
 	if !mapping.IsPathAllowed(req.TargetPath, req.Namespace, req.Name) {
-		// A 400, because the client asked for the wrong thing, but the refusal is the mapping's
-		// policy, so the outcome is a denial: an audit that could not separate "wrote outside the
-		// granted paths" from "sent malformed JSON" would not be worth keeping.
+		// A 400 for the client, but the audit outcome is a denial, not invalid_request.
 		*result = opResultDenied
 		writeError(w, r, http.StatusBadRequest, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping")
 		return policy.GitMapping{}, false, "", false
 	}
-	// No transport means nothing to read, so the vacancy gate is skipped — without this it would
-	// call into a nil transport, because `mapped` is what authorizes that call.
+	// No transport skips the vacancy gate; `mapped` is what authorizes that call.
 	if h.GitTransport == nil {
 		return policy.GitMapping{}, false, "", true
 	}
 	return mapping, true, req.TargetPath, true
 }
 
-// encryptTargetIsVacant enforces the documented gate: the mapped target must be vacant, since
-// creating under an existing name would silently replace it — what the separate create and edit
-// flows exist to prevent.
-//
-// The vacant path still reports the branch head, which is the return value: BaseCommit is compared
-// against it, and no other endpoint yields one for a namespace with no secrets yet.
+// encryptTargetIsVacant enforces the vacant-target gate; a vacant path still returns the branch head for BaseCommit.
 func (h *ProtectedHandlers) encryptTargetIsVacant(w http.ResponseWriter, r *http.Request, mapping policy.GitMapping, path string, req *encryptRequest, result *string) (string, bool) {
 	target := gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path}
 	snapshot, found, err := h.lookupManifest(r.Context(), h.requestTransport(), mapping, target, req.Namespace, req.Name)
@@ -942,8 +821,7 @@ func validName(value string) bool {
 // DecryptHandler returns one requested key only after internal decryption.
 func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Request) {
 	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
-	// key is captured by the deferred emit and populated once the body is parsed, so a decoded
-	// attempt records which key was requested.
+	// Populated once the body is parsed, so a decoded attempt records the key.
 	var key string
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "reveal", namespace, name, key, "", result) }()
@@ -1005,27 +883,17 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 	result = opResultSuccess
 }
 
-// maxBatchKeys bounds one reviewed change. It matches the documented hard maximum of 400 keys in a
-// Secret, so the largest Secret the product accepts can still be rewritten in a single batch rather
-// than falling back to the per-key flow this replaced.
+// maxBatchKeys matches the documented 400-key Secret maximum, so any accepted Secret reseals in one batch.
 const maxBatchKeys = 400
 
-// mutationRequest is one entry change as it arrives on the wire, shared by the diff and patch
-// endpoints so the two cannot accept different shapes.
+// mutationRequest is one entry change on the wire, shared by the diff and patch endpoints so they cannot accept different shapes.
 type mutationRequest struct {
 	Key       string `json:"key"`
 	Operation string `json:"operation"`
 	Value     string `json:"value"`
 }
 
-// parseMutations validates a request's mutations and translates them into the crypto layer's type,
-// returning the key names sorted and comma-joined for the security event. Sorting makes the audit
-// record a function of the change rather than of the client's JSON ordering, and the join is bounded
-// by maxBatchKeys.
-//
-// Only the checks needing no decryption happen here: whether a key exists is knowable only inside
-// the crypto layer, which reports those refusals as crypto.ErrInvalidMutation so this can answer 400
-// rather than blaming the backend.
+// parseMutations does shape checks only; key-existence checks are the crypto layer's, as ErrInvalidMutation.
 func parseMutations(mutations []mutationRequest) ([]crypto.Mutation, string, error) {
 	if len(mutations) == 0 {
 		return nil, "", errors.New("no mutations given")
@@ -1051,9 +919,7 @@ func parseMutations(mutations []mutationRequest) ([]crypto.Mutation, string, err
 	return out, strings.Join(keys, ","), nil
 }
 
-// mutationSummary reports which keys a batch touches and how, without echoing the values: the caller
-// already holds what it sent, and repeating them would put plaintext into a response body in a flow
-// whose entire design is that only ciphertext crosses the boundary.
+// mutationSummary echoes keys and operations, never values.
 func mutationSummary(mutations []mutationRequest) []map[string]string {
 	out := make([]map[string]string, 0, len(mutations))
 	for _, m := range mutations {
@@ -1062,12 +928,10 @@ func mutationSummary(mutations []mutationRequest) []map[string]string {
 	return out
 }
 
-// DiffHandler computes an encrypted before/after diff for a batch of key changes without persisting
-// anything.
+// DiffHandler computes an encrypted before/after diff for a batch of key changes without persisting anything.
 func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) {
 	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
-	// Diff decrypts the complete Secret internally, so it is audited like reveal and patch even
-	// though it returns ciphertext only.
+	// Diff decrypts the full Secret internally, so it is audited like reveal and patch.
 	var changedKeys string
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "diff", namespace, name, changedKeys, "", result) }()
@@ -1094,8 +958,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
-	// Everything refusable without decrypting is checked before the idempotency key is spent, so a
-	// request that was never going to succeed cannot hold the key against a corrected retry.
+	// Refusable-without-decrypt checks come before the idempotency key is spent.
 	mutations, batchKeys, err := parseMutations(req.Mutations)
 	if err != nil {
 		result = opResultInvalidRequest
@@ -1130,27 +993,14 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
-	// The file the manifest was actually found in, so the client can name it to the delivery
-	// endpoints. It is not always the path the template renders: two-tier discovery finds a Secret
-	// kept in an application subdirectory by the tree walk, and a client that does not name the
-	// reviewed file leaves delivery to render the template — creating a second file for the same
-	// identity instead of updating the reviewed one.
-	//
-	// Refused rather than defaulted to empty, because an empty target_path is falsy to the client,
-	// which falls back to exactly that template.
+	// The file discovery actually found; refused when absent, since an empty target_path would fall back to the template.
 	targetPath, ok := git["file_path"].(string)
 	if !ok || targetPath == "" {
 		result = opResultFailed
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
-	// The pane this feeds is labelled "Git, before", so it shows the file as Git holds it — the same
-	// thing the dry run's Before means — rather than the live object. Those differ in formatting and
-	// in anything the file carries that the cluster's copy of the object does not, and a diff of the
-	// live object against the reseal says nothing about the file the commit will land in.
-	//
-	// The read is served from the branch snapshot gitStatus already pulled, so it costs a lookup
-	// rather than a second fetch.
+	// "Git, before" is the file as Git holds it, read from the snapshot gitStatus already pulled.
 	before, readErr := h.mappedFileText(r.Context(), transport, namespace, targetPath)
 	if readErr != nil {
 		result = opResultFailed
@@ -1174,13 +1024,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 	result = opResultSuccess
 }
 
-// ResealHandler applies a batch of key mutations to one SealedSecret and returns the resealed
-// manifest: the confirmed half of the flow whose diff half is DiffHandler. It writes nothing —
-// neither the cluster nor Git — and needs no Kubernetes write permission.
-//
-// The reseal re-derives and re-validates the batch against the live Secret at the moment the
-// operator confirms it, which is what makes the confirmation mean something after a review that may
-// have sat on screen; the ciphertext reaching the repository is a separate encryption of the values.
+// ResealHandler applies the batch and returns the resealed manifest, re-validating against the live Secret at confirm time.
 func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request) {
 	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
 	// Populated once the body is parsed, so the audit record names every key the patch touched.

@@ -1,7 +1,5 @@
-// Package observability wraps slog with a redacting JSON handler: any attribute whose
-// key matches a sensitive marker is written as the "[REDACTED]" sentinel instead of its
-// value, and groups are walked recursively. The JSON envelope stays stable and the keys
-// stay present, because Loki-derived consumers index and count by JSON path.
+// Package observability wraps slog with a redacting JSON handler: any attribute whose key matches a sensitive marker is
+// written as the [REDACTED] sentinel, groups walked recursively; keys stay present because Loki consumers index by JSON path.
 package observability
 
 import (
@@ -11,13 +9,10 @@ import (
 	"strings"
 )
 
-// Redacted is the sentinel substituted for a sensitive attribute value. Exported so log
-// consumers (dashboards, alerts) match it by name rather than by a copied string.
+// Redacted is the sentinel substituted for a sensitive value; consumers match it by name rather than a copied string.
 const Redacted = "[REDACTED]"
 
-// sensitiveKeyMarkers are substrings whose presence in a lowercased attribute key triggers
-// redaction. The list is deliberately narrow: every marker must map to a leak recorded in
-// internal-docs/security/threat-model.md, or the logs lose their signal.
+// Substrings whose presence in a lowercased attribute key triggers redaction; every marker must map to a recorded leak, or logs lose signal.
 var sensitiveKeyMarkers = []string{
 	"password",
 	"token",
@@ -36,8 +31,7 @@ var sensitiveKeyMarkers = []string{
 	"client_id",
 }
 
-// isSensitiveKey is a case-insensitive substring match. "auth" is deliberately not a marker:
-// it would redact ordinary fields such as author and authority.
+// Case-insensitive substring match; "auth" is deliberately absent, or author and authority would be redacted.
 func isSensitiveKey(key string) bool {
 	l := strings.ToLower(key)
 	for _, m := range sensitiveKeyMarkers {
@@ -102,8 +96,7 @@ func scrubAttr(a slog.Attr) slog.Attr {
 	return a
 }
 
-// RedactingJSONHandler returns a handler that writes JSON to w with sensitive attribute
-// values replaced by [REDACTED]. Safe to install as the default slog handler.
+// RedactingJSONHandler writes JSON to w with sensitive attribute values replaced by [REDACTED]; safe as the default slog handler.
 func RedactingJSONHandler(w io.Writer, opts *slog.HandlerOptions) slog.Handler {
 	return &redactingJSONHandler{inner: slog.NewJSONHandler(w, opts)}
 }

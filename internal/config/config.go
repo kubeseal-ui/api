@@ -1,5 +1,4 @@
-// Package config loads the api's runtime configuration from flags and environment, validates it, and
-// renders it redacted for startup logging. Load is the only reader of the environment.
+// Package config loads the api's runtime configuration; Load is the only reader of the environment.
 package config
 
 import (
@@ -12,18 +11,13 @@ import (
 )
 
 const (
-	// The documented API timeout: a 30-second default with a 120-second hard maximum, per the
-	// Limits table in internal-docs/product/prd.md. A value outside the bounds fails startup
-	// rather than being clamped, which is what that table promises.
+	// Documented bounds from internal-docs/product/prd.md; out-of-range fails startup rather than clamping.
 	DefaultAPITimeout = 30 * time.Second
 	MaxAPITimeout     = 120 * time.Second
-	// minAPITimeout is the floor below which the server could not reliably answer even its own
-	// health checks, so a value under it is a misconfiguration rather than a preference.
+	// Floor below which the server could not answer even its own health checks.
 	minAPITimeout = 5 * time.Second
 
-	// DefaultGitSnapshotTTL is the branch-cache freshness window when the operator sets none. A
-	// handful of seconds collapses a navigation burst into one pull per branch while keeping drift
-	// current enough for an advisory status. The ceiling bounds how stale a read can be.
+	// Collapses a navigation burst into one pull per branch; the ceiling bounds staleness of advisory drift.
 	DefaultGitSnapshotTTL = 15 * time.Second
 	MaxGitSnapshotTTL     = 300 * time.Second
 )
@@ -31,20 +25,15 @@ const (
 type Config struct {
 	Port int
 
-	// APITimeout bounds one request. It is applied to the request context and to the server's
-	// connection deadlines, and the connection write deadline is deliberately set above it: set
-	// below, it would kill the response while the handler ran on to log a success nobody
-	// received, which reads as an unexplained 502 with a 200 in the log.
+	// Bounds one request; the connection write deadline is deliberately set above it (see cmd/server).
 	APITimeout time.Duration
 
 	LogLevel string
 
-	// OIDCIssuer is the OIDC provider URL. Non-secret per the threat model, so it
-	// flows through String().
+	// OIDCIssuer is non-secret per the threat model, so it flows through String().
 	OIDCIssuer string
 
-	// OIDCClientID is the OAuth client id. SECRET: it must never appear in logs or
-	// error envelopes.
+	// SECRET: never in logs or error envelopes.
 	OIDCClientID       string
 	OIDCClientSecret   string
 	OIDCRedirectURL    string
@@ -66,65 +55,43 @@ type Config struct {
 	ControllerNamespace string
 	ActiveKeyLabel      string
 
-	// GitOpsEnabled selects the go-git transport and policy-backed Git mappings; a
-	// disabled boot serves only the in-memory transport.
+	// Selects the go-git transport and policy-backed mappings; disabled serves only the in-memory transport.
 	GitOpsEnabled bool
 
 	GitAuthorName  string
 	GitAuthorEmail string
 
-	// GitWorktreeDir holds per-target go-git worktrees, defaulting to the mounted
-	// emptyDir /tmp/kubeseal-ui/gitops.
+	// Holds per-target go-git worktrees; defaults to the mounted emptyDir /tmp/kubeseal-ui/gitops.
 	GitWorktreeDir string
 
-	// GitSnapshotTTL is the freshness window for the cross-request branch cache. A
-	// listing resolves Git drift for every Secret it returns; without the cache each
-	// request re-pulls the remote, so the drift reads dominate latency. Within the
-	// window reads are served from memory and refreshed in the background. Drift is
-	// advisory, so staleness up to this bound is acceptable; a successful push
-	// invalidates the branch regardless. Zero disables the cache (pull per request).
+	// Freshness window for the cross-request branch cache; drift is advisory, so staleness up to this bound is acceptable. Zero disables the cache.
 	GitSnapshotTTL time.Duration
 
-	// GitCredentialRefs is a comma-separated list of
-	// auth_ref:mode:username:token_file entries. Token files are read per call, so a
-	// rotated Secret takes effect without a restart, and no token ever enters a
-	// configuration value.
+	// "auth_ref:mode:username:token_file" entries; token files read per call, so a rotated Secret needs no restart.
 	GitCredentialRefs string
 
-	// GitMappingSpecs is the comma-separated
-	// namespace:repo:branch:path_template:auth_ref:mode[:adapter] mapping list, with
-	// '-' standing in for '/' in path templates. Read only when GitOps is enabled.
+	// "namespace:repo:branch:path_template:auth_ref:mode[:adapter]" entries; '-' stands in for '/' in templates.
 	GitMappingSpecs string
 
-	// GitOpsProposalAdapters is the name:type:token_file[:base_url] adapter list. A
-	// mapping may only name an adapter listed here; an unlisted name fails startup,
-	// and an empty list leaves proposal namespaces unserviceable while direct
-	// delivery keeps working. Token files are read per call.
+	// "name:type:token_file[:base_url]" adapter list; a mapping naming an unlisted adapter fails startup.
 	GitOpsProposalAdapters string
 
-	// ConfigPath is the Git-managed policy document holding role definitions and
-	// group-to-role grants. Empty keeps the fallback where an OIDC group named after
-	// a built-in role grants that role everywhere; set, the document is the policy
-	// and that fallback is off. SIGHUP re-reads it.
+	// Git-managed policy document; set, it is the sole grant source, and the OIDC group-name fallback is off.
 	ConfigPath string
 
-	// OTelEndpoint is the OTLP gRPC host:port, without a scheme. Empty disables the
-	// SDK: /metrics serves 503, logs stay plain slog, and no network calls are made.
+	// OTLP gRPC host:port, no scheme; empty disables the SDK entirely.
 	OTelEndpoint string
 
-	// OTelServiceName and OTelServiceVersion land in the resource attributes; the
-	// version falls back to the build info.
+	// Land in resource attributes; version falls back to build info.
 	OTelServiceName    string
 	OTelServiceVersion string
 
 	OTelEnvironment string
 
-	// OTelTraceSampleRatio is the parent-based trace sampling ratio (0, 1];
-	// out-of-range or empty means 0.1.
+	// Parent-based trace sampling ratio (0, 1]; out-of-range or empty means 0.1.
 	OTelTraceSampleRatio string
 
-	// OTelMetricIntervalSeconds is the OTLP metrics push interval; out-of-range or
-	// empty means 30.
+	// OTLP metrics push interval in seconds; out-of-range or empty means 30.
 	OTelMetricIntervalSeconds string
 }
 
@@ -164,8 +131,7 @@ func Load() (Config, error) {
 		OTelMetricIntervalSeconds: os.Getenv("OTEL_METRIC_INTERVAL_SECONDS"),
 	}
 
-	// Set before the environment override so an unset variable keeps the documented default
-	// rather than a zero duration, which would cancel every request on arrival.
+	// Default set before the override so an unset variable keeps it rather than zeroing every request.
 	cfg.APITimeout = DefaultAPITimeout
 	if v := os.Getenv("KUBESEAL_API_TIMEOUT_SECONDS"); v != "" {
 		parsed, sErr := strconv.Atoi(v)
@@ -175,8 +141,7 @@ func Load() (Config, error) {
 		cfg.APITimeout = time.Duration(parsed) * time.Second
 	}
 
-	// The branch cache defaults on; an explicit 0 disables it (pull per request), which is why the
-	// variable is read only when set rather than folded into the struct literal above.
+	// Cache defaults on; explicit 0 disables it, so the variable is only read when set.
 	cfg.GitSnapshotTTL = DefaultGitSnapshotTTL
 	if v := os.Getenv("GITOPS_SNAPSHOT_TTL_SECONDS"); v != "" {
 		parsed, sErr := strconv.Atoi(v)
@@ -229,19 +194,12 @@ func (c Config) validate() error {
 	}
 }
 
-// Ready reports whether the api has enough configuration to serve requests; /readyz
-// uses it to gate kubelet traffic. EnableDecrypt is deliberately excluded — decryption
-// is gated per request, so a boot that only encrypts or only reads can still be ready.
-//
-// The session signing key is included because a pod missing it mounts no /api/v1 routes at all
-// (router.go), so reporting ready would keep it in the Service endpoints while every API call 404s.
+// Ready gates /readyz; the signing key is included because a pod missing it mounts no /api/v1 routes at all, so readiness would keep a dead pod in the endpoints.
 func (c Config) Ready() bool {
 	return c.OIDCIssuer != "" && c.OIDCClientID != "" && c.SessionSigningKey != ""
 }
 
-// String renders the config for startup logging with every sensitive field replaced by
-// "[REDACTED]" per observability.sensitiveKeyMarkers. Issuer URLs are not secret per the
-// threat model, so they flow through.
+// String renders startup logging with sensitive fields replaced by "[REDACTED]"; issuer URLs are not secret.
 func (c Config) String() string {
 	return fmt.Sprintf(
 		"port=%d api_timeout=%s log_level=%s oidc_issuer=%s oidc_client_id=%s enable_decrypt=%t",
@@ -249,8 +207,7 @@ func (c Config) String() string {
 	)
 }
 
-// redactValue duplicates observability's marker check so config can render safely
-// without importing it.
+// redactValue duplicates observability's marker check so config need not import it.
 func redactValue(key, value string) string {
 	if value == "" {
 		return ""
@@ -261,8 +218,7 @@ func redactValue(key, value string) string {
 	return value
 }
 
-// isSensitiveKey mirrors observability.isSensitiveKey; the two marker lists must be
-// updated together.
+// isSensitiveKey mirrors observability.isSensitiveKey; the two marker lists must be updated together.
 func isSensitiveKey(key string) bool {
 	l := strings.ToLower(key)
 	markers := []string{

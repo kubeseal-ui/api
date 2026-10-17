@@ -310,8 +310,7 @@ func (p *Provider) VerifyIDToken(ctx context.Context, idToken, nonce string) (*V
 		return nil, fmt.Errorf("audience mismatch: client_id %q not in aud %v", p.cfg.ClientID, claims.Audience)
 	}
 
-	// The typed fields above cover the default claim names; a configured custom claim has
-	// to be decoded from the raw token map instead.
+	// The typed fields above cover the default claim names; a configured custom claim decodes from the raw token map instead.
 	groups := claims.Groups
 	username := claims.Username
 	if p.cfg.GroupsClaim != "" && p.cfg.GroupsClaim != "groups" || p.cfg.UsernameClaim != "" && p.cfg.UsernameClaim != "preferred_username" {
@@ -381,9 +380,8 @@ func (p *Provider) RefreshTokens(ctx context.Context, refreshToken string) (*Tok
 // revocationHTTPClient bounds the RFC 7009 call so logout cannot hang on a slow issuer.
 var revocationHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
-// RevokeToken posts the refresh token to the issuer's RFC 7009 revocation endpoint, discovered
-// from the same metadata document as the other endpoints. Revocation is optional, so a missing
-// endpoint is not an error and every failure is returned rather than fatal: the caller logs it.
+// RevokeToken posts the refresh token to the issuer's RFC 7009 revocation endpoint; revocation is optional, so a missing
+// endpoint is not an error and every failure is returned for the caller to log.
 func (p *Provider) RevokeToken(ctx context.Context, token string) error {
 	if token == "" {
 		return nil
@@ -420,8 +418,7 @@ func (p *Provider) RevokeToken(ctx context.Context, token string) error {
 	if resp.StatusCode == http.StatusOK {
 		return nil
 	}
-	// An unknown or already-invalidated token is answered 400 invalid_token, which means the
-	// token is not usable: the logout goal is met even though the status is not 200.
+	// 400 invalid_token means the token is already unusable — the logout goal is met even though the status is not 200.
 	if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body), "invalid_token") {
 		return nil
 	}
@@ -462,8 +459,7 @@ func getScopeFromToken(token *oauth2.Token) string {
 	return ""
 }
 
-// CookieOptions returns a cookie with secure defaults. Secure is set true in the literal
-// so gosec G124 stays quiet, then overridden for non-production setups.
+// CookieOptions returns a cookie with secure defaults; Secure is set true in the literal so gosec G124 stays quiet.
 func (p *Provider) CookieOptions(path string, maxAge int) *http.Cookie {
 	cookie := &http.Cookie{
 		Path:     path,

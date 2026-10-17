@@ -8,11 +8,8 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// gitopsAnnotationPrefixes are the annotation namespaces that record how a manifest was applied
-// rather than what it is. They are stripped everywhere a manifest is read or written — the drift
-// comparison, the seal path's normalization, and the projection below — so the three agree. The
-// concrete case: kubectl.kubernetes.io/last-applied-configuration holds the whole object as JSON,
-// which is noise in a file and would carry back every field the normalizer strips.
+// Annotation namespaces recording how a manifest was applied rather than what it is; stripped everywhere they are
+// read or written so drift comparison, sealing normalization, and projection agree (last-applied would carry back every stripped field).
 var gitopsAnnotationPrefixes = []string{
 	"kubectl.kubernetes.io/",
 	"argocd.argoproj.io/",
@@ -22,22 +19,18 @@ var gitopsAnnotationPrefixes = []string{
 	"kustomize.toolkit.fluxcd.io/",
 }
 
-// gitopsLabelPrefixes are the label namespaces that record which tool owns a manifest; ownership
-// is the delivering tool's business, not the Secret's.
+// Label namespaces recording which tool owns a manifest; ownership is the delivering tool's business, not the Secret's.
 var gitopsLabelPrefixes = []string{
 	"argocd.argoproj.io/",
 	"helm.sh/",
 }
 
-// runtimeMetadataFields are assigned by the API server to one live object; carrying them into a
-// manifest records something that was never true of the file, and the next apply would fight them.
+// Assigned by the API server to one live object; carrying them into a manifest records something never true of the file.
 var runtimeMetadataFields = []string{
 	"uid", "resourceVersion", "generation", "creationTimestamp", "managedFields", "selfLink",
 }
 
-// CleanMetadata drops what the cluster and the delivering tool recorded about an object, leaving
-// what its author wrote. Callers that also refuse an owner reference — a claim about another
-// cluster — delete it themselves, since only the seal path has to.
+// CleanMetadata drops what the cluster and the delivering tool recorded about an object, leaving what its author wrote.
 func CleanMetadata(meta map[string]any) {
 	for _, field := range runtimeMetadataFields {
 		delete(meta, field)
@@ -46,9 +39,7 @@ func CleanMetadata(meta map[string]any) {
 	cleanLabels(meta)
 }
 
-// CanonicalManifest is the document every manifest consumer reads: a manifest with the volatile
-// runtime and GitOps-tracking fields stripped, so a comparison sees the spec and the stable
-// metadata without false divergences.
+// CanonicalManifest is the document every manifest consumer reads: volatile runtime and GitOps-tracking fields stripped, so a comparison sees no false divergence.
 func CanonicalManifest(manifest string) (map[string]any, error) {
 	var m map[string]any
 	if err := yaml.Unmarshal([]byte(manifest), &m); err != nil {
@@ -76,20 +67,14 @@ func CanonicalManifest(manifest string) (map[string]any, error) {
 	return m, nil
 }
 
-// ManifestFromObject renders a live object as the manifest its file holds: the cleaning
-// CanonicalManifest applies, encoded as YAML rather than echoed as the API server returned it.
-//
-// Sharing CleanMetadata is what makes the projection idempotent under the comparison —
-// CanonicalManifest of the projection equals CanonicalManifest of the object — which is what lets
-// drift be resolved without depending on which side has been through here. Serving the object
-// raw instead is how a JSON blob carrying managedFields reached the YAML view and the commit.
+// ManifestFromObject renders a live object as the manifest its file holds: the cleaning CanonicalManifest applies,
+// encoded as YAML. Sharing CleanMetadata makes the projection idempotent under the comparison, so drift resolves on either side.
 func ManifestFromObject(object map[string]any) (string, error) {
 	raw, err := json.Marshal(object)
 	if err != nil {
 		return "", fmt.Errorf("marshal sealed secret: %w", err)
 	}
-	// JSON is a YAML subset, so the object takes the comparison's own parse. That is also what
-	// keeps this off the caller's map: unmarshalling into a fresh map copies it.
+	// JSON is a YAML subset, so the object takes the comparison's own parse — into a fresh map, keeping this off the caller's map.
 	doc, err := CanonicalManifest(string(raw))
 	if err != nil {
 		return "", fmt.Errorf("project sealed secret: %w", err)

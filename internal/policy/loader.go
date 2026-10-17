@@ -1,10 +1,5 @@
-// Reading the policy document from disk, and re-reading it on demand.
-//
-// The read is explicit rather than watched: a ConfigMap is projected into a pod as a symlink
-// swap, so a file watch fires on a path that has already been replaced, and the api already
-// has a signal for "re-read your configuration" in SIGHUP. A failed reload therefore keeps
-// the generation that was already valid — falling back to no policy would replace a working
-// grant set with a lockout at the exact moment someone was already fixing the file.
+// Loading the policy document from disk and re-reading it on demand. The read is explicit (SIGHUP), because a
+// ConfigMap symlink swap makes file watches fire on a path already replaced; a failed reload keeps the last valid generation.
 package policy
 
 import (
@@ -25,10 +20,7 @@ type Loader struct {
 	err error // the most recent reload failure; nil once a reload succeeds
 }
 
-// NewLoader reads path and applies it. A document that cannot be read or fails validation is
-// an error rather than something tolerated: at boot there is no previous generation to fall
-// back on, so refusing to start is the only answer that does not serve a policy the operator
-// did not write.
+// NewLoader reads path and applies it; at boot there is no previous generation to fall back on, so any failure refuses to start.
 func NewLoader(path string, store *PolicyStore) (*Loader, error) {
 	loader := &Loader{path: path, store: store}
 	if err := loader.Reload(); err != nil {
@@ -37,9 +29,7 @@ func NewLoader(path string, store *PolicyStore) (*Loader, error) {
 	return loader, nil
 }
 
-// Reload re-reads the file and swaps the store's authorization generation. On failure the
-// store keeps the generation it already had, and Err reports the failure until a later reload
-// succeeds.
+// Reload re-reads the file and swaps the store's generation; on failure the store keeps its previous one.
 func (l *Loader) Reload() error {
 	err := l.apply()
 	l.mu.Lock()
@@ -48,8 +38,7 @@ func (l *Loader) Reload() error {
 	return err
 }
 
-// Err reports the most recent reload failure, or nil when the store holds the newest valid
-// generation. Readiness consults it.
+// Err reports the most recent reload failure, or nil once a reload succeeds; readiness consults it.
 func (l *Loader) Err() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -68,17 +57,14 @@ func (l *Loader) apply() error {
 		return fmt.Errorf("policy document %s: %w", l.path, err)
 	}
 	if hasContent(doc.Git) {
-		// Present but unread. Saying so on every load is the difference between an operator
-		// learning the git half is inert and discovering it from a delivery that landed in
-		// the wrong repository.
+		// Present but unread; saying so keeps an operator from discovering the git half is inert from a misdirected delivery.
 		slog.Warn("policy document has a git section, which this api does not read; namespace mappings come from GITOPS_NAMESPACES",
 			"path", l.path)
 	}
 	return l.store.Apply(doc)
 }
 
-// hasContent reports whether a decoded section carries anything: an absent key, an explicit
-// null, and an empty mapping all mean the section said nothing.
+// hasContent reports whether a decoded section carries anything; absent, null, and empty all mean the section said nothing.
 func hasContent(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) && !bytes.Equal(trimmed, []byte("{}"))

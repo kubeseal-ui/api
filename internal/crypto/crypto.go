@@ -1,7 +1,4 @@
-// Package crypto wraps the Sealed Secrets encryption and decryption primitives
-// in-process — it never shells out to the kubeseal binary. Encryption needs a Provider
-// for the controller's public certificate; decryption additionally needs a
-// PrivateKeyProvider and is reachable only when ENABLE_DECRYPT=true.
+// Package crypto seals and unseals SealedSecrets in-process, never via the kubeseal binary.
 package crypto
 
 import (
@@ -76,24 +73,17 @@ type Provider interface {
 	Get(ctx context.Context) (*x509.Certificate, error)
 }
 
-// PrivateKeyProvider supplies the controller's RSA private keys for decryption. It must
-// return every key the controller still holds: a SealedSecret sealed before a key
-// rotation can only be opened by the key that sealed it, not by the current active key.
+// PrivateKeyProvider must return every key the controller holds, including pre-rotation ones.
 type PrivateKeyProvider interface {
 	PrivateKeys(ctx context.Context) ([]*rsa.PrivateKey, error)
 }
 
-// KeyCacheInvalidator is the optional capability a PrivateKeyProvider has when it caches the key
-// list. DecryptYAML drops that cache and retries once when no supplied key opens the data, which is
-// what makes a bounded cache safe: a key that rotated inside the cache's window is found on the
-// retry instead of being reported as an undecryptable Secret. A provider that does not cache simply
-// does not implement it, and the retry is skipped.
+// KeyCacheInvalidator lets DecryptYAML drop a cached key list and retry before failing.
 type KeyCacheInvalidator interface {
 	InvalidateKeyCache()
 }
 
-// Wrapper encrypts, decrypts, and reseals in-process. All methods are safe for
-// concurrent use.
+// Wrapper seals, unseals, and reseals; all methods are concurrency-safe.
 type Wrapper struct {
 	cert   Provider
 	priv   PrivateKeyProvider
@@ -110,8 +100,7 @@ func New(cert Provider, priv PrivateKeyProvider) *Wrapper {
 	}
 }
 
-// EncryptYAML seals a raw k8s Secret YAML into SealedSecret YAML. The scope pins how
-// tightly the result is bound to a namespace/name.
+// EncryptYAML seals Secret YAML; scope pins how tightly the result binds to namespace/name.
 func (w *Wrapper) EncryptYAML(ctx context.Context, secretYAML string, namespace, name string, scope Scope) (string, error) {
 	pubCert, err := w.cert.Get(ctx)
 	if err != nil {
@@ -129,9 +118,7 @@ func (w *Wrapper) EncryptYAML(ctx context.Context, secretYAML string, namespace,
 		return "", fmt.Errorf("crypto: decode secret YAML: %w", decodeErr)
 	}
 
-	// The encryption label derives from the scope annotations on the input Secret, so the
-	// scope must be set BEFORE sealing: annotating the SealedSecret afterwards produces a
-	// label mismatch on unseal.
+	// Scope annotations must be set before sealing, or unseal hits a label mismatch.
 	if secret.Annotations == nil {
 		secret.Annotations = map[string]string{}
 	}
@@ -153,14 +140,16 @@ func (w *Wrapper) EncryptYAML(ctx context.Context, secretYAML string, namespace,
 		sealed.Spec.Template.Namespace = namespace
 	}
 
+	return encodeSealedSecret(sealed, w.codecs)
+}
+
+// encodeSealedSecret renders a SealedSecret as YAML. The codec emits one-line JSON; converting it
+// keeps Git diffs readable.
+func encodeSealedSecret(sealed *ssv1alpha1.SealedSecret, codecs serializer.CodecFactory) (string, error) {
 	var buf bytes.Buffer
-	encoder := w.codecs.LegacyCodec(ssv1alpha1.SchemeGroupVersion)
-	if err = encoder.Encode(sealed, &buf); err != nil {
+	if err := codecs.LegacyCodec(ssv1alpha1.SchemeGroupVersion).Encode(sealed, &buf); err != nil {
 		return "", fmt.Errorf("crypto: encode sealed secret: %w", err)
 	}
-	// The codec writes JSON. The repository stores YAML, and a one-line JSON document
-	// would make every edit a diff of the whole file, so the output is converted — the
-	// same rendering the kubeseal CLI writes.
 	y, err := sigsyaml.JSONToYAML(buf.Bytes())
 	if err != nil {
 		return "", fmt.Errorf("crypto: encode sealed secret: %w", err)
@@ -177,13 +166,7 @@ func (w *Wrapper) DecryptYAML(ctx context.Context, sealedYAML string) (string, e
 
 	secret, err := w.unseal(ctx, sealedYAML)
 	if err != nil {
-		// A key that rotated after the provider built its list is missing from the map, which arrives
-		// here as an unseal failure. Drop the provider's copy and try once with a fresh list: that
-		// retry is the condition that makes a cached key list acceptable, since without it the cache's
-		// stale window would turn a just-rotated key into a Secret that cannot be revealed at all. The
-		// document is re-parsed rather than the first attempt's object reused, so the retry rests on
-		// nothing about how the library treats its receiver. Every failure pays one extra key fetch,
-		// which is the cheap side of that trade.
+		// No key opened it: drop a cached key list, if the provider keeps one, and retry once.
 		if stale, ok := w.priv.(KeyCacheInvalidator); ok {
 			stale.InvalidateKeyCache()
 			if retried, retryErr := w.unseal(ctx, sealedYAML); retryErr == nil {
@@ -195,8 +178,7 @@ func (w *Wrapper) DecryptYAML(ctx context.Context, sealedYAML string) (string, e
 		return "", err
 	}
 
-	// Render as stringData so the output is human-readable and matches the kubeseal
-	// CLI's unseal output.
+	// Render as stringData to match the kubeseal CLI's unseal output.
 	sd := make(map[string]string, len(secret.Data))
 	for k, v := range secret.Data {
 		sd[k] = string(v)
@@ -211,8 +193,7 @@ func (w *Wrapper) DecryptYAML(ctx context.Context, sealedYAML string) (string, e
 	return string(y), nil
 }
 
-// unseal fetches the controller keys and opens the document with them. It is separate from
-// DecryptYAML so the retry runs the whole sequence again rather than a partial one.
+// unseal fetches the controller keys and opens the document with them.
 func (w *Wrapper) unseal(ctx context.Context, sealedYAML string) (*corev1.Secret, error) {
 	privKeys, err := w.privateKeyMap(ctx)
 	if err != nil {
@@ -224,8 +205,7 @@ func (w *Wrapper) unseal(ctx context.Context, sealedYAML string) (*corev1.Secret
 		return nil, err
 	}
 
-	// UnsealWithoutTemplate rather than Unseal: spec.template.data is unauthenticated and is not
-	// ciphertext, so rendering it would let a document in Git dictate values the reveal path shows.
+	// UnsealWithoutTemplate: spec.template.data is unauthenticated and must never dictate revealed values.
 	secret, err := sealed.UnsealWithoutTemplate(w.codecs, privKeys)
 	if err != nil {
 		return nil, fmt.Errorf("crypto: unseal: %w", err)
@@ -233,9 +213,7 @@ func (w *Wrapper) unseal(ctx context.Context, sealedYAML string) (*corev1.Secret
 	return secret, nil
 }
 
-// privateKeyMap indexes every controller key by its public-key fingerprint; Unseal looks
-// the sealing key up per encrypted value, so secrets sealed before a rotation still open
-// as long as the provider supplies the key that sealed them.
+// privateKeyMap indexes keys by fingerprint so pre-rotation secrets still unseal.
 func (w *Wrapper) privateKeyMap(ctx context.Context) (map[string]*rsa.PrivateKey, error) {
 	keys, err := w.priv.PrivateKeys(ctx)
 	if err != nil {
@@ -262,7 +240,7 @@ type Mutation struct {
 	Op    ResealOp
 }
 
-// ResealOp is the mutation operation for Reseal and ResealMany.
+// ResealOp is a mutation operation for Reseal and ResealMany.
 type ResealOp string
 
 const (
@@ -271,14 +249,10 @@ const (
 	ResealDelete  ResealOp = "delete"
 )
 
-// ErrInvalidMutation marks a batch the caller got wrong — an unknown operation, a key
-// that does not exist, an add over a key that does, or a batch that would empty the
-// Secret — so a handler can answer 4xx instead of blaming the backend.
+// ErrInvalidMutation marks a caller error, so handlers answer 4xx instead of 500.
 var ErrInvalidMutation = errors.New("crypto: invalid mutation")
 
-// ResealMany applies a batch of mutations to an existing SealedSecret in one pass:
-// decrypt internally, apply every change, re-encrypt once. Only the values the caller
-// supplies are accepted; the batch is validated whole before anything is applied.
+// ResealMany decrypts once, applies the whole batch, and re-encrypts once; nothing applies unless every entry validates.
 func (w *Wrapper) ResealMany(ctx context.Context, sealedYAML string, mutations []Mutation) (string, error) {
 	if w.priv == nil {
 		return "", fmt.Errorf("crypto: decrypt is disabled (ENABLE_DECRYPT=false)")
@@ -287,9 +261,7 @@ func (w *Wrapper) ResealMany(ctx context.Context, sealedYAML string, mutations [
 		return "", fmt.Errorf("%w: no mutations given", ErrInvalidMutation)
 	}
 
-	// spec.template.data is plaintext that the controller merges into the Secret at unseal time,
-	// and NewSealedSecret does not carry it forward. Resealing would drop those entries from the
-	// manifest without saying so, so a document that carries any is refused rather than rewritten.
+	// spec.template.data would be silently dropped by a reseal, so refuse documents that carry it.
 	sealed, err := parseSealedSecret(sealedYAML)
 	if err != nil {
 		return "", err
@@ -308,20 +280,16 @@ func (w *Wrapper) ResealMany(ctx context.Context, sealedYAML string, mutations [
 		return "", err
 	}
 
-	// Re-seal at the scope the Secret already carried, never a default: a namespace-wide
-	// Secret re-sealed as strict stops decrypting outside its own namespace, and a
-	// cluster-wide one stops decrypting anywhere else.
+	// Re-seal at the Secret's existing scope, never a default.
 	return w.EncryptYAML(ctx, updated, "", "", scope)
 }
 
-// Reseal is the single-mutation case of ResealMany, routed through it so both share one
-// implementation and one set of rules.
+// Reseal routes a single mutation through ResealMany.
 func (w *Wrapper) Reseal(ctx context.Context, sealedYAML, key, newValue string, op ResealOp) (string, error) {
 	return w.ResealMany(ctx, sealedYAML, []Mutation{{Key: key, Value: newValue, Op: op}})
 }
 
-// ExtractKeys lists a SealedSecret's key names without decrypting, so the UI can offer
-// targets for reveal or patch without exposing values.
+// ExtractKeys lists key names without decrypting, so the UI can offer targets without values.
 func (w *Wrapper) ExtractKeys(yamlStr string) ([]string, error) {
 	ss, err := parseSealedSecret(yamlStr)
 	if err != nil {
@@ -340,8 +308,7 @@ func (w *Wrapper) ValidateSealedSecretYAML(yamlStr string) error {
 	return err
 }
 
-// parseSealedSecret uses a YAMLOrJSONDecoder rather than the scheme's UniversalDecoder,
-// which has no internal version for bitnami.com.
+// parseSealedSecret uses YAMLOrJSONDecoder; the scheme's UniversalDecoder has no internal version for bitnami.com.
 func parseSealedSecret(yamlStr string) (*ssv1alpha1.SealedSecret, error) {
 	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(yamlStr), 4096)
 	var ss ssv1alpha1.SealedSecret
@@ -354,10 +321,7 @@ func parseSealedSecret(yamlStr string) (*ssv1alpha1.SealedSecret, error) {
 	return &ss, nil
 }
 
-// mutateSecretYAML applies a batch to a Secret's data and returns the updated YAML and the
-// sealing scope the Secret already carried. Every mutation is validated against the key set
-// as it stood before the batch, not against the state left by earlier entries, so the
-// outcome cannot depend on the order the client sent; nothing is applied until all pass.
+// mutateSecretYAML applies a mutation batch and returns the updated YAML plus the Secret's sealing scope.
 func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer.CodecFactory) (string, Scope, error) {
 	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(secretYAML), 4096)
 	var secret corev1.Secret
@@ -394,9 +358,7 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 			APIVersion: "v1",
 			Kind:       "Secret",
 		},
-		// Labels, annotations, and owner references are part of the Secret and carry the
-		// sealing scope, so a patch must not drop them; the remaining ObjectMeta fields are
-		// assigned by the API server to one live object and were never true of the file.
+		// These fields carry the sealing scope; the rest of ObjectMeta belongs to the live object.
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            secret.Name,
 			Namespace:       secret.Namespace,
@@ -416,11 +378,7 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 	return buf.String(), scopeFromAnnotations(secret.Annotations), nil
 }
 
-// validateMutations checks every mutation against the key set the Secret carried before the batch
-// and returns an error if any entry is invalid. Deletions count against that starting state, so
-// the count is the net of the whole batch, checked once after validation — a running
-// "would go below one here" check would refuse a delete-then-add batch that keeps the Secret
-// non-empty, purely because the delete came first in the array the client sent.
+// Deletions count against the pre-batch key set, so a delete-then-add batch stays valid.
 func validateMutations(mutations []Mutation, present map[string]bool, startingCount int) error {
 	finalCount := startingCount
 	seen := make(map[string]bool, len(mutations))
@@ -434,9 +392,7 @@ func validateMutations(mutations []Mutation, present map[string]bool, startingCo
 		seen[m.Key] = true
 		switch m.Op {
 		case ResealAdd:
-			// The API server refuses data keys outside the ConfigMap-key rule at unseal, so the
-			// write is refused here rather than after delivery. Delete stays unvalidated: a Secret
-			// sealed before this rule existed may carry a bad key, and removing it must work.
+			// Delete stays unvalidated: a pre-rule Secret may carry a bad key, and removing it must work.
 			if msgs := validation.IsConfigMapKey(m.Key); len(msgs) > 0 {
 				return fmt.Errorf("%w: key %q is not a valid Secret key: %s", ErrInvalidMutation, m.Key, msgs[0])
 			}
@@ -466,12 +422,9 @@ func validateMutations(mutations []Mutation, present map[string]bool, startingCo
 	return nil
 }
 
-// scopeFromAnnotations recovers the sealing scope recorded on a Secret by asking the
-// library which annotations each scope writes, rather than restating the keys here where a
-// rename would silently downgrade every edited Secret to strict.
+// scopeFromAnnotations asks the library which annotations each scope writes, so a rename upstream cannot silently downgrade edited Secrets to strict.
 func scopeFromAnnotations(annotations map[string]string) Scope {
-	// Cluster-wide first: it is the wider grant, so if a Secret somehow carried both
-	// annotations the more permissive reading is the safe one to preserve.
+	// Cluster-wide first: the wider reading is the safe one if both annotations appear.
 	for _, scope := range []Scope{ClusterWideScope, NamespaceWideScope} {
 		probe := map[string]string{}
 		ssv1alpha1.UpdateScopeAnnotations(probe, scope.SealingScope())
@@ -489,8 +442,7 @@ func scopeFromAnnotations(annotations map[string]string) Scope {
 	return StrictScope
 }
 
-// NewTestCrypto returns a Wrapper with a generated RSA keypair, so tests can do real
-// encrypt/decrypt round trips without a live controller.
+// NewTestCrypto builds a Wrapper around a generated RSA keypair for round-trip tests.
 func NewTestCrypto() (*Wrapper, *rsa.PrivateKey, error) {
 	privKey, cert, err := crypto.GeneratePrivateKeyAndCert(2048, 365*24*3600, "test-controller")
 	if err != nil {
@@ -548,8 +500,7 @@ func (f *staticPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, 
 	return []*rsa.PrivateKey{f.key}, nil
 }
 
-// Keeps the kubeseal and runtime imports referenced; the compiler would otherwise reject
-// them as unused.
+// Keeps the kubeseal and runtime imports referenced.
 var (
 	_                = kubeseal.Seal
 	_ runtime.Object = &ssv1alpha1.SealedSecret{}

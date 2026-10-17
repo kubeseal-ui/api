@@ -102,9 +102,7 @@ func (c *KubeClient) ListSealedSecrets(ctx context.Context, namespace string) ([
 }
 
 func projectSealedSecret(obj *unstructured.Unstructured) (SealedSecret, error) {
-	// Projected rather than echoed: what leaves here is displayed as the manifest and, on a sync,
-	// committed as the file, so it is the object's content rather than the API server's record of
-	// it. See ManifestFromObject.
+	// Projected rather than echoed: this is displayed as the manifest and committed on a sync — see ManifestFromObject.
 	manifest, err := ManifestFromObject(obj.Object)
 	if err != nil {
 		return SealedSecret{}, err

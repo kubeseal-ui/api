@@ -1,5 +1,4 @@
-// Package handlers hosts the kubeseal-ui api HTTP handlers: health probes and the protected
-// operations mounted behind authentication and CSRF middleware.
+// Package handlers hosts the kubeseal-ui api HTTP handlers: health probes and the protected operations behind auth+CSRF middleware.
 package handlers
 
 import (
@@ -10,37 +9,28 @@ import (
 	"github.com/kubeseal-ui/api/internal/config"
 )
 
-// jsonResponse writes v as a JSON document with the given status code, so every handler emits a
-// Content-Type header and the response envelope stays consistent.
+// jsonResponse writes v as JSON so every handler emits a Content-Type header and the envelope stays consistent.
 func jsonResponse(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		// The status line is already committed, so a broken connection has no response left to turn
-		// this into; only the transport error is logged.
+		// Status line already committed; nothing to turn this into but the log.
 		slog.Error("failed to encode response body", "error", err)
 	}
 }
 
-// Healthz is the kubelet liveness probe: 200 as long as the process serves HTTP. It deliberately
-// does not check dependencies (OIDC, K8s, cert provider) — those are /readyz. A liveness probe
-// that failed on a sick downstream would have kubelet restart a pod whose api is fine.
+// Healthz is the liveness probe; deliberately dependency-free, or kubelet would restart a pod whose api is fine.
 func Healthz(w http.ResponseWriter, _ *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// Readyz is the kubelet readiness probe: 503 until all required configuration is loaded, so
-// kubelet keeps the pod out of the service endpoints until the api is usable. The contract lives
-// in config.Ready(), so every caller picks up a new readiness requirement from one place.
+// Readyz is the readiness probe: 503 until required configuration is loaded, keeping the pod out of service endpoints.
 func Readyz(w http.ResponseWriter, r *http.Request) {
 	ReadyzWithCheck(nil)(w, r)
 }
 
-// ReadyzWithCheck is Readyz plus a caller-supplied check for state that config.Load() cannot see.
-//
-// A policy document that failed to reload keeps the last valid generation in force — right to serve,
-// but not to serve silently, and readiness is where that becomes visible to a rollout. A nil check
-// keeps the pre-existing behaviour exactly.
+// ReadyzWithCheck adds a caller-supplied check for state config.Load() cannot see — where a failed
+// policy reload (last valid generation still in force) becomes visible to a rollout.
 func ReadyzWithCheck(check func() error) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		cfg, err := config.Load()
