@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/bitnami/sealed-secrets v0.40.0
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.24.1
