@@ -377,51 +377,8 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 	for k := range data {
 		present[k] = true
 	}
-	// Deletions count against the starting state, so a batch that would empty the Secret is refused
-	// as a whole regardless of the order its entries arrive in. The count is the net of the whole
-	// batch, checked once after validation — a running "<= 1 before this delete" check would refuse a
-	// delete-then-add batch that keeps the Secret non-empty, purely because the delete came first in
-	// the array the client sent.
-	finalCount := len(data)
-	seen := make(map[string]bool, len(mutations))
-	for _, m := range mutations {
-		if m.Key == "" {
-			return "", StrictScope, fmt.Errorf("%w: mutation has an empty key", ErrInvalidMutation)
-		}
-		if seen[m.Key] {
-			return "", StrictScope, fmt.Errorf("%w: key %q appears twice in one batch", ErrInvalidMutation, m.Key)
-		}
-		seen[m.Key] = true
-		switch m.Op {
-		case ResealAdd:
-			// The API server refuses data keys outside the ConfigMap-key rule at unseal, so the
-			// write is refused here rather than after delivery. Delete stays unvalidated: a Secret
-			// sealed before this rule existed may carry a bad key, and removing it must work.
-			if msgs := validation.IsConfigMapKey(m.Key); len(msgs) > 0 {
-				return "", StrictScope, fmt.Errorf("%w: key %q is not a valid Secret key: %s", ErrInvalidMutation, m.Key, msgs[0])
-			}
-			if present[m.Key] {
-				return "", StrictScope, fmt.Errorf("%w: key %q already exists (use replace)", ErrInvalidMutation, m.Key)
-			}
-			finalCount++
-		case ResealReplace:
-			if msgs := validation.IsConfigMapKey(m.Key); len(msgs) > 0 {
-				return "", StrictScope, fmt.Errorf("%w: key %q is not a valid Secret key: %s", ErrInvalidMutation, m.Key, msgs[0])
-			}
-			if !present[m.Key] {
-				return "", StrictScope, fmt.Errorf("%w: key %q does not exist (use add)", ErrInvalidMutation, m.Key)
-			}
-		case ResealDelete:
-			if !present[m.Key] {
-				return "", StrictScope, fmt.Errorf("%w: key %q does not exist", ErrInvalidMutation, m.Key)
-			}
-			finalCount--
-		default:
-			return "", StrictScope, fmt.Errorf("%w: unknown operation %q", ErrInvalidMutation, m.Op)
-		}
-	}
-	if finalCount < 1 {
-		return "", StrictScope, fmt.Errorf("%w: cannot delete the final key", ErrInvalidMutation)
+	if err := validateMutations(mutations, present, len(data)); err != nil {
+		return "", StrictScope, err
 	}
 
 	for _, m := range mutations {
@@ -457,6 +414,56 @@ func mutateSecretYAML(secretYAML string, mutations []Mutation, codecs serializer
 		return "", StrictScope, fmt.Errorf("crypto: encode mutated secret: %w", err)
 	}
 	return buf.String(), scopeFromAnnotations(secret.Annotations), nil
+}
+
+// validateMutations checks every mutation against the key set the Secret carried before the batch
+// and returns an error if any entry is invalid. Deletions count against that starting state, so
+// the count is the net of the whole batch, checked once after validation — a running
+// "would go below one here" check would refuse a delete-then-add batch that keeps the Secret
+// non-empty, purely because the delete came first in the array the client sent.
+func validateMutations(mutations []Mutation, present map[string]bool, startingCount int) error {
+	finalCount := startingCount
+	seen := make(map[string]bool, len(mutations))
+	for _, m := range mutations {
+		if m.Key == "" {
+			return fmt.Errorf("%w: mutation has an empty key", ErrInvalidMutation)
+		}
+		if seen[m.Key] {
+			return fmt.Errorf("%w: key %q appears twice in one batch", ErrInvalidMutation, m.Key)
+		}
+		seen[m.Key] = true
+		switch m.Op {
+		case ResealAdd:
+			// The API server refuses data keys outside the ConfigMap-key rule at unseal, so the
+			// write is refused here rather than after delivery. Delete stays unvalidated: a Secret
+			// sealed before this rule existed may carry a bad key, and removing it must work.
+			if msgs := validation.IsConfigMapKey(m.Key); len(msgs) > 0 {
+				return fmt.Errorf("%w: key %q is not a valid Secret key: %s", ErrInvalidMutation, m.Key, msgs[0])
+			}
+			if present[m.Key] {
+				return fmt.Errorf("%w: key %q already exists (use replace)", ErrInvalidMutation, m.Key)
+			}
+			finalCount++
+		case ResealReplace:
+			if msgs := validation.IsConfigMapKey(m.Key); len(msgs) > 0 {
+				return fmt.Errorf("%w: key %q is not a valid Secret key: %s", ErrInvalidMutation, m.Key, msgs[0])
+			}
+			if !present[m.Key] {
+				return fmt.Errorf("%w: key %q does not exist (use add)", ErrInvalidMutation, m.Key)
+			}
+		case ResealDelete:
+			if !present[m.Key] {
+				return fmt.Errorf("%w: key %q does not exist", ErrInvalidMutation, m.Key)
+			}
+			finalCount--
+		default:
+			return fmt.Errorf("%w: unknown operation %q", ErrInvalidMutation, m.Op)
+		}
+	}
+	if finalCount < 1 {
+		return fmt.Errorf("%w: cannot delete the final key", ErrInvalidMutation)
+	}
+	return nil
 }
 
 // scopeFromAnnotations recovers the sealing scope recorded on a Secret by asking the
