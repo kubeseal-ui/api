@@ -94,7 +94,7 @@ func (e *ConflictError) Error() string {
 
 var ErrNotFound = errors.New("git target not found")
 
-// ErrNoHistory: no earlier content, or the transport cannot read history at all.
+// ErrNoHistory reports no earlier content, or a transport that cannot read history at all.
 var ErrNoHistory = errors.New("git target has no previous version")
 
 type localEntry struct {
