@@ -3,6 +3,7 @@ package crypto
 import (
 	"context"
 	"crypto/rsa"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -359,6 +360,137 @@ func TestResealDeleteLastKeyFails(t *testing.T) {
 	_, err = w.Reseal(t.Context(), sealed, "only", "", ResealDelete)
 	if err == nil {
 		t.Fatal("expected error when deleting the final key")
+	}
+}
+
+// TestSealMutationsNeedsNoPrivateKey pins the blind path: a wrapper built without a private-key
+// provider can still add, replace, and delete entries, because only the certificate is used.
+func TestSealMutationsNeedsNoPrivateKey(t *testing.T) {
+	sealer, _ := mustNewTestCrypto(t)
+	sealed, err := sealer.EncryptYAML(t.Context(), SecretYAML("secret", "default", map[string]string{
+		"existing": "old-value",
+	}, ""), "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	blind := New(sealer.cert, nil)
+	out, err := blind.SealMutations(t.Context(), sealed, []Mutation{
+		{Key: "added", Value: "new-value", Op: ResealAdd},
+	})
+	if err != nil {
+		t.Fatalf("SealMutations: %v", err)
+	}
+
+	decrypted, err := sealer.DecryptYAML(t.Context(), out)
+	if err != nil {
+		t.Fatalf("DecryptYAML after blind edit: %v", err)
+	}
+	if !strings.Contains(decrypted, "existing: old-value") {
+		t.Errorf("existing key should be preserved: %s", decrypted)
+	}
+	if !strings.Contains(decrypted, "added: new-value") {
+		t.Errorf("added key should be present: %s", decrypted)
+	}
+}
+
+// TestSealMutationsCarriesEveryUntouchedEntryByteForByte is what makes the blind path safe: only the
+// entries named by the batch change, so a caller who cannot decrypt still cannot corrupt the rest.
+func TestSealMutationsCarriesEveryUntouchedEntryByteForByte(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+	sealed, err := w.EncryptYAML(t.Context(), SecretYAML("secret", "default", map[string]string{
+		"keep":   "keep-value",
+		"change": "old-value",
+		"remove": "remove-value",
+	}, ""), "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+	before, err := parseSealedSecret(sealed)
+	if err != nil {
+		t.Fatalf("parse before: %v", err)
+	}
+
+	out, err := w.SealMutations(t.Context(), sealed, []Mutation{
+		{Key: "change", Value: "new-value", Op: ResealReplace},
+		{Key: "remove", Op: ResealDelete},
+		{Key: "added", Value: "added-value", Op: ResealAdd},
+	})
+	if err != nil {
+		t.Fatalf("SealMutations: %v", err)
+	}
+	after, err := parseSealedSecret(out)
+	if err != nil {
+		t.Fatalf("parse after: %v", err)
+	}
+
+	if after.Spec.EncryptedData["keep"] != before.Spec.EncryptedData["keep"] {
+		t.Error("an entry the batch did not name must not be resealed")
+	}
+	if after.Spec.EncryptedData["change"] == before.Spec.EncryptedData["change"] {
+		t.Error("a replaced entry must carry new ciphertext")
+	}
+	if _, ok := after.Spec.EncryptedData["remove"]; ok {
+		t.Error("a deleted entry must be gone")
+	}
+	if _, ok := after.Spec.EncryptedData["added"]; !ok {
+		t.Error("an added entry must be present")
+	}
+}
+
+// TestSealMutationsKeepsTheSealingScope proves the new entries were sealed under the object's own
+// scope: a strict label mismatched with the annotations would fail to unseal.
+func TestSealMutationsKeepsTheSealingScope(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+	sealed, err := w.EncryptYAML(t.Context(), SecretYAML("secret", "default", map[string]string{
+		"existing": "old-value",
+	}, ""), "default", "secret", NamespaceWideScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+	before, err := parseSealedSecret(sealed)
+	if err != nil {
+		t.Fatalf("parse before: %v", err)
+	}
+
+	out, err := w.SealMutations(t.Context(), sealed, []Mutation{{Key: "added", Value: "new-value", Op: ResealAdd}})
+	if err != nil {
+		t.Fatalf("SealMutations: %v", err)
+	}
+	after, err := parseSealedSecret(out)
+	if err != nil {
+		t.Fatalf("parse after: %v", err)
+	}
+	for key, want := range before.Annotations {
+		if after.Annotations[key] != want {
+			t.Errorf("annotation %q changed from %q to %q", key, want, after.Annotations[key])
+		}
+	}
+	decrypted, err := w.DecryptYAML(t.Context(), out)
+	if err != nil {
+		t.Fatalf("DecryptYAML after blind edit: %v", err)
+	}
+	if !strings.Contains(decrypted, "added: new-value") {
+		t.Errorf("added key did not survive a namespace-wide unseal: %s", decrypted)
+	}
+}
+
+// TestSealMutationsRefusesTheLegacyDataBlob: spec.data is one opaque pre-v0.11 blob, so it cannot be
+// edited key by key without decrypting all of it.
+func TestSealMutationsRefusesTheLegacyDataBlob(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+	const legacy = `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: secret
+  namespace: default
+spec:
+  data: AgAAAA==
+  encryptedData: {}
+`
+	_, err := w.SealMutations(t.Context(), legacy, []Mutation{{Key: "added", Value: "v", Op: ResealAdd}})
+	if !errors.Is(err, ErrInvalidMutation) {
+		t.Fatalf("error = %v, want ErrInvalidMutation", err)
 	}
 }
 

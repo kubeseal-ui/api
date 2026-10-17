@@ -121,11 +121,11 @@ func TestRevealRecordsOutcomeNotAttempt(t *testing.T) {
 	}
 }
 
-// TestDiffEmitsSecurityEvent pins that the diff endpoint is audited: it decrypts the complete Secret
-// internally to produce the before/after pair, so it belongs in the same event stream as reveal and
-// patch even though it returns ciphertext only. The event's key field carries every key the batch
-// names, sorted, so one reviewed change is one audit record that says what it touched regardless of
-// the order the client listed it in.
+// TestDiffEmitsSecurityEvent pins that the diff endpoint is audited: it names every key the batch
+// touches, so it belongs in the same event stream as reveal and patch even though it returns
+// ciphertext only and never decrypts. The event's key field carries every key the batch names,
+// sorted, so one reviewed change is one audit record that says what it touched regardless of the
+// order the client listed it in.
 func TestDiffEmitsSecurityEvent(t *testing.T) {
 	sink := &eventSink{}
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)

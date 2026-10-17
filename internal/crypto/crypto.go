@@ -289,6 +289,81 @@ func (w *Wrapper) Reseal(ctx context.Context, sealedYAML, key, newValue string, 
 	return w.ResealMany(ctx, sealedYAML, []Mutation{{Key: key, Value: newValue, Op: op}})
 }
 
+// SealMutations applies a batch to a SealedSecret without decrypting anything: add and replace
+// seal only the value they introduce, delete drops one entry, and every other entry is carried
+// through untouched. Only the controller's public certificate is needed.
+func (w *Wrapper) SealMutations(ctx context.Context, sealedYAML string, mutations []Mutation) (string, error) {
+	if len(mutations) == 0 {
+		return "", fmt.Errorf("%w: no mutations given", ErrInvalidMutation)
+	}
+	sealed, err := parseSealedSecret(sealedYAML)
+	if err != nil {
+		return "", err
+	}
+	// spec.template.data is unauthenticated and overrides sealed values; spec.data is one opaque
+	// legacy blob holding every entry. Neither can be edited one key at a time.
+	if len(sealed.Spec.Template.Data) > 0 {
+		return "", fmt.Errorf("%w: spec.template.data is not carried across a reseal", ErrInvalidMutation)
+	}
+	if len(sealed.Spec.Data) > 0 {
+		return "", fmt.Errorf("%w: spec.data is a single legacy blob and cannot be edited key by key", ErrInvalidMutation)
+	}
+
+	present := make(map[string]bool, len(sealed.Spec.EncryptedData))
+	for key := range sealed.Spec.EncryptedData {
+		present[key] = true
+	}
+	if err := validateMutations(mutations, present, len(present)); err != nil {
+		return "", err
+	}
+
+	var pubKey *rsa.PublicKey
+	for _, m := range mutations {
+		if m.Op == ResealDelete {
+			delete(sealed.Spec.EncryptedData, m.Key)
+			continue
+		}
+		if pubKey == nil {
+			if w.cert == nil {
+				return "", fmt.Errorf("crypto: no certificate provider configured")
+			}
+			cert, certErr := w.cert.Get(ctx)
+			if certErr != nil {
+				return "", fmt.Errorf("crypto: fetch cert: %w", certErr)
+			}
+			var ok bool
+			pubKey, ok = cert.PublicKey.(*rsa.PublicKey)
+			if !ok {
+				return "", fmt.Errorf("crypto: cert public key is not RSA (got %T)", cert.PublicKey)
+			}
+		}
+		// Seal through the library so the strict-scope label is derived exactly as kubeseal derives it.
+		one, sealErr := ssv1alpha1.NewSealedSecret(w.codecs, pubKey, &corev1.Secret{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+			ObjectMeta: metav1.ObjectMeta{Name: sealed.Name, Namespace: sealed.Namespace, Annotations: sealed.Annotations},
+			StringData: map[string]string{m.Key: m.Value},
+		})
+		if sealErr != nil {
+			return "", fmt.Errorf("crypto: seal key %q: %w", m.Key, sealErr)
+		}
+		value, ok := one.Spec.EncryptedData[m.Key]
+		if !ok {
+			return "", fmt.Errorf("crypto: seal key %q: no ciphertext produced", m.Key)
+		}
+		sealed.Spec.EncryptedData[m.Key] = value
+	}
+
+	// Server-owned fields are not part of the manifest written to Git.
+	sealed.Status = nil
+	sealed.ResourceVersion = ""
+	sealed.UID = ""
+	sealed.Generation = 0
+	sealed.CreationTimestamp = metav1.Time{}
+	sealed.DeletionTimestamp = nil
+	sealed.ManagedFields = nil
+	return encodeSealedSecret(sealed, w.codecs)
+}
+
 // ExtractKeys lists key names without decrypting, so the UI can offer targets without values.
 func (w *Wrapper) ExtractKeys(yamlStr string) ([]string, error) {
 	ss, err := parseSealedSecret(yamlStr)

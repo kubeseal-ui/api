@@ -118,10 +118,12 @@ Built from the `kubeseal-ui-frontend` repository, not this one: its own `Dockerf
 
 - The cluster client is read-only: the API reads Secrets and namespaces and writes only to Git, so a
   delivery reaches the cluster through reconciliation and never through this service.
-- Reveal and reseal decrypt server-side, with the controller's private keys read from the labelled
-  Secrets under the API's own RBAC. Plaintext is scoped to the request that carries it and is never
-  persisted.
+- Reveal decrypts server-side, with the controller's private keys read from the labelled Secrets under the
+  API's own RBAC. Editing needs only the public certificate: new values are sealed, untouched entries are
+  carried through as they are, and no existing plaintext is read. Plaintext is scoped to the request that
+  carries it and is never persisted.
 - Reveal is opt-in per deployment (`ENABLE_DECRYPT`), and a namespace's grant must still permit it.
+  Create and edit work without it.
 - No value ever reaches a log or a security event: an event names the Secret, the operation, and the
   result, and nothing more.
 - OIDC authentication with PKCE, HttpOnly session cookies, and CSRF protection on state-changing

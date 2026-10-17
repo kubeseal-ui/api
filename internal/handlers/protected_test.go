@@ -369,8 +369,8 @@ stringData:
 }
 
 // TestResealRejectsAnInvalidBatch verifies that a mutation the crypto layer refuses reaches the caller
-// as a 400 naming the request, not as a 502 blaming the backend. Whether a key exists is only knowable
-// after decryption, so this is the path that carries that refusal out of the crypto layer.
+// as a 400 naming the request, not as a 502 blaming the backend. Whether a key exists is knowable from
+// the sealed manifest's key names, so this is the path that carries that refusal out of the crypto layer.
 func TestResealRejectsAnInvalidBatch(t *testing.T) {
 	w, _, err := crypto.NewTestCrypto()
 	if err != nil {
@@ -410,9 +410,9 @@ stringData:
 // batch refused from the body alone — here an operation that is not one of the three — is refused
 // before the key is claimed, so a corrected retry can reuse the key the client chose.
 //
-// This holds for body-only refusals, not for rule violations: whether a key exists is only knowable
-// after decryption, which is after the claim. Claiming early is the deliberate trade — the claim is
-// what stops a duplicate from paying for a second decrypt.
+// This holds for body-only refusals, not for rule violations: whether a key exists needs the live
+// manifest, which is read after the claim. Claiming early is the deliberate trade — the claim is what
+// stops a duplicate from being processed twice.
 func TestResealInvalidBatchDoesNotSpendTheIdempotencyKey(t *testing.T) {
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
 	// Refused while parsing: the operation is not one of the three.
@@ -586,6 +586,103 @@ func TestDiffHandlerRequiresIdempotencyKey(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 	assertErrorEnvelope(t, rr, "MISSING_IDEMPOTENCY_KEY", "Missing Idempotency-Key", "")
+}
+
+// TestResealNeedsSealNotDecrypt pins the read/write split: staging a change needs secret:seal only,
+// because the server seals the values it is given and never opens the manifest. It also runs with
+// ENABLE_DECRYPT off, which no longer disables editing.
+func TestResealNeedsSealNotDecrypt(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := w.EncryptYAML(t.Context(), `apiVersion: v1
+kind: Secret
+metadata:
+  name: name
+  namespace: ns
+stringData:
+  existing: old
+`, "ns", "name", crypto.StrictScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, live, "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", Scope: "strict", YAML: live}}}, w, false)
+
+	rr := httptest.NewRecorder()
+	req := protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values",
+		batchRequest(t, "abc", mutation("added", "add", "new-value")),
+		protectedIdentity(policy.SecretSeal))
+	req.Header.Set("Idempotency-Key", "blind-1")
+	h.ResealHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var resp resealResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := w.DecryptYAML(t.Context(), resp.YAML)
+	if err != nil {
+		t.Fatalf("DecryptYAML after blind patch: %v", err)
+	}
+	if !strings.Contains(decrypted, "existing: old") || !strings.Contains(decrypted, "added: new-value") {
+		t.Fatalf("blind patch did not preserve and add: %s", decrypted)
+	}
+}
+
+// TestResealClusterWideRequiresAccessManage mirrors the create rule: a value sealed cluster-wide is
+// readable in every namespace, so editing one needs access:manage on top of secret:seal.
+func TestResealClusterWideRequiresAccessManage(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := w.EncryptYAML(t.Context(), `apiVersion: v1
+kind: Secret
+metadata:
+  name: name
+  namespace: ns
+stringData:
+  existing: old
+`, "ns", "name", crypto.ClusterWideScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, live, "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "ns", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", Scope: "cluster-wide", YAML: live}}}, w, false)
+
+	denied := httptest.NewRecorder()
+	deniedReq := protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values",
+		batchRequest(t, "abc", mutation("added", "add", "new-value")),
+		protectedIdentity(policy.SecretSeal))
+	deniedReq.Header.Set("Idempotency-Key", "blind-denied")
+	h.ResealHandler(denied, deniedReq)
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 without access:manage: %s", denied.Code, denied.Body.String())
+	}
+	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied: missing capability access:manage", "")
+
+	allowed := httptest.NewRecorder()
+	allowedReq := protectedRequest(http.MethodPatch, "/api/v1/secrets/ns/name/values",
+		batchRequest(t, "abc", mutation("added", "add", "new-value")),
+		protectedIdentity(policy.SecretSeal, policy.AccessManage))
+	allowedReq.Header.Set("Idempotency-Key", "blind-allowed")
+	h.ResealHandler(allowed, allowedReq)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with access:manage: %s", allowed.Code, allowed.Body.String())
+	}
 }
 
 func TestDecryptRejectsGitLiveDriftBeforeDecrypt(t *testing.T) {

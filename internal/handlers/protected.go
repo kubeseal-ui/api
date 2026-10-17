@@ -855,6 +855,12 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
+	// A cluster-wide value is readable in every namespace, so editing one widens the blast radius
+	// the same way creating one does.
+	if secret.Scope == "cluster-wide" && !requireCapability(w, r, policy.AnyNamespace, policy.AccessManage) {
+		result = opResultDenied
+		return
+	}
 	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false, false)
 	if gitErr != nil {
 		result = refuseGitRead(w, r, gitErr)
@@ -931,18 +937,19 @@ func mutationSummary(mutations []mutationRequest) []map[string]string {
 // DiffHandler computes an encrypted before/after diff for a batch of key changes without persisting anything.
 func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) {
 	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
-	// Diff decrypts the full Secret internally, so it is audited like reveal and patch.
+	// Diff seals only the values it introduces, but it still names every key the batch touches, so
+	// it is audited like patch and reveal.
 	var changedKeys string
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "diff", namespace, name, changedKeys, "", result) }()
 
-	if !requireCapability(w, r, namespace, policy.SecretSeal, policy.SecretDecrypt) {
+	if !requireCapability(w, r, namespace, policy.SecretSeal) {
 		result = opResultDenied
 		return
 	}
-	if !h.EnableDecrypt || h.Crypto == nil {
+	if h.Crypto == nil {
 		result = opResultDisabled
-		writeError(w, r, http.StatusForbidden, "DECRYPT_DISABLED", "Decrypt is disabled")
+		writeError(w, r, http.StatusServiceUnavailable, "CRYPTO_UNAVAILABLE", "Crypto unavailable")
 		return
 	}
 	var req struct {
@@ -982,6 +989,12 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
+	// A cluster-wide value is readable in every namespace, so editing one widens the blast radius
+	// the same way creating one does.
+	if secret.Scope == "cluster-wide" && !requireCapability(w, r, policy.AnyNamespace, policy.AccessManage) {
+		result = opResultDenied
+		return
+	}
 	transport := h.requestTransport()
 	git, gitErr := h.gitStatus(r.Context(), transport, namespace, name, secret.YAML, req.BaseCommit, false, false)
 	if gitErr != nil {
@@ -1007,7 +1020,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
 	}
-	after, err := h.Crypto.ResealMany(r.Context(), secret.YAML, mutations)
+	after, err := h.Crypto.SealMutations(r.Context(), secret.YAML, mutations)
 	if err != nil {
 		if errors.Is(err, crypto.ErrInvalidMutation) {
 			result = opResultInvalidRequest
@@ -1015,8 +1028,8 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		result = opResultFailed
-		slog.Error("reseal secret failed", "namespace", namespace, "name", name, "keys", changedKeys, "request_id", requestID(r), "error", err)
-		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to reseal secret")
+		slog.Error("seal secret failed", "namespace", namespace, "name", name, "keys", changedKeys, "request_id", requestID(r), "error", err)
+		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to apply changes")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -1024,7 +1037,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 	result = opResultSuccess
 }
 
-// ResealHandler applies the batch and returns the resealed manifest, re-validating against the live Secret at confirm time.
+// ResealHandler applies the batch without decrypting, then re-validates against the live Secret at confirm time.
 func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request) {
 	namespace, name := chi.URLParam(r, "namespace"), chi.URLParam(r, "name")
 	// Populated once the body is parsed, so the audit record names every key the patch touched.
@@ -1032,13 +1045,13 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 	result := opResultFailed
 	defer func() { h.emitSecurityEvent(r, "patch", namespace, name, changedKeys, "", result) }()
 
-	if !requireCapability(w, r, namespace, policy.SecretSeal, policy.SecretDecrypt) {
+	if !requireCapability(w, r, namespace, policy.SecretSeal) {
 		result = opResultDenied
 		return
 	}
-	if !h.EnableDecrypt || h.Crypto == nil {
+	if h.Crypto == nil {
 		result = opResultDisabled
-		writeError(w, r, http.StatusForbidden, "DECRYPT_DISABLED", "Decrypt is disabled")
+		writeError(w, r, http.StatusServiceUnavailable, "CRYPTO_UNAVAILABLE", "Crypto unavailable")
 		return
 	}
 	var req struct {
@@ -1077,6 +1090,12 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
+	// A cluster-wide value is readable in every namespace, so editing one widens the blast radius
+	// the same way creating one does.
+	if secret.Scope == "cluster-wide" && !requireCapability(w, r, policy.AnyNamespace, policy.AccessManage) {
+		result = opResultDenied
+		return
+	}
 	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false, false)
 	if gitErr != nil {
 		result = refuseGitRead(w, r, gitErr)
@@ -1087,7 +1106,7 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
-	sealed, err := h.Crypto.ResealMany(r.Context(), secret.YAML, mutations)
+	sealed, err := h.Crypto.SealMutations(r.Context(), secret.YAML, mutations)
 	if err != nil {
 		if errors.Is(err, crypto.ErrInvalidMutation) {
 			result = opResultInvalidRequest
@@ -1095,8 +1114,8 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 			return
 		}
 		result = opResultFailed
-		slog.Error("reseal secret failed", "namespace", namespace, "name", name, "keys", changedKeys, "request_id", requestID(r), "error", err)
-		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to reseal secret")
+		slog.Error("seal secret failed", "namespace", namespace, "name", name, "keys", changedKeys, "request_id", requestID(r), "error", err)
+		writeError(w, r, http.StatusBadGateway, "RESEAL_FAILED", "Unable to apply changes")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
