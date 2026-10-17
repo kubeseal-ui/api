@@ -123,6 +123,12 @@ func (h *ProtectedHandlers) claimIdempotency(r *http.Request) bool {
 	return h.idempotency.claim(key)
 }
 
+// capabilityDeniedMessage names the capability the request was refused for, so a 403 maps
+// straight to the grant the identity lacks instead of a generic denial.
+func capabilityDeniedMessage(want policy.Capability) string {
+	return "Access denied: missing capability " + string(want)
+}
+
 // requireCapability authorizes a request against the capabilities the identity holds in namespace.
 // policy.AnyNamespace is for platform-level checks such as cluster-wide creation, which a
 // namespace-scoped grant deliberately does not satisfy; a request that cannot name a namespace at
@@ -135,7 +141,7 @@ func requireCapability(w http.ResponseWriter, r *http.Request, namespace string,
 	}
 	for _, want := range required {
 		if !identity.HasCapabilityIn(namespace, string(want)) {
-			writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+			writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", capabilityDeniedMessage(want))
 			return false
 		}
 	}
@@ -153,7 +159,7 @@ func hasCapabilityAnywhere(w http.ResponseWriter, r *http.Request, required ...p
 	}
 	for _, want := range required {
 		if !identity.HasCapabilityAnywhere(string(want)) {
-			writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+			writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", capabilityDeniedMessage(want))
 			return false
 		}
 	}

@@ -59,7 +59,7 @@ func TestScopedGrantAuthorizesOnlyItsNamespace(t *testing.T) {
 	if denied.Code != http.StatusForbidden {
 		t.Fatalf("development status = %d, want 403", denied.Code)
 	}
-	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied", "")
+	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied: missing capability metadata:read", "")
 }
 
 // The namespace listing is filtered rather than gatekept: a caller with a grant in one namespace
@@ -281,7 +281,7 @@ func TestEncryptRequiresSealCapabilityInTheTargetNamespace(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403: %s", rr.Code, rr.Body.String())
 	}
-	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied", "")
+	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied: missing capability secret:seal", "")
 }
 
 // Delivery is an act in the namespace the mapping resolved to, so the grant has to be there — the

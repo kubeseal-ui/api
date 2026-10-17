@@ -46,7 +46,7 @@ func TestGitOpsDryRunHandlerRequiresModeCapability(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rr.Code)
 	}
-	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied", "")
+	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied: missing capability gitops:propose", "")
 }
 
 func TestGitOpsDryRunResolvesMappingAndReturnsEncryptedDiff(t *testing.T) {

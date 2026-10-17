@@ -94,7 +94,7 @@ func TestNamespacesHandlerRequiresMetadataRead(t *testing.T) {
 	if denied.Code != http.StatusForbidden {
 		t.Fatalf("denied status = %d, want 403", denied.Code)
 	}
-	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied", "")
+	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied: missing capability metadata:read", "")
 	allowed := httptest.NewRecorder()
 	h.NamespacesHandler(allowed, protectedRequest(http.MethodGet, "/api/v1/namespaces", "", protectedIdentity(policy.MetadataRead)))
 	if allowed.Code != http.StatusOK {
@@ -224,7 +224,7 @@ func TestProtectedErrorsUseRequestIDEnvelope(t *testing.T) {
 	req.Header.Set("X-Request-Id", "req_test")
 	rr := httptest.NewRecorder()
 	h.NamespacesHandler(rr, req)
-	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied", "req_test")
+	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied: missing capability metadata:read", "req_test")
 }
 
 func TestProtectedHandlersRejectInvalidKubernetesNames(t *testing.T) {
@@ -645,7 +645,7 @@ func TestEncryptClusterWideRequiresAccessManage(t *testing.T) {
 	if denied.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 without access:manage: %s", denied.Code, denied.Body.String())
 	}
-	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied", "")
+	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied: missing capability access:manage", "")
 
 	allowed := httptest.NewRecorder()
 	h.EncryptHandler(allowed, protectedRequest(http.MethodPost, "/api/v1/secrets/encrypt", body, protectedIdentity(policy.SecretSeal, policy.AccessManage)))

@@ -297,9 +297,9 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 	mapping := cr.Mapping
-	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
+	if required, ok := hasGitCapability(r, mapping.Namespace, mapping.Mode); !ok {
 		h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "denied")
-		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", capabilityDeniedMessage(required))
 		return
 	}
 	if err = cr.validateManifest(); err != nil {
@@ -387,10 +387,10 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	change, mapping := cr.Change, cr.Mapping
-	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
+	if required, ok := hasGitCapability(r, mapping.Namespace, mapping.Mode); !ok {
 		h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "denied")
 		metrics.RecordGitOpsDelivery(string(mapping.Mode), "denied")
-		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", capabilityDeniedMessage(required))
 		return
 	}
 	// Checked before the idempotency store is consulted: a payload that cannot be delivered is not
@@ -485,10 +485,11 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 
 // hasGitCapability reports whether the caller may deliver into the namespace the mapping resolved
 // to: delivering into a namespace is an act in that namespace, so a grant scoped elsewhere does
-// not carry the capability here.
-func hasGitCapability(r *http.Request, namespace string, mode policy.GitDeliveryMode) bool {
+// not carry the capability here. It returns the capability the mode requires so a denial can name it.
+func hasGitCapability(r *http.Request, namespace string, mode policy.GitDeliveryMode) (policy.Capability, bool) {
 	id, _ := authmw.GetIdentity(r.Context())
-	return id.HasCapabilityIn(namespace, string(policy.GitOpsCapabilityRequired(mode)))
+	required := policy.GitOpsCapabilityRequired(mode)
+	return required, id.HasCapabilityIn(namespace, string(required))
 }
 
 // GitOpsSyncStatusHandler returns the drift status between the live cluster and Git, locating the
@@ -599,9 +600,9 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusNotFound, "MAPPING_NOT_FOUND", "No Git mapping for namespace")
 		return
 	}
-	if !hasGitCapability(r, mapping.Namespace, mapping.Mode) {
+	if required, ok := hasGitCapability(r, mapping.Namespace, mapping.Mode); !ok {
 		h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "denied")
-		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", "Access denied")
+		writeError(w, r, http.StatusForbidden, "CAPABILITY_DENIED", capabilityDeniedMessage(required))
 		return
 	}
 	if mapping.Mode == policy.GitDeliveryProposal && mapping.ProposalAdapter == nil {
