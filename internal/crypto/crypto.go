@@ -300,10 +300,10 @@ func (w *Wrapper) SealMutations(ctx context.Context, sealedYAML string, mutation
 	if err != nil {
 		return "", err
 	}
-	// spec.template.data is unauthenticated and overrides sealed values; spec.data is one opaque
-	// legacy blob holding every entry. Neither can be edited one key at a time.
+	// spec.template.data is unauthenticated and overrides sealed values at unseal; spec.data is one
+	// opaque legacy blob holding every entry. Neither can be edited key by key.
 	if len(sealed.Spec.Template.Data) > 0 {
-		return "", fmt.Errorf("%w: spec.template.data is not carried across a reseal", ErrInvalidMutation)
+		return "", fmt.Errorf("%w: spec.template.data is not editable key by key", ErrInvalidMutation)
 	}
 	if len(sealed.Spec.Data) > 0 {
 		return "", fmt.Errorf("%w: spec.data is a single legacy blob and cannot be edited key by key", ErrInvalidMutation)
@@ -354,7 +354,7 @@ func (w *Wrapper) SealMutations(ctx context.Context, sealedYAML string, mutation
 	}
 
 	// Server-owned fields are not part of the manifest written to Git.
-	sealed.Status = nil
+	sealed.Status = ssv1alpha1.SealedSecret{}.Status
 	sealed.ResourceVersion = ""
 	sealed.UID = ""
 	sealed.Generation = 0

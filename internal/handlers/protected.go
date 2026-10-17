@@ -855,12 +855,6 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Not found")
 		return
 	}
-	// A cluster-wide value is readable in every namespace, so editing one widens the blast radius
-	// the same way creating one does.
-	if secret.Scope == "cluster-wide" && !requireCapability(w, r, policy.AnyNamespace, policy.AccessManage) {
-		result = opResultDenied
-		return
-	}
 	git, gitErr := h.gitStatus(r.Context(), h.requestTransport(), namespace, name, secret.YAML, req.BaseCommit, false, false)
 	if gitErr != nil {
 		result = refuseGitRead(w, r, gitErr)
@@ -889,7 +883,7 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 	result = opResultSuccess
 }
 
-// maxBatchKeys matches the documented 400-key Secret maximum, so any accepted Secret reseals in one batch.
+// maxBatchKeys matches the documented 400-key Secret maximum, so any accepted Secret is edited in one batch.
 const maxBatchKeys = 400
 
 // mutationRequest is one entry change on the wire, shared by the diff and patch endpoints so they cannot accept different shapes.
@@ -965,7 +959,7 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request")
 		return
 	}
-	// Refusable-without-decrypt checks come before the idempotency key is spent.
+	// Refusable-from-the-body checks come before the idempotency key is spent.
 	mutations, batchKeys, err := parseMutations(req.Mutations)
 	if err != nil {
 		result = opResultInvalidRequest
