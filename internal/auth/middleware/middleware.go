@@ -1,6 +1,4 @@
-// Package middleware provides the authentication middleware: it validates the session
-// cookie, injects the identity into the request context, refreshes near-expiry sessions,
-// and enforces CSRF on state-changing requests.
+// Package middleware validates the session cookie, injects the identity, refreshes near-expiry sessions, and enforces CSRF on state-changing requests.
 package middleware
 
 import (
@@ -24,9 +22,7 @@ const (
 	identityKey ctxKey = iota
 )
 
-// CapabilityGrants is an identity's resolved capabilities: Global applies in every
-// namespace, Scoped only in the namespaces it names. A namespace absent from Scoped is not
-// denied — the global set still applies there.
+// CapabilityGrants is an identity's resolved capabilities: Global applies everywhere, Scoped only in the namespaces it names.
 type CapabilityGrants struct {
 	Global []string
 	Scoped map[string][]string
@@ -41,8 +37,7 @@ type Identity struct {
 	Expiry       time.Time
 	CSRF         string
 	Capabilities []string
-	// NamespaceCapabilities is keyed by namespace. Read it through CapabilitiesFor: the
-	// effective set in a namespace is the scoped one unioned with the global.
+	// Read it through CapabilitiesFor: the effective set in a namespace is the scoped one unioned with the global.
 	NamespaceCapabilities map[string][]string
 }
 
@@ -55,9 +50,7 @@ func (i Identity) HasCapabilityIn(namespace, capability string) bool {
 	return containsCapability(i.CapabilitiesFor(namespace), capability)
 }
 
-// HasCapabilityAnywhere reports whether the identity holds a capability anywhere. It is a
-// pre-filter for requests whose namespace is not known yet, and must never authorize a
-// specific namespace: "holds secret:seal in payments" does not answer for development.
+// HasCapabilityAnywhere is a pre-filter only when the namespace is not yet known; it must never authorize one ("holds secret:seal in payments" says nothing about development).
 func (i Identity) HasCapabilityAnywhere(capability string) bool {
 	if containsCapability(i.Capabilities, capability) {
 		return true
@@ -70,8 +63,7 @@ func (i Identity) HasCapabilityAnywhere(capability string) bool {
 	return false
 }
 
-// unionCapabilities unions the lists in order, dropping duplicates. Nil in, nil out: an
-// identity with no grants carries no allocated empty slice through every request.
+// unionCapabilities unions the lists in order, dropping duplicates; nil in, nil out.
 func unionCapabilities(lists ...[]string) []string {
 	var result []string
 	seen := map[string]bool{}
@@ -184,10 +176,7 @@ func verifySessionCookie(data SessionData, sig string, secret []byte) error {
 func AuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	signingKey := cfg.SigningKey
 	if len(signingKey) == 0 {
-		// Fail closed rather than substitute a key. A constant compiled into the binary signs a
-		// session anyone can forge, and a deployment that forgot the key must serve 401 rather than
-		// authenticate on a secret that is in the source. Logged once, at construction, because
-		// every request takes this path.
+		// Fail closed, never substitute a key: a constant compiled into the binary signs a session anyone can forge.
 		slog.Error("auth: no session signing key configured; refusing every request")
 		return func(http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,8 +201,7 @@ func AuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	}
 }
 
-// extractAndValidateSession returns the cookie data, or writes 401 and returns false. A session
-// inside the refresh window is renewed here, before the handler and the ACL checks run.
+// extractAndValidateSession returns the cookie data, or writes 401 and returns false; a session inside the refresh window is renewed before ACL checks run.
 func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte, gate *refreshGate) (sessionCookieData, bool) {
 	sessionCookie, err := r.Cookie(cfg.SessionCookie)
 	if err != nil {
@@ -239,8 +227,7 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 	if err := verifySessionCookie(cookieData.SessionData, cookieData.Signature, signingKey); err != nil {
 		slog.Debug("auth: session verification failed", "error", err)
 		if err.Error() == "session expired" {
-			// A cookie that outlived its payload — a client ignoring MaxAge, or clock skew. The
-			// session is gone and only a refresh can revive it, so this one is terminal.
+			// A cookie that outlived its payload — only a refresh can revive it, so this one is terminal.
 			if refreshed, ok := attemptRefresh(w, r, cfg, signingKey, gate); ok {
 				return refreshed, true
 			}
@@ -250,10 +237,7 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 		return sessionCookieData{}, false
 	}
 
-	// Renewal runs while the session is still in force, so a refresh that fails on a transient
-	// provider error does not end a session that still has time left: the request is served on the
-	// session in hand and the next one tries again. Cleared cookies and 401 are for the session
-	// above, which has nothing left to renew.
+	// Renewal runs while the session is still in force, so a transient provider error is served on the session in hand rather than ending it.
 	if time.Until(time.Unix(cookieData.Expiry, 0)) < sessionRefreshWindow {
 		if refreshed, ok := attemptRefresh(w, r, cfg, signingKey, gate); ok {
 			return refreshed, true
@@ -266,29 +250,18 @@ func extractAndValidateSession(w http.ResponseWriter, r *http.Request, cfg AuthC
 // sessionRefreshWindow is how long before expiry a session is renewed.
 const sessionRefreshWindow = 5 * time.Minute
 
-// refreshGate keeps one exchange per spent refresh token, shared by every request presenting it. A
-// browser whose session is inside the refresh window fires a page of requests carrying that token,
-// and a provider that rotates refresh tokens retires it on the first exchange — the others would
-// present a spent token, which such providers read as a replay of the whole token family and answer
-// by killing it. The first caller performs the exchange; the rest adopt its result, which is the same
-// identity, the same CSRF token, and a cookie signed with the same key.
+// refreshGate keeps one exchange per spent refresh token, shared by every request presenting it: a rotating provider reads a
+// second use as a token-family replay and kills the family. The first caller exchanges; the rest adopt its result.
 type refreshGate struct {
 	mu      sync.Mutex
 	entries map[string]*refreshEntry
 }
 
-// refreshGrace is how long a completed exchange stays available to requests that arrive with the
-// token it spent.
-//
-// This is about more than the requests waiting while the exchange runs. A page load fires its
-// requests together, so most of them reach the middleware *after* the exchange has finished and
-// still carry the pre-refresh cookie, because the browser only learns the new one when the first
-// response lands. Every one of those would present a spent token and provoke exactly the replay the
-// gate exists to prevent, from the requests that arrived a moment too late.
+// refreshGrace lets late arrivals adopt a completed exchange: a page load's requests mostly land after the exchange
+// and still carry the pre-refresh cookie, since the browser only learns the new one when the first response lands.
 const refreshGrace = 60 * time.Second
 
-// refreshEntry is one exchange, shared by the requests presenting the token it spends. It is in
-// flight until settle publishes the outcome, and answers late arrivals until it expires.
+// refreshEntry is one exchange, in flight until settle publishes the outcome, answering late arrivals until it expires.
 type refreshEntry struct {
 	done    chan struct{}
 	outcome *refreshOutcome
@@ -305,8 +278,7 @@ func (g *refreshGate) enter(key string) (entry *refreshEntry, lead bool) {
 	defer g.mu.Unlock()
 	now := time.Now()
 	for k, e := range g.entries {
-		// Swept here rather than on a timer, so the map holds only the refreshes of the last grace
-		// period and nothing needs stopping when the process shuts down.
+		// Swept here rather than on a timer, so nothing needs stopping at shutdown.
 		if !e.expires.IsZero() && now.After(e.expires) {
 			delete(g.entries, k)
 		}
@@ -319,9 +291,7 @@ func (g *refreshGate) enter(key string) (entry *refreshEntry, lead bool) {
 	return entry, true
 }
 
-// settle publishes the outcome to everyone waiting on this token and keeps it for the grace period.
-// A failed exchange is published too: the waiter's answer to a spent token is the same as the
-// leader's, and retrying an invalid_grant is what the contract forbids.
+// settle publishes the outcome to waiters and keeps it for the grace period; a failed exchange is published too — retrying invalid_grant is what the contract forbids.
 func (g *refreshGate) settle(entry *refreshEntry, outcome *refreshOutcome) {
 	g.mu.Lock()
 	entry.outcome = outcome
@@ -336,10 +306,7 @@ func refreshGateKey(token string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-// refreshOutcome is the result of one exchange, shared with the requests that waited on it: the
-// signed session, the token that replaced the spent one, and the expiry every rotated cookie
-// derives from. Each participant writes the same cookies, so it does not matter which response the
-// browser commits last.
+// refreshOutcome is one exchange's result, shared with its waiters; each participant writes the same cookies, so response order does not matter.
 type refreshOutcome struct {
 	session      sessionCookieData
 	cookieValue  string
@@ -348,30 +315,22 @@ type refreshOutcome struct {
 	expiry       time.Time
 }
 
-// attemptRefresh spends the session's refresh token and, on success, writes the rotated cookies to
-// this response. A failure leaves every cookie untouched and reports false: what an unrenewable
-// session means is the caller's decision, and it differs between a session still in force and one
-// that has already expired.
-//
-// The exchange runs on the request's own goroutine, inside the request deadline, because a rotated
-// cookie needs a response to be written to — a refresh the client never receives is not a refresh.
+// attemptRefresh spends the refresh token and, on success, writes the rotated cookies; failure reports false and leaves them untouched.
+// It runs on the request's own goroutine, inside the request deadline, because a rotated cookie needs a response to be written to.
 func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, signingKey []byte, gate *refreshGate) (sessionCookieData, bool) {
 	if cfg.OIDCProvider == nil || len(signingKey) == 0 {
 		return sessionCookieData{}, false
 	}
 	refreshCookie, err := r.Cookie(cfg.RefreshCookie)
 	if err != nil {
-		// No refresh token to spend (a provider that issues none, or a cleared cookie): the
-		// session serves until it expires.
+		// No refresh token to spend (a provider that issues none, or a cleared cookie): the session serves until it expires.
 		return sessionCookieData{}, false
 	}
 
 	key := refreshGateKey(refreshCookie.Value)
 	entry, lead := gate.enter(key)
 	if !lead {
-		// Another request has spent — or is spending — this token. Waiting for its result rather
-		// than presenting the token again is the point of the gate: a rotating provider reads the
-		// second use of a spent token as a replay.
+		// Another request is spending this token; waiting for its result rather than presenting the token again is the whole point.
 		select {
 		case <-entry.done:
 		case <-r.Context().Done():
@@ -385,8 +344,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	}
 
 	outcome := exchangeRefreshToken(r, cfg, signingKey, refreshCookie.Value)
-	// Settled before this caller writes its own cookies, so waiters are released as soon as the
-	// exchange is decided.
+	// Settled before this caller writes its own cookies, so waiters are released as soon as the exchange is decided.
 	gate.settle(entry, outcome)
 	if outcome == nil {
 		return sessionCookieData{}, false
@@ -395,8 +353,7 @@ func attemptRefresh(w http.ResponseWriter, r *http.Request, cfg AuthConfig, sign
 	return outcome.session, true
 }
 
-// exchangeRefreshToken spends one refresh token at the provider and verifies what comes back. A nil
-// result means the refresh failed, and the caller answers 401 and clears the session cookies.
+// exchangeRefreshToken spends one token at the provider and verifies what comes back; nil means failure and the caller answers 401.
 func exchangeRefreshToken(r *http.Request, cfg AuthConfig, signingKey []byte, refreshToken string) *refreshOutcome {
 	ctx := r.Context()
 	tokens, err := cfg.OIDCProvider.RefreshTokens(ctx, refreshToken)
@@ -405,8 +362,7 @@ func exchangeRefreshToken(r *http.Request, cfg AuthConfig, signingKey []byte, re
 		return nil
 	}
 
-	// A refreshed ID token still passes issuer, audience, signature, expiry, and claim
-	// validation; refresh responses carry no login nonce, so nonce checking is skipped.
+	// A refreshed ID token still passes issuer, audience, signature, expiry, and claim checks; refresh responses carry no nonce, so that check is skipped.
 	verified, err := cfg.OIDCProvider.VerifyIDToken(ctx, tokens.IDToken, "")
 	if err != nil {
 		slog.Debug("auth: refreshed ID token verification failed", "error", err)
@@ -456,13 +412,8 @@ func exchangeRefreshToken(r *http.Request, cfg AuthConfig, signingKey []byte, re
 	}
 }
 
-// writeRefreshCookies writes the rotation the contract calls for: the session, the refresh token
-// that replaced the spent one, and the CSRF cookie.
-//
-// The CSRF cookie is rewritten even though its value does not change. Its lifetime was set from the
-// token that just expired, so leaving it alone would retire the double-submit anchor while the
-// session it belongs to lives on — GETs keep working and every state-changing request starts
-// failing 403, which reads as a permissions bug rather than an expired cookie.
+// writeRefreshCookies writes the session, the replacement refresh token, and the CSRF cookie — rewritten even though unchanged,
+// because its lifetime came from the spent token and leaving it would retire the double-submit anchor while the session lives on.
 func writeRefreshCookies(w http.ResponseWriter, cfg AuthConfig, outcome refreshOutcome) {
 	if w == nil {
 		return
@@ -621,8 +572,7 @@ func RequireAuth(w http.ResponseWriter, r *http.Request) (Identity, bool) {
 	return id, true
 }
 
-// RequireCSRF validates the CSRF token, returning false when it is missing or the origin
-// is untrusted.
+// RequireCSRF validates the CSRF token, returning false when it is missing or the origin is untrusted.
 func RequireCSRF(w http.ResponseWriter, r *http.Request, cfg AuthConfig) bool {
 	if r.Method == "GET" || r.Method == "HEAD" || r.Method == "OPTIONS" {
 		return true

@@ -14,16 +14,12 @@ import (
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 )
 
-// keyCacheTTL bounds how long a key list is reused across requests. It is far shorter than the
-// certificate provider's five minutes because the two are not symmetric: a certificate only has to
-// create new ciphertext, while a private key has to open existing ciphertext. The stale window here
-// is therefore the window in which a Secret sealed with a just-rotated key cannot be revealed, and
-// the invalidate-and-retry in crypto.DecryptYAML is what closes it.
+// Shorter than the certificate TTL: a cert only has to create new ciphertext, while a key must open existing ciphertext — the stale
+// window is one where a just-rotated key cannot be revealed, which crypto.DecryptYAML's invalidate-and-retry closes.
 const keyCacheTTL = 60 * time.Second
 
-// kubePrivateKeyProvider adapts the Kubernetes client to crypto.PrivateKeyProvider, reusing the
-// parsed key list for keyCacheTTL. Holding the mutex across the list keeps concurrent misses
-// sharing one round trip rather than stampeding the API server.
+// kubePrivateKeyProvider adapts the Kubernetes client to crypto.PrivateKeyProvider, reusing the parsed list for keyCacheTTL;
+// the mutex is held across a miss so concurrent callers share one round trip.
 type kubePrivateKeyProvider struct {
 	client kubernetes.Client
 	now    func() time.Time
@@ -33,9 +29,7 @@ type kubePrivateKeyProvider struct {
 	loaded time.Time
 }
 
-// The retry that makes the cache acceptable lives in crypto.DecryptYAML, which reaches it through
-// this interface; the assertion is what keeps a rename on either side from silently disabling it and
-// leaving the stale window as a Secret that cannot be revealed.
+// The retry that makes the cache safe lives in crypto.DecryptYAML via this interface; the assertion keeps a rename from silently disabling it.
 var _ crypto.KeyCacheInvalidator = (*kubePrivateKeyProvider)(nil)
 
 // newKubePrivateKeyProvider builds the production provider. A nil now means time.Now.
@@ -46,12 +40,8 @@ func newKubePrivateKeyProvider(client kubernetes.Client, now func() time.Time) *
 	return &kubePrivateKeyProvider{client: client, now: now}
 }
 
-// PrivateKeys returns every controller key the cluster still holds, not just the active one. The
-// controller rotates its sealing key on a schedule and retains the old keys so it can still decrypt
-// previously sealed secrets; decryption here has the same requirement.
-//
-// The list is reused for keyCacheTTL. Without that, every reveal and reseal pays a live Secrets list
-// plus a PEM and x509 parse per key — cost that nothing about the request changes.
+// PrivateKeys returns every controller key the cluster still holds, not just the active one — the controller retains old keys so it
+// can still decrypt what they sealed. The list is reused for keyCacheTTL, or every reveal pays a live Secrets list plus a parse per key.
 func (p *kubePrivateKeyProvider) PrivateKeys(ctx context.Context) ([]*rsa.PrivateKey, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -70,17 +60,15 @@ func (p *kubePrivateKeyProvider) PrivateKeys(ctx context.Context) ([]*rsa.Privat
 	return keys, nil
 }
 
-// InvalidateKeyCache drops the cached list so the next call re-reads the cluster. crypto.DecryptYAML
-// calls it when no supplied key opened the data, which is the signature of a key that rotated inside
-// the TTL — and the reason a stale window here is a latency cost rather than a failed reveal.
+// InvalidateKeyCache drops the cached list so the next call re-reads the cluster; DecryptYAML calls it when no supplied key opened the data,
+// which is the signature of a key rotated inside the TTL.
 func (p *kubePrivateKeyProvider) InvalidateKeyCache() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.keys = nil
 }
 
-// loadKeys lists the controller's labelled Secrets and parses the usable ones. One unreadable key
-// must not disable decryption for the secrets the others can open.
+// loadKeys lists the controller's labelled Secrets and parses the usable ones; one unreadable key must not disable the others.
 func (p *kubePrivateKeyProvider) loadKeys(ctx context.Context) ([]*rsa.PrivateKey, error) {
 	keys, err := p.client.FindAllControllerKeys(ctx)
 	if err != nil {
