@@ -991,3 +991,114 @@ func TestGitOpsSyncRefusesAMappedFileHoldingAnotherSecret(t *testing.T) {
 		t.Fatalf("refused sync replaced the occupant: %q", string(held.Content))
 	}
 }
+
+// multiDocFile builds a two-SealedSecret file holding `sibling` and the secret under test, so a
+// delivery or sync that assumed one document per file would visibly drop the sibling.
+func multiDocFile(namespace, name, ciphertext, sibling string) string {
+	return sealedManifest(namespace, name) + "---\n" + sibling
+}
+
+// TestGitOpsDeliverSplicesIntoAMultiDocumentFile pins the fix for the last open audit finding: the
+// templated path holds several SealedSecret documents, and delivering to one of them must replace
+// only its own document, leaving the sibling byte for byte intact.
+func TestGitOpsDeliverSplicesIntoAMultiDocumentFile(t *testing.T) {
+	sibling := sealedManifest("payments", "sidecar")
+	path := "clusters/payments/api.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, multiDocFile("payments", "api", "old", sibling), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", gitChangeBody(t, "payments", "api", deliveryManifest("payments", "api", "new"), "abc"), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "multidoc-deliver-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("deliver = %d %s", rr.Code, rr.Body.String())
+	}
+
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: path}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(snapshot.Content), "key: new") {
+		t.Fatalf("delivered ciphertext absent: %q", string(snapshot.Content))
+	}
+	if !strings.HasSuffix(string(snapshot.Content), sibling) {
+		t.Fatalf("sibling document did not survive byte for byte: %q", string(snapshot.Content))
+	}
+}
+
+// TestGitOpsDryRunReturnsTheMergedMultiDocumentFile covers the client contract that rests on the
+// splice: `after` is the whole merged file, so the reviewed artifact and the delivery re-splice see
+// the same document set rather than a file that would overwrite the siblings.
+func TestGitOpsDryRunReturnsTheMergedMultiDocumentFile(t *testing.T) {
+	sibling := sealedManifest("payments", "sidecar")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, multiDocFile("payments", "api", "old", sibling), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/dry-run", gitChangeBody(t, "payments", "api", deliveryManifest("payments", "api", "new"), "abc"), protectedIdentity(policy.GitOpsPush))
+	rr := httptest.NewRecorder()
+	h.GitOpsDryRunHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("dry-run = %d %s", rr.Code, rr.Body.String())
+	}
+	var diff struct {
+		After string `json:"after"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &diff); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff.After, "key: new") || !strings.Contains(diff.After, "name: sidecar") {
+		t.Fatalf("after is not the merged file: %q", diff.After)
+	}
+}
+
+// TestGitOpsSyncSplicesIntoAMultiDocumentFile covers the live-to-Git direction of the same contract.
+func TestGitOpsSyncSplicesIntoAMultiDocumentFile(t *testing.T) {
+	sibling := sealedManifest("payments", "sidecar")
+	path := "clusters/payments/api.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, multiDocFile("payments", "api", "old", sibling), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	live := deliveryManifest("payments", "api", "live-cipher")
+	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "api", Namespace: "payments", YAML: live}}}
+	h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+
+	body, err := json.Marshal(map[string]string{"namespace": "payments", "name": "api", "base_commit": "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/sync", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "multidoc-sync-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsSyncHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("sync = %d %s", rr.Code, rr.Body.String())
+	}
+
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: path}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(snapshot.Content), "key: live-cipher") {
+		t.Fatalf("live ciphertext absent: %q", string(snapshot.Content))
+	}
+	if !strings.HasSuffix(string(snapshot.Content), sibling) {
+		t.Fatalf("sibling document did not survive byte for byte: %q", string(snapshot.Content))
+	}
+}

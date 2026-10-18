@@ -185,22 +185,47 @@ type partialSealedSecret struct {
 // identityKey is the lookup key; the separator cannot occur in a Kubernetes name, so no pair collides.
 func identityKey(namespace, name string) string { return namespace + "\x00" + name }
 
+// sealedSecretIdentity reports the lookup key of one YAML document; false when it is not a SealedSecret.
+func sealedSecretIdentity(doc []byte) (string, bool) {
+	var parsed partialSealedSecret
+	if err := yaml.Unmarshal(doc, &parsed); err != nil {
+		return "", false
+	}
+	if parsed.Kind != "SealedSecret" {
+		return "", false
+	}
+	namespace := parsed.Metadata.Namespace
+	if namespace == "" {
+		namespace = parsed.Spec.Template.Metadata.Namespace
+	}
+	return identityKey(namespace, parsed.Metadata.Name), true
+}
+
+// splitYAMLDocuments splits on bare `---` lines, keeping each separator with the document that
+// follows, so bytes.Join of the parts reproduces the input byte for byte.
+func splitYAMLDocuments(content []byte) [][]byte {
+	var docs [][]byte
+	var current []byte
+	for _, line := range bytes.SplitAfter(content, []byte("\n")) {
+		if len(current) > 0 && bytes.Equal(bytes.TrimSpace(line), []byte("---")) {
+			docs = append(docs, current)
+			current = nil
+		}
+		current = append(current, line...)
+	}
+	if len(current) > 0 {
+		docs = append(docs, current)
+	}
+	return docs
+}
+
 // sealedSecretIdentities indexes every SealedSecret doc, so a search hit and a content match use one parser.
 func sealedSecretIdentities(content []byte) []string {
 	var identities []string
-	for _, docBytes := range bytes.Split(content, []byte("\n---")) {
-		var doc partialSealedSecret
-		if err := yaml.Unmarshal(docBytes, &doc); err != nil {
-			continue
+	for _, doc := range splitYAMLDocuments(content) {
+		if key, ok := sealedSecretIdentity(doc); ok {
+			identities = append(identities, key)
 		}
-		if doc.Kind != "SealedSecret" {
-			continue
-		}
-		namespace := doc.Metadata.Namespace
-		if namespace == "" {
-			namespace = doc.Spec.Template.Metadata.Namespace
-		}
-		identities = append(identities, identityKey(namespace, doc.Metadata.Name))
 	}
 	return identities
 }
@@ -213,6 +238,24 @@ func MatchesSealedSecret(content []byte, namespace, name string) bool {
 		}
 	}
 	return false
+}
+
+// SpliceSealedSecret replaces the document matching namespace/name inside a multi-document file,
+// leaving every sibling byte for byte identical; false means nothing matched and `incoming` is the
+// whole file. The destination lookup guarantees a match before this is called — false is a race,
+// and the caller falls back to whole-file content only because the base-commit guard still stands.
+func SpliceSealedSecret(existing, incoming []byte, namespace, name string) ([]byte, bool) {
+	docs := splitYAMLDocuments(existing)
+	for i, doc := range docs {
+		if key, ok := sealedSecretIdentity(doc); ok && (key == identityKey(namespace, name) || key == identityKey("", name)) {
+			if !bytes.HasSuffix(incoming, []byte("\n")) {
+				incoming = append(incoming, '\n')
+			}
+			docs[i] = incoming
+			return bytes.Join(docs, nil), true
+		}
+	}
+	return incoming, false
 }
 
 // lookupIdentity prefers the namespace-specific hit over a manifest that names no namespace.

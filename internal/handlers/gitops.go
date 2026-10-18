@@ -115,65 +115,77 @@ var errTargetPathNotAllowed = errors.New("target path not allowed by namespace m
 var errDestinationHeld = errors.New("destination already holds another manifest")
 
 // resolveDeliveryPath runs after the capability check: the repository read must not be reachable otherwise.
-func (h *ProtectedHandlers) resolveDeliveryPath(ctx context.Context, cr gitChangeRequest) (gitops.Change, error) {
+// `existing` is the file's content at the destination, nil when the file is vacant.
+func (h *ProtectedHandlers) resolveDeliveryPath(ctx context.Context, cr gitChangeRequest) (gitops.Change, []byte, error) {
 	change := cr.Change
-	path, err := h.resolveDestination(ctx, h.requestTransport(), cr.Mapping, cr.Namespace, cr.Name, cr.RequestedPath)
+	path, existing, err := h.resolveDestination(ctx, h.requestTransport(), cr.Mapping, cr.Namespace, cr.Name, cr.RequestedPath)
 	if err != nil {
-		return change, err
+		return change, nil, err
 	}
 	if path == "" {
-		return change, errTargetPathNotAllowed
+		return change, nil, errTargetPathNotAllowed
 	}
 	change.Target.Path = path
-	return change, nil
+	return change, existing, nil
 }
 
-// resolveDestination returns the file this identity's manifest may be written to; the allowlist grants destinations for new manifests only.
-func (h *ProtectedHandlers) resolveDestination(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, namespace, name, requested string) (string, error) {
+// mergeIntoExisting splices the incoming manifest into the multi-document file already at the
+// destination, so its siblings survive the write; a vacant file takes the content as-is.
+func mergeIntoExisting(existing, incoming []byte, namespace, name string) []byte {
+	if len(existing) == 0 {
+		return incoming
+	}
+	merged, _ := gitops.SpliceSealedSecret(existing, incoming, namespace, name)
+	return merged
+}
+
+// resolveDestination returns the file this identity's manifest may be written to, plus the content
+// already there (nil when vacant); the allowlist grants destinations for new manifests only.
+func (h *ProtectedHandlers) resolveDestination(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, namespace, name, requested string) (string, []byte, error) {
 	defaultPath := mapping.RenderPath(namespace, name)
 	if defaultPath == "" {
 		// No template: nowhere to discover and nowhere the caller may name.
 		if requested == "" {
-			return "", nil
+			return "", nil, nil
 		}
-		return "", errTargetPathNotAllowed
+		return "", nil, errTargetPathNotAllowed
 	}
 	lookup, err := h.findManifestFor(ctx, transport, mapping, gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: defaultPath}, namespace, name)
 	if err != nil {
 		// A failed read says nothing about vacancy; writing on one is how a duplicate gets created.
-		return "", err
+		return "", nil, err
 	}
 	if lookup.Found {
 		if requested != "" && requested != lookup.Path {
 			// Refused rather than redirected: reviewed content must not land in an unreviewed file.
-			return "", errTargetPathNotAllowed
+			return "", nil, errTargetPathNotAllowed
 		}
-		return lookup.Path, nil
+		return lookup.Path, lookup.Existing, nil
 	}
 	// The rendered template is always accepted for a create; the allowlist adds the alternatives.
 	destination := defaultPath
 	if requested != "" {
 		if requested != defaultPath && !mapping.IsPathAllowed(requested, namespace, name) {
-			return "", errTargetPathNotAllowed
+			return "", nil, errTargetPathNotAllowed
 		}
 		destination = requested
 	}
 	if destination == defaultPath {
 		// Discovery already read this file, so its verdict is the occupancy answer.
 		if lookup.Occupied {
-			return "", errDestinationHeld
+			return "", nil, errDestinationHeld
 		}
-		return destination, nil
+		return destination, nil, nil
 	}
 	// The allowlist grants a destination, not the right to replace whatever is already there.
 	held, heldErr := h.pathHeldByOther(ctx, transport, mapping, gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: destination}, namespace, name)
 	if heldErr != nil {
-		return "", heldErr
+		return "", nil, heldErr
 	}
 	if held {
-		return "", errDestinationHeld
+		return "", nil, errDestinationHeld
 	}
-	return destination, nil
+	return destination, nil, nil
 }
 
 // manifestLookup separates Found from Occupied: "not this identity's manifest" is not "vacant".
@@ -181,6 +193,8 @@ type manifestLookup struct {
 	Path     string
 	Found    bool
 	Occupied bool
+	// The file's content when Found, so the caller can splice into a multi-document file.
+	Existing []byte
 }
 
 // findManifestFor: two-tier discovery. A file at the templated path counts only when it is this
@@ -190,7 +204,7 @@ func (h *ProtectedHandlers) findManifestFor(ctx context.Context, transport gitop
 	snapshot, err := transport.ReadManifest(ctx, target, mapping.AuthRef)
 	if err == nil {
 		if gitops.MatchesSealedSecret(snapshot.Content, namespace, name) {
-			return manifestLookup{Path: target.Path, Found: true}, nil
+			return manifestLookup{Path: target.Path, Found: true, Existing: snapshot.Content}, nil
 		}
 		occupied = true
 	} else if !errors.Is(err, gitops.ErrNotFound) {
@@ -206,7 +220,7 @@ func (h *ProtectedHandlers) findManifestFor(ctx context.Context, transport gitop
 	if found.Target.Path == "" {
 		return manifestLookup{Occupied: occupied}, nil
 	}
-	return manifestLookup{Path: found.Target.Path, Found: true}, nil
+	return manifestLookup{Path: found.Target.Path, Found: true, Existing: found.Content}, nil
 }
 
 // pathHeldByOther: true when target holds another identity's manifest, or not a SealedSecret at all.
@@ -245,7 +259,7 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 	// Both endpoints resolve the path the same way, or the preview describes a change that is not delivered.
-	resolved, err := h.resolveDeliveryPath(r.Context(), cr)
+	resolved, existing, err := h.resolveDeliveryPath(r.Context(), cr)
 	if err != nil {
 		if errors.Is(err, errTargetPathNotAllowed) {
 			h.emitSecurityEvent(r, "gitops_dry_run", cr.Namespace, cr.Name, "", string(mapping.Mode), "invalid_target_path")
@@ -262,6 +276,7 @@ func (h *ProtectedHandlers) GitOpsDryRunHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 	change := resolved
+	change.Content = mergeIntoExisting(existing, change.Content, cr.Namespace, cr.Name)
 	diff, err := h.GitTransport.DryRun(r.Context(), change, mapping.AuthRef)
 	if err != nil {
 		var base *gitops.BaseCommitError
@@ -337,7 +352,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	// Repository read sits after the capability check and before the idempotency store.
-	resolved, err := h.resolveDeliveryPath(r.Context(), cr)
+	resolved, existing, err := h.resolveDeliveryPath(r.Context(), cr)
 	if err != nil {
 		if errors.Is(err, errTargetPathNotAllowed) {
 			h.emitSecurityEvent(r, "gitops_delivery", cr.Namespace, cr.Name, "", string(mapping.Mode), "invalid_target_path")
@@ -357,6 +372,7 @@ func (h *ProtectedHandlers) GitOpsDeliverHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	change = resolved
+	change.Content = mergeIntoExisting(existing, change.Content, cr.Namespace, cr.Name)
 	// A retry is answered with its original response — see beginDelivery.
 	w, finishDelivery, proceed := h.beginDelivery(w, r)
 	if !proceed {
@@ -552,7 +568,7 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	// Resolved by the same rule a delivery obeys — see resolveDestination.
-	path, resolveErr := h.resolveDestination(r.Context(), h.requestTransport(), mapping, req.Namespace, req.Name, req.TargetPath)
+	path, existing, resolveErr := h.resolveDestination(r.Context(), h.requestTransport(), mapping, req.Namespace, req.Name, req.TargetPath)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errTargetPathNotAllowed) {
 			h.emitSecurityEvent(r, "gitops_sync", req.Namespace, req.Name, "", string(mapping.Mode), "invalid_target_path")
@@ -578,7 +594,7 @@ func (h *ProtectedHandlers) GitOpsSyncHandler(w http.ResponseWriter, r *http.Req
 	change := gitops.Change{
 		Target:     gitops.Target{Repository: mapping.Repository, Branch: mapping.Branch, Path: path},
 		BaseCommit: req.BaseCommit,
-		Content:    []byte(secret.YAML),
+		Content:    mergeIntoExisting(existing, []byte(secret.YAML), req.Namespace, req.Name),
 	}
 
 	// Proposal mode: push to a dedicated branch, then open a PR.

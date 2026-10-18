@@ -39,8 +39,9 @@ func (d *devPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, err
 	return []*rsa.PrivateKey{d.key}, nil
 }
 
-// discoverOIDC returns nil on incomplete or absent config, leaving the router fail-closed.
-func discoverOIDC(cfg *config.Config) *oidc.Provider {
+// discoverOIDC returns nil on incomplete or absent config, leaving the router fail-closed. Discovery
+// itself is lazy: an issuer that is down at boot must not pin the API into a restart to recover.
+func discoverOIDC(cfg *config.Config) oidc.AuthProvider {
 	if cfg.OIDCIssuer == "" || cfg.OIDCClientID == "" {
 		if cfg.OIDCIssuer != "" || cfg.OIDCClientID != "" {
 			slog.Warn("OIDC partially configured; both OIDC_ISSUER and OIDC_CLIENT_ID are required",
@@ -69,14 +70,7 @@ func discoverOIDC(cfg *config.Config) *oidc.Provider {
 		slog.Error("OIDC configuration incomplete", "error", "client secret and redirect URL are required")
 		return nil
 	}
-	discoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	provider, err := oidc.NewProvider(discoveryCtx, oidcCfg)
-	if err != nil {
-		slog.Error("OIDC provider discovery failed", "error", err)
-		return nil
-	}
-	return provider
+	return oidc.NewLazyProvider(oidcCfg)
 }
 
 // gitopsTransport builds the production transport and credential resolver; both nil when GitOps is disabled (fail-closed).

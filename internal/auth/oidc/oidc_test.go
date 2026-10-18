@@ -6,11 +6,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+// newTestFlowState builds a valid FlowState, failing the test when randomness does.
+func newTestFlowState(t *testing.T) *FlowState {
+	t.Helper()
+	flow, err := NewFlowState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return flow
+}
 
 func testConfig() Config {
 	return Config{
@@ -377,5 +388,43 @@ func TestAudienceUnmarshalJSON(t *testing.T) {
 	}
 	if len(multi) != 2 || multi[0] != "client-1" || multi[1] != "client-2" {
 		t.Fatalf("unexpected audience: %v", multi)
+	}
+}
+
+// TestLazyProviderRecoversWhenTheIssuerComesUp pins the boot-order contract: discovery attempted
+// while the issuer is down fails that call but must not poison the provider — the next call, after
+// the issuer answers, succeeds without any restart.
+func TestLazyProviderRecoversWhenTheIssuerComesUp(t *testing.T) {
+	var up atomic.Bool
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		if !up.Load() {
+			http.Error(w, "issuer not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 server.URL,
+			"authorization_endpoint": server.URL + "/auth",
+			"token_endpoint":         server.URL + "/token",
+			"jwks_uri":               server.URL + "/keys",
+		}); err != nil {
+			t.Errorf("encode discovery document: %v", err)
+		}
+	})
+
+	cfg := testConfig()
+	cfg.IssuerURL = server.URL
+	lazy := NewLazyProvider(cfg)
+
+	if _, err := lazy.LoginURL(newTestFlowState(t)); err == nil {
+		t.Fatal("LoginURL succeeded while the issuer was down")
+	}
+
+	up.Store(true)
+	if _, err := lazy.LoginURL(newTestFlowState(t)); err != nil {
+		t.Fatalf("LoginURL did not recover after the issuer came up: %v", err)
 	}
 }
