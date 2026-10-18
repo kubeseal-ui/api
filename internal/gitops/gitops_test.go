@@ -206,7 +206,8 @@ func TestSpliceSealedSecretAddsTrailingNewline(t *testing.T) {
 	if !ok {
 		t.Fatal("splice found no match")
 	}
-	if !bytes.HasSuffix(merged, []byte("key: new\n")) {
+	// The match is the first document, so the newline lands before the sibling separator, not at the file's end.
+	if !bytes.Contains(merged, []byte("key: new\n---\n")) {
 		t.Fatalf("incoming gained no separator newline: %q", string(merged))
 	}
 }
