@@ -207,6 +207,10 @@ func TestSpliceSealedSecretMatchesNameOnlyDocument(t *testing.T) {
 	if !bytes.Contains(merged, []byte("cipher-one")) {
 		t.Fatalf("sibling lost: %q", string(merged))
 	}
+	// The second document's chunk carries the separator, so the replacement must re-emit it.
+	if !bytes.Contains(merged, []byte("key: cipher-one\n---\n")) {
+		t.Fatalf("separator between siblings lost: %q", string(merged))
+	}
 }
 
 func TestSpliceSealedSecretNoMatchReturnsIncoming(t *testing.T) {
