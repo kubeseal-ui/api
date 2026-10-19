@@ -1139,7 +1139,8 @@ func TestSyncStatusComparesTheMatchedDocument(t *testing.T) {
 		t.Fatalf("second document in sync: %v", got)
 	}
 	stale := statusFor(t, "sidecar", deliveryManifest("payments", "sidecar", "stale"))
-	if stale["drift_status"] != "diverged" || stale["drift_reason"] != "ciphertext" {
+	// The endpoint does not expose drift_reason; can_sync is the observable that the reason is not identity.
+	if stale["drift_status"] != "diverged" || stale["can_sync"] != true {
 		t.Fatalf("second document stale = %v", stale)
 	}
 }

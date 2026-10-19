@@ -101,9 +101,14 @@ func TestCachingTransport_PreviousManifestMemoizedByHead(t *testing.T) {
 
 	// Repeated reads at the same head are answered from the memo — the slow path ran once.
 	clock.advance(2 * time.Minute) // past the TTL: the branch snapshot revalidates, the memo still answers
+	done := make(chan struct{}, 1)
+	cache.refreshDone = func() { done <- struct{}{} }
 	if _, err := cache.ReadBranch(context.Background(), "repo", "main", ""); err != nil {
 		t.Fatal(err)
 	}
+	// The revalidation is detached, so it is awaited: a refresh still in flight below could repopulate
+	// the entry with either head and make the final phase race.
+	<-done
 	for i := 0; i < 3; i++ {
 		if previous, err := cache.PreviousManifest(context.Background(), target, ""); err != nil || string(previous) != "older" {
 			t.Fatalf("read %d: %q, %v", i, previous, err)
@@ -113,9 +118,11 @@ func TestCachingTransport_PreviousManifestMemoizedByHead(t *testing.T) {
 		t.Fatalf("history reads after same-head reads = %d, want 1", inner.historyReads)
 	}
 
-	// A new head is a new history: the memo misses and the content is re-read.
+	// A new head is a new history: the memo misses and the content is re-read. The cache is
+	// stale-while-revalidate, so the entry is invalidated to key the next read on the new head now.
 	inner.setCommit("c2")
 	inner.previous = []byte("newer")
+	cache.invalidate("repo", "main")
 	if previous, err := cache.PreviousManifest(context.Background(), target, ""); err != nil || string(previous) != "newer" {
 		t.Fatalf("read at new head: %q, %v", previous, err)
 	}
