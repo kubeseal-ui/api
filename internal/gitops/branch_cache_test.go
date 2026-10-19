@@ -73,6 +73,57 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+// fakeHistory adds a counting ManifestHistory to the branch fake; history reads are what a second
+// detail view must not repeat once the head is known.
+type fakeHistory struct {
+	fakeBranchGit
+	historyReads int32
+	previous     []byte
+}
+
+func (f *fakeHistory) PreviousManifest(context.Context, Target, string) ([]byte, error) {
+	atomic.AddInt32(&f.historyReads, 1)
+	return f.previous, nil
+}
+
+func TestCachingTransport_PreviousManifestMemoizedByHead(t *testing.T) {
+	inner := &fakeHistory{previous: []byte("older")}
+	target := Target{Repository: "repo", Branch: "main", Path: "a.yaml"}
+	inner.setCommit("c1")
+	cache, clock := newTestCache(t, inner, time.Minute)
+
+	if previous, err := cache.PreviousManifest(context.Background(), target, ""); err != nil || string(previous) != "older" {
+		t.Fatalf("first read: %q, %v", previous, err)
+	}
+	if inner.historyReads != 1 {
+		t.Fatalf("history reads after first read = %d, want 1", inner.historyReads)
+	}
+
+	// Repeated reads at the same head are answered from the memo — the slow path ran once.
+	clock.advance(2 * time.Minute) // past the TTL: the branch snapshot revalidates, the memo still answers
+	if _, err := cache.ReadBranch(context.Background(), "repo", "main", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if previous, err := cache.PreviousManifest(context.Background(), target, ""); err != nil || string(previous) != "older" {
+			t.Fatalf("read %d: %q, %v", i, previous, err)
+		}
+	}
+	if inner.historyReads != 1 {
+		t.Fatalf("history reads after same-head reads = %d, want 1", inner.historyReads)
+	}
+
+	// A new head is a new history: the memo misses and the content is re-read.
+	inner.setCommit("c2")
+	inner.previous = []byte("newer")
+	if previous, err := cache.PreviousManifest(context.Background(), target, ""); err != nil || string(previous) != "newer" {
+		t.Fatalf("read at new head: %q, %v", previous, err)
+	}
+	if inner.historyReads != 2 {
+		t.Fatalf("history reads after head advance = %d, want 2", inner.historyReads)
+	}
+}
+
 func TestCachingTransport_DisabledPassthrough(t *testing.T) {
 	inner := &fakeBranchGit{commit: "c0"}
 	if got := NewCachingTransport(inner, 0); got != GitTransport(inner) {

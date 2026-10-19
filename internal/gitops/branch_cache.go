@@ -20,6 +20,9 @@ type cachingTransport struct {
 
 	mu      sync.Mutex
 	entries map[string]*branchEntry
+	// history memoizes PreviousManifest answers by (branch, path, head commit); a head fixes its
+	// history, so a hit needs no remote round-trip. Capped, evicting the whole map when full.
+	history map[string][]byte
 }
 
 // branchEntry is one branch's cached snapshot; entry.mu serialises the cold fetch and the background refresh.
@@ -45,6 +48,7 @@ func NewCachingTransport(inner GitTransport, ttl time.Duration) GitTransport {
 		reader:  reader,
 		ttl:     ttl,
 		entries: map[string]*branchEntry{},
+		history: map[string][]byte{},
 	}
 }
 
@@ -154,13 +158,42 @@ func (t *cachingTransport) PushBranch(ctx context.Context, change Change, authRe
 	return result, nil
 }
 
-// PreviousManifest delegates to the wrapped transport's history when it has one; nothing here is cached.
+// maxHistoryEntries bounds the previous-version memo; a full reset at the cap is cheaper than an LRU
+// and the map repopulates with the entries actually being viewed.
+const maxHistoryEntries = 512
+
+// PreviousManifest answers from a head-keyed memo: the branch snapshot names the head, and the same
+// head has the same previous version, so repeated detail reads between pushes never touch the
+// history checkout. A push drops the branch entry, so the next read keys on the new head and misses.
 func (t *cachingTransport) PreviousManifest(ctx context.Context, target Target, authRef string) ([]byte, error) {
 	history, ok := t.inner.(ManifestHistory)
 	if !ok {
 		return nil, ErrNoHistory
 	}
-	return history.PreviousManifest(ctx, target, authRef)
+	snapshot, err := t.ReadBranch(ctx, target.Repository, target.Branch, authRef)
+	if err != nil {
+		// A branch fetch failure must not newly fail a read that previously answered; the memo is an
+		// optimization, so fall through to the live history read.
+		return history.PreviousManifest(ctx, target, authRef)
+	}
+	key := target.Repository + "\x00" + target.Branch + "\x00" + target.Path + "\x00" + snapshot.Commit
+	t.mu.Lock()
+	previous, hit := t.history[key]
+	t.mu.Unlock()
+	if hit {
+		return previous, nil
+	}
+	previous, err = history.PreviousManifest(ctx, target, authRef)
+	if err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	if len(t.history) >= maxHistoryEntries {
+		t.history = map[string][]byte{}
+	}
+	t.history[key] = previous
+	t.mu.Unlock()
+	return previous, nil
 }
 
 // WarmTarget names one branch to pull before any user asks for it.
