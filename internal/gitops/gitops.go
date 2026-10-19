@@ -262,10 +262,11 @@ func SpliceSealedSecret(existing, incoming []byte, namespace, name string) ([]by
 			if !bytes.HasSuffix(incoming, []byte("\n")) {
 				incoming = append(incoming, '\n')
 			}
-			// Chunks after the first carry their preceding separator; the replacement must keep it
-			// or the sibling documents merge into one body.
-			if i > 0 && bytes.HasPrefix(doc, []byte("---\n")) {
-				incoming = append([]byte("---\n"), incoming...)
+			// Chunks after the first carry their preceding separator (possibly CRLF); the replacement
+			// must keep it, or the sibling documents merge into one body.
+			if i > 0 && bytes.HasPrefix(doc, []byte("---")) {
+				sep := doc[:bytes.IndexByte(doc, '\n')+1]
+				incoming = append(sep, incoming...)
 			}
 			docs[i] = incoming
 			return bytes.Join(docs, nil), true
