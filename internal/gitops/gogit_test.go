@@ -74,6 +74,59 @@ func fileAtBranch(t *testing.T, dir, branch, path string) string {
 	return string(out)
 }
 
+// TestGoGitTransportShallowCheckoutTracksRemoteAdvances pins the shallow-worktree recovery: the
+// depth-1 checkout cannot fast-forward past its boundary — go-git refuses the update as
+// non-fast-forward even forced — so the second read after a remote advance re-clones instead of
+// failing, which is how a second secret creation after a first successful delivery used to die.
+func TestGoGitTransportShallowCheckoutTracksRemoteAdvances(t *testing.T) {
+	remote := bareRemote(t, t.TempDir()+"/remote.git", "main")
+	remoteURL := "file://" + remote
+	seed := seedWorktree(t, t.TempDir()+"/seed", remoteURL, "main", "clusters/payments/api.yaml", "before-content")
+
+	transport, err := NewGoGitTransport(GoGitOptions{ScratchDir: t.TempDir(), AuthorEmail: "kubeseal-ui@test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	target := Target{Repository: remoteURL, Branch: "main", Path: "clusters/payments/api.yaml"}
+
+	if _, err := transport.ReadManifest(ctx, target, ""); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+
+	// The read worktree must be shallow for this test to mean anything.
+	worktrees, err := filepath.Glob(filepath.Join(transport.scratch, "worktree", "*", "*"))
+	if err != nil || len(worktrees) != 1 {
+		t.Fatalf("expected one worktree, got %v (%v)", worktrees, err)
+	}
+	if _, err := os.Stat(filepath.Join(worktrees[0], ".git", "shallow")); err != nil {
+		t.Fatalf("checkout is not shallow: %v", err)
+	}
+
+	run := func(args ...string) {
+		t.Helper()
+		inner := exec.Command("git", args...)
+		inner.Dir = seed
+		if out, err := inner.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(seed, "clusters/payments/api.yaml"), []byte("after-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "clusters/payments/api.yaml")
+	run("commit", "-m", "advance")
+	run("push", "origin", "main")
+
+	snapshot, err := transport.ReadManifest(ctx, target, "")
+	if err != nil {
+		t.Fatalf("read after remote advance: %v", err)
+	}
+	if string(snapshot.Content) != "after-content" {
+		t.Fatalf("stale content after advance: %q", snapshot.Content)
+	}
+}
+
 func TestGoGitTransportRoundTripAgainstBareRemote(t *testing.T) {
 	remote := bareRemote(t, t.TempDir()+"/remote.git", "main")
 	remoteURL := "file://" + remote
