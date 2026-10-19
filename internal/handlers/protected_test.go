@@ -965,11 +965,11 @@ status:
   observedGeneration: 1
 `
 
-	gitCanon, err := canonicalSealedSecret(gitManifest)
+	gitCanon, err := canonicalSealedSecret(gitManifest, "example-ns", "example-secret")
 	if err != nil {
 		t.Fatalf("git canonical failed: %v", err)
 	}
-	liveCanon, err := canonicalSealedSecret(liveManifestWithArgoCD)
+	liveCanon, err := canonicalSealedSecret(liveManifestWithArgoCD, "example-ns", "example-secret")
 	if err != nil {
 		t.Fatalf("live canonical failed: %v", err)
 	}

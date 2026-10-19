@@ -254,7 +254,13 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 	if err != nil {
 		return status, err
 	}
-	gitDoc, err := canonicalDocument(string(snapshot.Content))
+	// A multi-document file holds siblings; compare against this identity's document, and against the
+	// whole file only when it holds none — which is then the identity drift the comparison reports.
+	gitContent := snapshot.Content
+	if doc, ok := gitops.MatchingDocument(snapshot.Content, namespace, name); ok {
+		gitContent = doc
+	}
+	gitDoc, err := canonicalDocument(string(gitContent))
 	if err != nil {
 		return status, err
 	}
@@ -281,7 +287,7 @@ func (h *ProtectedHandlers) gitStatus(ctx context.Context, transport gitops.GitT
 	if withGitText {
 		status["git_file_yaml"] = string(snapshot.Content)
 	}
-	if withHistory && h.gitMovedPastLive(ctx, transport, mapping, target, liveCanonical) {
+	if withHistory && h.gitMovedPastLive(ctx, transport, mapping, target, namespace, name, liveCanonical) {
 		status["git_moved_ahead"] = true
 	}
 	return status, nil
@@ -304,7 +310,7 @@ func refuseGitRead(w http.ResponseWriter, r *http.Request, err error) string {
 }
 
 // gitMovedPastLive: true when live matches the file's previous version; every uncertainty answers false.
-func (h *ProtectedHandlers) gitMovedPastLive(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, target gitops.Target, liveCanonical []byte) bool {
+func (h *ProtectedHandlers) gitMovedPastLive(ctx context.Context, transport gitops.GitTransport, mapping policy.GitMapping, target gitops.Target, namespace, name string, liveCanonical []byte) bool {
 	history, ok := transport.(gitops.ManifestHistory)
 	if !ok {
 		return false
@@ -313,14 +319,18 @@ func (h *ProtectedHandlers) gitMovedPastLive(ctx context.Context, transport gito
 	if err != nil {
 		return false
 	}
-	previousCanonical, err := canonicalSealedSecret(string(previous))
+	previousCanonical, err := canonicalSealedSecret(string(previous), namespace, name)
 	if err != nil {
 		return false
 	}
 	return bytes.Equal(liveCanonical, previousCanonical)
 }
 
-func canonicalSealedSecret(manifest string) ([]byte, error) {
+func canonicalSealedSecret(manifest, namespace, name string) ([]byte, error) {
+	// The same extraction the drift compare uses, so a multi-document file's history is read per document too.
+	if doc, ok := gitops.MatchingDocument([]byte(manifest), namespace, name); ok {
+		manifest = string(doc)
+	}
 	m, err := canonicalDocument(manifest)
 	if err != nil {
 		return nil, err
@@ -1013,6 +1023,11 @@ func (h *ProtectedHandlers) DiffHandler(w http.ResponseWriter, r *http.Request) 
 		result = opResultFailed
 		writeError(w, r, http.StatusBadGateway, "GIT_UNAVAILABLE", "Git unavailable")
 		return
+	}
+	// `after` is this Secret's document, so `before` must be too: a multi-document file's siblings
+	// are carried by the splice at delivery, not by this diff.
+	if doc, ok := gitops.MatchingDocument([]byte(before), namespace, name); ok {
+		before = string(doc)
 	}
 	after, err := h.Crypto.SealMutations(r.Context(), secret.YAML, mutations)
 	if err != nil {

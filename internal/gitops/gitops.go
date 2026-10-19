@@ -240,6 +240,17 @@ func MatchesSealedSecret(content []byte, namespace, name string) bool {
 	return false
 }
 
+// MatchingDocument returns the document matching namespace/name from multi-doc content, using the
+// same identity rules as MatchesSealedSecret and SpliceSealedSecret; false means no document matched.
+func MatchingDocument(content []byte, namespace, name string) ([]byte, bool) {
+	for _, doc := range splitYAMLDocuments(content) {
+		if key, ok := sealedSecretIdentity(doc); ok && (key == identityKey(namespace, name) || key == identityKey("", name)) {
+			return doc, true
+		}
+	}
+	return nil, false
+}
+
 // SpliceSealedSecret replaces the document matching namespace/name inside a multi-document file,
 // leaving every sibling byte for byte identical; false means nothing matched and `incoming` is the
 // whole file. The destination lookup guarantees a match before this is called — false is a race,

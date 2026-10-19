@@ -1102,3 +1102,44 @@ func TestGitOpsSyncSplicesIntoAMultiDocumentFile(t *testing.T) {
 		t.Fatalf("sibling document did not survive byte for byte: %q", string(snapshot.Content))
 	}
 }
+
+// TestSyncStatusComparesTheMatchedDocument pins the read side of the same contract: drift status of
+// a Secret in a multi-document file is decided against that Secret's document, not the file's first
+// one, or the second Secret reports identity drift against its sibling's manifest.
+func TestSyncStatusComparesTheMatchedDocument(t *testing.T) {
+	path := "clusters/payments/api.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, multiDocFile("payments", "api", "current", sealedManifest("payments", "sidecar")), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+
+	statusFor := func(t *testing.T, name, live string) map[string]any {
+		t.Helper()
+		k8s := protectedK8s{secrets: []kubernetes.SealedSecret{{Name: name, Namespace: "payments", YAML: live}}}
+		h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+		req := protectedRequest(http.MethodGet, "/api/v1/gitops/sync?namespace=payments&name="+name, "", protectedIdentity(policy.MetadataRead))
+		rr := httptest.NewRecorder()
+		h.GitOpsSyncStatusHandler(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status = %d %s", name, rr.Code, rr.Body.String())
+		}
+		var status map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+
+	// The second document's Secret compares against its own document: matching it is in sync
+	// (sealedManifest's literal ciphertext), and a stale ciphertext is ciphertext drift, never identity.
+	if got := statusFor(t, "sidecar", sealedManifest("payments", "sidecar")); got["drift_status"] != "in-sync" {
+		t.Fatalf("second document in sync: %v", got)
+	}
+	stale := statusFor(t, "sidecar", deliveryManifest("payments", "sidecar", "stale"))
+	if stale["drift_status"] != "diverged" || stale["drift_reason"] != "ciphertext" {
+		t.Fatalf("second document stale = %v", stale)
+	}
+}

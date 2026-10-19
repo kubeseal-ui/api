@@ -171,6 +171,28 @@ func TestSpliceSealedSecretPreservesSiblings(t *testing.T) {
 	}
 }
 
+// TestMatchingDocumentFeedsTheDriftCompare pins the read-side counterpart of SpliceSealedSecret:
+// comparing a Secret against its file must use that Secret's document, not the file's first one.
+func TestMatchingDocumentExtractsTheMatchedDocument(t *testing.T) {
+	file, first := multiDocFixture()
+	second := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: batch\nspec:\n  encryptedData:\n    key: cipher-two\n"
+
+	doc, ok := MatchingDocument([]byte(file), "payments", "api")
+	if !ok || !bytes.Equal(doc, []byte(first)) {
+		t.Fatalf("first doc = %q, %v", doc, ok)
+	}
+	// The name-only second document matches on name alone, per the splice's own rules; the chunk
+	// carries its preceding separator, since splitYAMLDocuments keeps each one with what follows.
+	doc, ok = MatchingDocument([]byte(file), "prod", "batch")
+	if !ok || !bytes.Equal(doc, []byte("---\n"+second)) {
+		t.Fatalf("name-only doc = %q, %v", doc, ok)
+	}
+	// A foreign kind in the file is not a match, and a missing identity matches nothing.
+	if _, ok := MatchingDocument([]byte(file), "payments", "absent"); ok {
+		t.Fatal("matched an identity the file does not hold")
+	}
+}
+
 func TestSpliceSealedSecretMatchesNameOnlyDocument(t *testing.T) {
 	file, _ := multiDocFixture()
 	replacement := sealedDoc("cluster", "batch", "cipher-two-new")
