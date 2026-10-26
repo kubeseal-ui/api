@@ -1,6 +1,6 @@
 # kubeseal-ui-api
 
-Go backend for kubeseal-ui. The Vue frontend is a separate repository (`kubeseal-ui-frontend`).
+Go backend for kubeseal-ui.
 
 ## Repository Structure
 
