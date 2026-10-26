@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -63,6 +64,69 @@ func headCommit(t *testing.T, dir, branch string) string {
 	return string(out[:len(out)-1])
 }
 
+func fileAtBranch(t *testing.T, dir, branch, path string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "show", branch+":"+path)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("show %s:%s: %v", branch, path, err)
+	}
+	return string(out)
+}
+
+// TestGoGitTransportShallowCheckoutTracksRemoteAdvances pins the shallow-worktree recovery: the
+// depth-1 checkout cannot fast-forward past its boundary — go-git refuses the update as
+// non-fast-forward even forced — so the second read after a remote advance re-clones instead of
+// failing, which is how a second secret creation after a first successful delivery used to die.
+func TestGoGitTransportShallowCheckoutTracksRemoteAdvances(t *testing.T) {
+	remote := bareRemote(t, t.TempDir()+"/remote.git", "main")
+	remoteURL := "file://" + remote
+	seed := seedWorktree(t, t.TempDir()+"/seed", remoteURL, "main", "clusters/payments/api.yaml", "before-content")
+
+	transport, err := NewGoGitTransport(GoGitOptions{ScratchDir: t.TempDir(), AuthorEmail: "kubeseal-ui@test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	target := Target{Repository: remoteURL, Branch: "main", Path: "clusters/payments/api.yaml"}
+
+	if _, err := transport.ReadManifest(ctx, target, ""); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+
+	// The read worktree must be shallow for this test to mean anything.
+	worktrees, err := filepath.Glob(filepath.Join(transport.scratch, "worktree", "*", "*"))
+	if err != nil || len(worktrees) != 1 {
+		t.Fatalf("expected one worktree, got %v (%v)", worktrees, err)
+	}
+	if _, err := os.Stat(filepath.Join(worktrees[0], ".git", "shallow")); err != nil {
+		t.Fatalf("checkout is not shallow: %v", err)
+	}
+
+	run := func(args ...string) {
+		t.Helper()
+		inner := exec.Command("git", args...)
+		inner.Dir = seed
+		if out, err := inner.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(seed, "clusters/payments/api.yaml"), []byte("after-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "clusters/payments/api.yaml")
+	run("commit", "-m", "advance")
+	run("push", "origin", "main")
+
+	snapshot, err := transport.ReadManifest(ctx, target, "")
+	if err != nil {
+		t.Fatalf("read after remote advance: %v", err)
+	}
+	if string(snapshot.Content) != "after-content" {
+		t.Fatalf("stale content after advance: %q", snapshot.Content)
+	}
+}
+
 func TestGoGitTransportRoundTripAgainstBareRemote(t *testing.T) {
 	remote := bareRemote(t, t.TempDir()+"/remote.git", "main")
 	remoteURL := "file://" + remote
@@ -112,6 +176,150 @@ func TestGoGitTransportRoundTripAgainstBareRemote(t *testing.T) {
 	if string(readBack.Content) != "after-content" || readBack.Commit != pushed.Commit {
 		t.Fatalf("read-back mismatch: %#v vs %#v", readBack, pushed)
 	}
+}
+
+// A proposal push must exist on the remote under its own branch. Nothing creates that branch
+// locally, and go-git silently pushes nothing when the refspec source is missing, so this asserts
+// against a real remote rather than a transport that synthesises the branch.
+func TestGoGitTransportProposalPushLandsItsOwnBranch(t *testing.T) {
+	remote := bareRemote(t, t.TempDir()+"/remote.git", "main")
+	remoteURL := "file://" + remote
+	seedWorktree(t, t.TempDir()+"/seed", remoteURL, "main", "clusters/payments/api.yaml", "before-content")
+
+	transport, err := NewGoGitTransport(GoGitOptions{ScratchDir: t.TempDir(), AuthorEmail: "kubeseal-ui@test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	target := Target{Repository: remoteURL, Branch: "main", Path: "clusters/payments/api.yaml"}
+
+	snapshot, err := transport.ReadManifest(ctx, target, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := "kubeseal-ui/cluster-api"
+	pushed, err := transport.PushBranch(ctx, Change{
+		Target:     target,
+		Branch:     proposal,
+		BaseCommit: snapshot.Commit,
+		Content:    []byte("after-content"),
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pushed.Branch != proposal {
+		t.Fatalf("push reported branch %q, want %q", pushed.Branch, proposal)
+	}
+	if got := headCommit(t, remote, proposal); got != pushed.Commit {
+		t.Fatalf("proposal branch head %q, reported %q", got, pushed.Commit)
+	}
+	if got := fileAtBranch(t, remote, proposal, target.Path); got != "after-content" {
+		t.Fatalf("proposal branch content %q, want %q", got, "after-content")
+	}
+	if got := headCommit(t, remote, "main"); got != snapshot.Commit {
+		t.Fatalf("proposal push moved the target branch to %q, want %q", got, snapshot.Commit)
+	}
+}
+
+// A retry of a delivery that landed still carries the base the first push moved, so the stale-base
+// guard would refuse work that is already done. Content equality is therefore checked first: the
+// file holds exactly the requested bytes, and the answer is the commit that put them there. A stale
+// base whose content differs is still a conflict — that is the case the guard exists for.
+func TestGoGitTransportRetryOfLandedContentIsNotAConflict(t *testing.T) {
+	remote := bareRemote(t, t.TempDir()+"/remote.git", "main")
+	remoteURL := "file://" + remote
+	seedWorktree(t, t.TempDir()+"/seed", remoteURL, "main", "clusters/payments/api.yaml", "before-content")
+
+	transport, err := NewGoGitTransport(GoGitOptions{ScratchDir: t.TempDir(), AuthorEmail: "kubeseal-ui@test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	target := Target{Repository: remoteURL, Branch: "main", Path: "clusters/payments/api.yaml"}
+
+	first, err := transport.ReadManifest(ctx, target, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := Change{Target: target, BaseCommit: first.Commit, Content: []byte("after-content")}
+	pushed, err := transport.PushBranch(ctx, change, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retried, err := transport.PushBranch(ctx, change, "")
+	if err != nil {
+		t.Fatalf("retry of a landed delivery: %v", err)
+	}
+	if retried.Commit != pushed.Commit {
+		t.Fatalf("retry reported commit %q, want the delivered %q", retried.Commit, pushed.Commit)
+	}
+
+	stale := Change{Target: target, BaseCommit: first.Commit, Content: []byte("other-content")}
+	_, err = transport.PushBranch(ctx, stale, "")
+	var conflict *ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v, want ConflictError for a stale base over new content", err)
+	}
+}
+
+// One GoGitTransport serves the whole process and its checkout is keyed on repository and branch, so
+// concurrent deliveries for one namespace share one directory, one index and one HEAD. Serialised,
+// they converge on a single commit; interleaved, one request's Add and Commit can sweep in the
+// other's staged path or fail outright on a dirty worktree.
+func TestGoGitTransportConcurrentDeliveriesConvergeOnOneCommit(t *testing.T) {
+	remote := bareRemote(t, t.TempDir()+"/remote.git", "main")
+	remoteURL := "file://" + remote
+	seedWorktree(t, t.TempDir()+"/seed", remoteURL, "main", "clusters/payments/api.yaml", "before-content")
+
+	transport, err := NewGoGitTransport(GoGitOptions{ScratchDir: t.TempDir(), AuthorEmail: "kubeseal-ui@test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	target := Target{Repository: remoteURL, Branch: "main", Path: "clusters/payments/api.yaml"}
+	seed, err := transport.ReadManifest(ctx, target, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every delivery carries the same base, which only the first of them will still find at head.
+	const deliveries = 4
+	results := make([]PushResult, deliveries)
+	errs := make([]error, deliveries)
+	var wg sync.WaitGroup
+	for i := range deliveries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = transport.PushBranch(ctx, Change{Target: target, BaseCommit: seed.Commit, Content: []byte("after-content")}, "")
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("delivery %d: %v", i, err)
+		}
+		if results[i].Commit != results[0].Commit {
+			t.Fatalf("delivery %d reported commit %q, want the one commit %q", i, results[i].Commit, results[0].Commit)
+		}
+	}
+	// The seed and one delivery: the deliveries that lost the race found the content already at head
+	// rather than adding a commit of their own for it.
+	if got := commitCount(t, remote, "main"); got != "2" {
+		t.Fatalf("branch holds %s commits, want the seed and one delivery", got)
+	}
+}
+
+func commitCount(t *testing.T, dir, branch string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "rev-list", "--count", branch)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("rev-list: %v", err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestGoGitTransportRejectsStaleBase(t *testing.T) {

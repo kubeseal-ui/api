@@ -1,10 +1,5 @@
-// The authorization half of the Git-managed policy document: one document carries both
-// authorization and namespace Git mappings, but only the authz half is read here. A `git:`
-// section is accepted and ignored rather than refused, so a document written to the
-// published schema still loads.
-//
-// Unknown fields, capabilities, roles, and versions all fail validation rather than being
-// ignored, which is why the decode below is strict and every rule has its own error message.
+// The authorization half of the Git-managed policy document: a `git:` section is accepted and ignored, so a full-schema
+// document still loads. Unknown fields, capabilities, roles, and versions all fail validation — hence the strict decode.
 
 package policy
 
@@ -21,19 +16,13 @@ import (
 )
 
 const (
-	// AnyNamespace is the wildcard a group rule uses to grant in every namespace. It is the
-	// only pattern accepted: a prefix glob would make a rule's reach a question about a
-	// matcher rather than a fact about the file, and the file is meant to be read.
+	// AnyNamespace is the wildcard a group rule uses to grant in every namespace; the only pattern accepted.
 	AnyNamespace = "*"
 
-	// SupportedVersion is the only document version the loader reads. A different version is
-	// a document written against a contract this binary does not implement, so it is refused
-	// rather than best-effort parsed.
+	// SupportedVersion is the only document version the loader reads; anything else is refused, not best-effort parsed.
 	SupportedVersion = 1
 
-	// denyDefault is the only authorization default the loader can honour: `allow` would
-	// mean granting capabilities to a caller who matched no rule, which nothing here
-	// implements, so it is refused rather than accepted and silently ignored.
+	// denyDefault is the only authorization default honoured; `allow` would grant unmatched callers, which nothing implements.
 	denyDefault = "deny"
 )
 
@@ -41,9 +30,7 @@ const (
 type Document struct {
 	Version int   `json:"version"`
 	Authz   Authz `json:"authz"`
-	// Git is the document's Git half, which this loader does not read. Decoding it as opaque
-	// bytes keeps a full-schema document loadable while still rejecting a misspelled field
-	// inside the half that is read.
+	// Git is the document's Git half, unread here; opaque bytes keep a full-schema document loadable while misspelled keys in authz still fail.
 	Git json.RawMessage `json:"git,omitempty"`
 }
 
@@ -53,8 +40,7 @@ type Authz struct {
 	Groups   []GroupRule         `json:"groups"`
 }
 
-// Defaults is the documented deny-by-default declaration. Both fields must be `deny` when
-// present; an absent section means the same thing.
+// Defaults is the documented deny-by-default declaration; both fields must be `deny` when present, and absent means the same.
 type Defaults struct {
 	Unauthenticated string `json:"unauthenticated"`
 	Authenticated   string `json:"authenticated"`
@@ -64,17 +50,14 @@ type RoleSpec struct {
 	Capabilities []Capability `json:"capabilities"`
 }
 
-// GroupRule grants one role to one OIDC group, in the namespaces it names. Several rules may
-// name the same group with different namespace sets; their capabilities union.
+// GroupRule grants one role to one OIDC group, in the namespaces it names; several rules for one group union their capabilities.
 type GroupRule struct {
 	Name       string   `json:"name"`
 	Namespaces []string `json:"namespaces"`
 	Role       string   `json:"role"`
 }
 
-// ParseDocument decodes and validates a policy document, returning the first failure.
-// Validate reports every failure at once, and is what a caller who wants the whole list
-// should use.
+// ParseDocument decodes and validates a policy document, returning the first failure; Validate reports every failure at once.
 func ParseDocument(data []byte) (Document, error) {
 	if err := checkSingleDocument(data); err != nil {
 		return Document{}, err
@@ -85,9 +68,7 @@ func ParseDocument(data []byte) (Document, error) {
 	}
 	var doc Document
 	decoder := json.NewDecoder(bytes.NewReader(jsonBytes))
-	// Strict: the schema's contract is that unknown fields fail validation, and without this
-	// a misspelled key would parse as a section that grants nothing — a rule that silently
-	// does not apply.
+	// Strict: without DisallowUnknownFields a misspelled key would parse as a section that grants nothing — a rule that silently does not apply.
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&doc); err != nil {
 		return Document{}, fmt.Errorf("policy document: %w", err)
@@ -101,10 +82,7 @@ func ParseDocument(data []byte) (Document, error) {
 	return doc, nil
 }
 
-// checkSingleDocument rejects a file holding more than one YAML document: the decoder reads
-// the first and ignores the rest, so a stray separator would turn an appended second policy
-// into a silent no-op. The check is textual because no scalar in a policy document spans
-// lines, so a `---` line is always a separator.
+// checkSingleDocument rejects multiple YAML documents: the decoder reads the first and ignores the rest, so a stray separator would silence an appended policy.
 func checkSingleDocument(data []byte) error {
 	seenContent, seenSeparator := false, false
 	for _, line := range strings.Split(string(data), "\n") {
@@ -123,8 +101,7 @@ func checkSingleDocument(data []byte) error {
 	return nil
 }
 
-// Validate reports every problem in the document at once, so one pass over a broken file
-// tells an operator everything that has to change.
+// Validate reports every problem in the document at once, so one pass tells an operator everything that has to change.
 func (d Document) Validate() error {
 	var errs []error
 
@@ -141,8 +118,7 @@ func (d Document) Validate() error {
 		}
 	}
 
-	// Declared roles, in a stable order so the error list does not shuffle between runs of
-	// the same file.
+	// Declared roles, in a stable order so the error list does not shuffle between runs.
 	declared := make(map[string]bool, len(d.Authz.Roles))
 	for _, name := range sortedKeys(d.Authz.Roles) {
 		if err := validateRole(name, d.Authz.Roles[name]); err != nil {
@@ -152,9 +128,7 @@ func (d Document) Validate() error {
 		declared[name] = true
 	}
 
-	// One rule per group per namespace set: two rules for the same group over the same
-	// namespaces contradict each other, and unioning them would answer the contradiction by
-	// granting both — so it is refused.
+	// One rule per group per namespace set: two contradict, and unioning would answer the contradiction by granting both.
 	ruleIndex := make(map[string]int, len(d.Authz.Groups))
 	for i, rule := range d.Authz.Groups {
 		where := fmt.Sprintf("authz.groups[%d]", i)
@@ -190,9 +164,7 @@ func (d Document) Validate() error {
 	return errors.Join(errs...)
 }
 
-// validateRole checks one declared role. A built-in may be redeclared only with exactly its
-// canonical bundle: redefining one would let a ConfigMap quietly change what `platform-admin`
-// means.
+// validateRole checks one declared role; a built-in may be redeclared only with exactly its canonical bundle, or a ConfigMap could redefine `platform-admin`.
 func validateRole(name string, spec RoleSpec) error {
 	if name == "" {
 		return errors.New("authz.roles: a role name is required")
@@ -216,8 +188,7 @@ func validateRole(name string, spec RoleSpec) error {
 	return nil
 }
 
-// validateNamespacePattern accepts the wildcard or an exact namespace name, and refuses
-// everything in between.
+// validateNamespacePattern accepts the wildcard or an exact namespace name, and refuses everything in between.
 func validateNamespacePattern(namespace string) error {
 	if namespace == AnyNamespace {
 		return nil
@@ -231,13 +202,8 @@ func validateNamespacePattern(namespace string) error {
 	return nil
 }
 
-// Apply validates doc and, only if the whole document is valid, replaces the store's custom
-// roles and group rules in one critical section; a document that fails validation leaves the
-// store exactly as it was. Git mappings are untouched — the document's `git:` section is not
-// read, so they keep arriving from GITOPS_NAMESPACES.
-//
-// Applying a document also switches the store off the legacy fallback: once a file is read,
-// the file is the policy, and a grant it does not make does not exist.
+// Apply validates doc and only then replaces the store's roles and rules in one critical section, leaving the store
+// untouched on failure; Git mappings arrive from GITOPS_NAMESPACES, and applying also switches the store off the legacy fallback.
 func (s *PolicyStore) Apply(doc Document) error {
 	if err := doc.Validate(); err != nil {
 		return err
@@ -249,8 +215,7 @@ func (s *PolicyStore) Apply(doc Document) error {
 		}
 		role, err := NewCustomRole(name, spec.Capabilities)
 		if err != nil {
-			// Unreachable: Validate ran the same constructor over the same input. Returning
-			// it keeps the failure honest if that changes.
+			// Unreachable: Validate ran the same constructor over the same input; kept so the failure stays honest if that changes.
 			return fmt.Errorf("authz.roles.%s: %w", name, err)
 		}
 		roles[name] = role
@@ -275,8 +240,7 @@ func sortedKeys(roles map[string]RoleSpec) []string {
 	return names
 }
 
-// sortedUnique dedupes and orders namespace names so two rules' namespace sets compare equal
-// regardless of how they were written.
+// sortedUnique dedupes and orders namespace names so two rules' namespace sets compare equal regardless of spelling.
 func sortedUnique(values []string) []string {
 	seen := make(map[string]bool, len(values))
 	unique := make([]string, 0, len(values))
@@ -291,8 +255,7 @@ func sortedUnique(values []string) []string {
 	return unique
 }
 
-// sameCapabilitySet compares two capability lists as sets, so a redeclared built-in is judged
-// on what it grants rather than on how it was written.
+// sameCapabilitySet compares two capability lists as sets, so a redeclared built-in is judged on what it grants, not how it was written.
 func sameCapabilitySet(a, b []Capability) bool {
 	left, right := map[Capability]bool{}, map[Capability]bool{}
 	for _, c := range a {
@@ -312,8 +275,7 @@ func sameCapabilitySet(a, b []Capability) bool {
 	return true
 }
 
-// formatCapabilities renders a capability list in the schema's own vocabulary for an error
-// message, so the expected value can be pasted back into the file.
+// formatCapabilities renders a capability list in the schema's vocabulary, so the expected value can be pasted back into the file.
 func formatCapabilities(caps []Capability) string {
 	ordered := make([]string, 0, len(caps))
 	seen := map[Capability]bool{}

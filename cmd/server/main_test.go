@@ -224,6 +224,7 @@ func TestRouterReadyzReturns503WithoutConfig(t *testing.T) {
 func TestRouterReadyzReturns200WithConfig(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://auth.example.com")
 	t.Setenv("OIDC_CLIENT_ID", "kubeseal-ui")
+	t.Setenv("SESSION_SIGNING_KEY", "router-test-signing-key")
 
 	rr := httptest.NewRecorder()
 	mustRouter(t, routerOptions{logger: testLogger(), cfg: testConfig(), crypto: testCrypto(), k8s: testK8s()}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -246,5 +247,35 @@ func TestRouterDoesNotExposeProtectedRoutes(t *testing.T) {
 		if rr.Code != http.StatusNotFound {
 			t.Errorf("%s: want 404, got %d", path, rr.Code)
 		}
+	}
+}
+
+// TestCheckMappingCredentials drives the two parsers the way main does, so the test covers the boot
+// path and not just the comparison: the credential list is checked against the mappings that were
+// parsed from the same environment.
+func TestCheckMappingCredentials(t *testing.T) {
+	specs := parseMappingSpecs("dev:org/repo:main:clusters-{namespace}-{name}.yaml:git-auth:direct")
+	refs := parseCredentialRefs("git-auth:token:git:/var/run/secrets/git-token")
+	if err := checkMappingCredentials(specs, refs); err != nil {
+		t.Fatalf("a mapping whose credential is defined was refused: %v", err)
+	}
+
+	// The resolver fails closed on an unknown reference, so without this check the mapping would
+	// instead fail one delivery at a time, as a 502 blaming the upstream.
+	undefined := parseMappingSpecs("dev:org/repo:main:clusters-{namespace}-{name}.yaml:git-prod:direct")
+	err := checkMappingCredentials(undefined, refs)
+	if err == nil {
+		t.Fatal("a mapping naming an undefined credential was accepted")
+	}
+	for _, want := range []string{"dev", "git-prod"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+
+	// A mapping with no credential at all is the same class of mistake, and an empty list must not
+	// read as "no constraints".
+	if err := checkMappingCredentials(specs, nil); err == nil {
+		t.Error("a mapping was accepted with no credentials configured at all")
 	}
 }

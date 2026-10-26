@@ -121,11 +121,11 @@ func TestRevealRecordsOutcomeNotAttempt(t *testing.T) {
 	}
 }
 
-// TestDiffEmitsSecurityEvent pins that the diff endpoint is audited: it decrypts the complete Secret
-// internally to produce the before/after pair, so it belongs in the same event stream as reveal and
-// patch even though it returns ciphertext only. The event's key field carries every key the batch
-// names, sorted, so one reviewed change is one audit record that says what it touched regardless of
-// the order the client listed it in.
+// TestDiffEmitsSecurityEvent pins that the diff endpoint is audited: it names every key the batch
+// touches, so it belongs in the same event stream as reveal and patch even though it returns
+// ciphertext only and never decrypts. The event's key field carries every key the batch names,
+// sorted, so one reviewed change is one audit record that says what it touched regardless of the
+// order the client listed it in.
 func TestDiffEmitsSecurityEvent(t *testing.T) {
 	sink := &eventSink{}
 	h := NewProtectedHandlers(protectedK8s{}, &crypto.Wrapper{}, true)
@@ -157,6 +157,54 @@ func TestDiffEmitsSecurityEvent(t *testing.T) {
 	// The values are the sensitive half of the batch and must not reach the event through any field.
 	if strings.Contains(e.key, "plaintext-marker") || strings.Contains(e.secret, "plaintext-marker") {
 		t.Fatalf("event carries mutation values: %#v", e)
+	}
+}
+
+// TestGitOpsEndpointsAuditTheSecretNotTheRepository pins the audit fields for the highest-consequence
+// operations. The dry-run and deliver handlers used to pass the repository where the event's namespace
+// goes and the file path where the resource goes, so "who delivered a change to Secret X?" was
+// unanswerable and a consumer filtering events by namespace received git URLs. The sync handler used
+// the same fields correctly the whole time, which is what made the two meanings a defect rather than a
+// convention.
+func TestGitOpsEndpointsAuditTheSecretNotTheRepository(t *testing.T) {
+	cases := []struct {
+		name      string
+		operation string
+		path      string
+		call      func(h *ProtectedHandlers, r *http.Request)
+	}{
+		{"dry run", "gitops_dry_run", "/api/v1/gitops/dry-run",
+			func(h *ProtectedHandlers, r *http.Request) { h.GitOpsDryRunHandler(httptest.NewRecorder(), r) }},
+		{"deliver", "gitops_delivery", "/api/v1/gitops/deliver",
+			func(h *ProtectedHandlers, r *http.Request) { h.GitOpsDeliverHandler(httptest.NewRecorder(), r) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := gitops.NewLocalTransport()
+			transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, deliveryManifest("payments", "api", "old-cipher"), "abc")
+			store := policy.NewPolicyStore()
+			if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+				t.Fatal(err)
+			}
+			sink := &eventSink{}
+			h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+			h.SecurityEvents = sink
+
+			req := protectedRequest(http.MethodPost, tc.path, gitChangeBody(t, "payments", "api", sealedManifest("payments", "api"), "abc"), protectedIdentity(policy.GitOpsPush))
+			req.Header.Set("Idempotency-Key", "audit-"+tc.name)
+			tc.call(h, req)
+
+			if len(sink.events) != 1 {
+				t.Fatalf("events = %d, want exactly 1", len(sink.events))
+			}
+			e := sink.events[0]
+			if e.operation != tc.operation || e.namespace != "payments" || e.secret != "api" || e.result != "success" {
+				t.Fatalf("unexpected event: %#v", e)
+			}
+			if strings.Contains(e.namespace, "platform") || strings.Contains(e.secret, "yaml") {
+				t.Fatalf("repository or file path in the audit fields: %#v", e)
+			}
+		})
 	}
 }
 

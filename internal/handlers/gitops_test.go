@@ -46,12 +46,12 @@ func TestGitOpsDryRunHandlerRequiresModeCapability(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rr.Code)
 	}
-	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied", "")
+	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied: missing capability gitops:propose", "")
 }
 
 func TestGitOpsDryRunResolvesMappingAndReturnsEncryptedDiff(t *testing.T) {
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old-ciphertext", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, deliveryManifest("payments", "api", "old-ciphertext"), "abc")
 	store := policy.NewPolicyStore()
 	mapping := policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}
 	if err := store.SetGitMapping(mapping); err != nil {
@@ -75,8 +75,9 @@ func TestGitOpsDryRunResolvesMappingAndReturnsEncryptedDiff(t *testing.T) {
 // unreadable to the sealed-secrets controller.
 func TestGitOpsDryRunReturnsManifestTextNotBase64(t *testing.T) {
 	manifest := sealedManifest("payments", "api")
+	existing := deliveryManifest("payments", "api", "old-ciphertext")
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old-ciphertext", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, existing, "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -99,7 +100,7 @@ func TestGitOpsDryRunReturnsManifestTextNotBase64(t *testing.T) {
 	if result.After != manifest || result.Diff != manifest {
 		t.Fatalf("after = %q, want the manifest text %q", result.After, manifest)
 	}
-	if result.Before != "old-ciphertext" {
+	if result.Before != existing {
 		t.Fatalf("before = %q, want the existing file text", result.Before)
 	}
 }
@@ -135,7 +136,7 @@ func TestGitOpsDeliveryRejectsAnEncodedManifest(t *testing.T) {
 
 func TestGitOpsDeliverDirectUsesTransport(t *testing.T) {
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, deliveryManifest("payments", "api", "old"), "abc")
 	store := policy.NewPolicyStore()
 	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
 		t.Fatal(err)
@@ -165,8 +166,9 @@ func (failingProposalAdapter) OpenProposal(context.Context, gitops.ProposalReque
 }
 
 func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *testing.T) {
+	existing := deliveryManifest("payments", "api", "old")
 	transport := gitops.NewLocalTransport()
-	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, "old", "abc")
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, existing, "abc")
 	store := policy.NewPolicyStore()
 	mapping := policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryProposal, ProposalAdapter: failingProposalAdapter{}}
 	if err := store.SetGitMapping(mapping); err != nil {
@@ -188,7 +190,7 @@ func TestGitOpsDeliverProposalAdapterFailureLeavesBranchAndRetryReconciles(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(snapshot.Content) != "old" {
+	if string(snapshot.Content) != existing {
 		t.Fatal("direct branch content changed by a proposal push")
 	}
 
@@ -808,3 +810,337 @@ func TestGitOpsSyncStatusReportsTheHeadForALiveOnlySecret(t *testing.T) {
 	}
 }
 
+// TestGitOpsDeliverRefusesATargetPathThatCleansOutsideTheAllowlist pins the allowlist against the
+// path string it used to never clean.
+//
+// `custom/apps/../clusters/payments.yaml` passes a prefix test on `custom/apps` while the real
+// transport joins the raw string onto the worktree, where the filesystem cleans it and the commit
+// writes `clusters/payments.yaml` — a file outside the grant, over whatever was there.
+func TestGitOpsDeliverRefusesATargetPathThatCleansOutsideTheAllowlist(t *testing.T) {
+	const escape = "custom/apps/../clusters/payments.yaml"
+	const victim = "clusters/payments.yaml"
+	victimContent := deliveryManifest("payments", "other", "other-cipher")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: victim}, victimContent, "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	body, err := json.Marshal(map[string]string{
+		"namespace": "payments", "name": "api", "base_commit": "abc",
+		"yaml": deliveryManifest("payments", "api", "new-cipher"), "target_path": escape,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "deliver-escape-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "INVALID_TARGET_PATH", "Target path not allowed by namespace mapping", "")
+
+	// The in-memory transport keys entries by the string it was handed, so it cannot itself show the
+	// write landing in the cleaned file; the refusal above is what pins this. The content check
+	// covers the other direction: nothing was written under either spelling.
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: victim}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot.Content) != victimContent {
+		t.Fatalf("refused delivery wrote %s: %q", victim, string(snapshot.Content))
+	}
+}
+
+// TestGitOpsDeliverRefusesATemplatedPathHeldByAnotherSecret covers the create whose default
+// destination is already taken.
+//
+// Discovery reads the templated path first and reports what it finds there. A file that is not this
+// identity's manifest used to be reported as "no manifest for this identity", which the create then
+// read as a vacancy and wrote into — replacing the other Secret's sealed data with this one's, while
+// the audit trail recorded a successful delivery.
+func TestGitOpsDeliverRefusesATemplatedPathHeldByAnotherSecret(t *testing.T) {
+	const templated = "clusters/payments/api.yaml"
+	occupied := deliveryManifest("payments", "somebody-else", "other-cipher")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: templated}, occupied, "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", gitChangeBody(t, "payments", "api", deliveryManifest("payments", "api", "new-cipher"), "abc"), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "deliver-occupied-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "PATH_OCCUPIED", "Another manifest is already committed at this path", "")
+
+	held, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: templated}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(held.Content) != occupied {
+		t.Fatalf("refused delivery replaced the occupant: %q", string(held.Content))
+	}
+}
+
+// TestGitOpsDeliverRefusesANamedAllowedPathThatIsOccupied is the allowlist half of that rule: the
+// allowlist grants a destination, not the right to replace what is already at it. A named path
+// holding another identity's manifest is refused even though the mapping admits the path.
+func TestGitOpsDeliverRefusesANamedAllowedPathThatIsOccupied(t *testing.T) {
+	const chosen = "custom/apps/taken.yaml"
+	occupied := deliveryManifest("payments", "somebody-else", "other-cipher")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: chosen}, occupied, "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AllowedPaths: []string{"custom/apps"}, AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	body, err := json.Marshal(map[string]string{
+		"namespace": "payments", "name": "api", "base_commit": "abc",
+		"yaml": deliveryManifest("payments", "api", "new-cipher"), "target_path": chosen,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "deliver-occupied-named-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "PATH_OCCUPIED", "Another manifest is already committed at this path", "")
+
+	held, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: chosen}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(held.Content) != occupied {
+		t.Fatalf("refused delivery replaced the occupant: %q", string(held.Content))
+	}
+}
+
+// TestGitOpsSyncRefusesAMappedFileHoldingAnotherSecret is the state the drift report calls
+// `drift_reason: identity` — the one divergence a sync cannot resolve, because the file the mapping
+// points at belongs to something else.
+//
+// The refusal has to belong to the endpoint: a sync that committed this Secret's ciphertext over the
+// other one's would take the other application's Secret out of Git and record a successful sync of
+// this one. The status report must not offer the action either, so both halves are asserted here —
+// an offer the endpoint refuses is a button that only ever returns a conflict.
+func TestGitOpsSyncRefusesAMappedFileHoldingAnotherSecret(t *testing.T) {
+	const templated = "clusters/payments/api.yaml"
+	occupied := deliveryManifest("payments", "somebody-else", "other-cipher")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: templated}, occupied, "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	live := deliveryManifest("payments", "api", "live-cipher")
+	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "api", Namespace: "payments", YAML: live}}}
+	h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+
+	statusReq := protectedRequest(http.MethodGet, "/api/v1/gitops/sync/status?namespace=payments&name=api", "", protectedIdentity(policy.MetadataRead))
+	statusRR := httptest.NewRecorder()
+	h.GitOpsSyncStatusHandler(statusRR, statusReq)
+	if statusRR.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", statusRR.Code, statusRR.Body.String())
+	}
+	var status map[string]any
+	if err := json.Unmarshal(statusRR.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["drift_status"] != "diverged" || status["can_sync"] != false {
+		t.Fatalf("drift_status = %v, can_sync = %v; want diverged and false", status["drift_status"], status["can_sync"])
+	}
+
+	body, err := json.Marshal(map[string]string{"namespace": "payments", "name": "api", "base_commit": "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/sync", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "sync-occupied-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsSyncHandler(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+	assertErrorEnvelope(t, rr, "PATH_OCCUPIED", "Another manifest is already committed at this path", "")
+
+	held, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: templated}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(held.Content) != occupied {
+		t.Fatalf("refused sync replaced the occupant: %q", string(held.Content))
+	}
+}
+
+// multiDocFile builds a two-SealedSecret file holding `sibling` and the secret under test, so a
+// delivery or sync that assumed one document per file would visibly drop the sibling.
+func multiDocFile(namespace, name, ciphertext, sibling string) string {
+	return sealedManifest(namespace, name) + "---\n" + sibling
+}
+
+// TestGitOpsDeliverSplicesIntoAMultiDocumentFile pins the fix for the last open audit finding: the
+// templated path holds several SealedSecret documents, and delivering to one of them must replace
+// only its own document, leaving the sibling byte for byte intact.
+func TestGitOpsDeliverSplicesIntoAMultiDocumentFile(t *testing.T) {
+	sibling := sealedManifest("payments", "sidecar")
+	path := "clusters/payments/api.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, multiDocFile("payments", "api", "old", sibling), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/deliver", gitChangeBody(t, "payments", "api", deliveryManifest("payments", "api", "new"), "abc"), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "multidoc-deliver-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsDeliverHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("deliver = %d %s", rr.Code, rr.Body.String())
+	}
+
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: path}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(snapshot.Content), "key: new") {
+		t.Fatalf("delivered ciphertext absent: %q", string(snapshot.Content))
+	}
+	if !strings.HasSuffix(string(snapshot.Content), sibling) {
+		t.Fatalf("sibling document did not survive byte for byte: %q", string(snapshot.Content))
+	}
+}
+
+// TestGitOpsDryRunReturnsTheMergedMultiDocumentFile covers the client contract that rests on the
+// splice: `after` is the whole merged file, so the reviewed artifact and the delivery re-splice see
+// the same document set rather than a file that would overwrite the siblings.
+func TestGitOpsDryRunReturnsTheMergedMultiDocumentFile(t *testing.T) {
+	sibling := sealedManifest("payments", "sidecar")
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/payments/api.yaml"}, multiDocFile("payments", "api", "old", sibling), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport, nil, nil, false)
+
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/dry-run", gitChangeBody(t, "payments", "api", deliveryManifest("payments", "api", "new"), "abc"), protectedIdentity(policy.GitOpsPush))
+	rr := httptest.NewRecorder()
+	h.GitOpsDryRunHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("dry-run = %d %s", rr.Code, rr.Body.String())
+	}
+	var diff struct {
+		After string `json:"after"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &diff); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff.After, "key: new") || !strings.Contains(diff.After, "name: sidecar") {
+		t.Fatalf("after is not the merged file: %q", diff.After)
+	}
+}
+
+// TestGitOpsSyncSplicesIntoAMultiDocumentFile covers the live-to-Git direction of the same contract.
+func TestGitOpsSyncSplicesIntoAMultiDocumentFile(t *testing.T) {
+	sibling := sealedManifest("payments", "sidecar")
+	path := "clusters/payments/api.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, multiDocFile("payments", "api", "old", sibling), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+	live := deliveryManifest("payments", "api", "live-cipher")
+	k8s := protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "api", Namespace: "payments", YAML: live}}}
+	h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+
+	body, err := json.Marshal(map[string]string{"namespace": "payments", "name": "api", "base_commit": "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protectedRequest(http.MethodPost, "/api/v1/gitops/sync", string(body), protectedIdentity(policy.GitOpsPush))
+	req.Header.Set("Idempotency-Key", "multidoc-sync-1")
+	rr := httptest.NewRecorder()
+	h.GitOpsSyncHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("sync = %d %s", rr.Code, rr.Body.String())
+	}
+
+	snapshot, err := transport.ReadManifest(context.Background(), gitops.Target{Repository: "platform", Branch: "main", Path: path}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(snapshot.Content), "key: live-cipher") {
+		t.Fatalf("live ciphertext absent: %q", string(snapshot.Content))
+	}
+	if !strings.HasSuffix(string(snapshot.Content), sibling) {
+		t.Fatalf("sibling document did not survive byte for byte: %q", string(snapshot.Content))
+	}
+}
+
+// TestSyncStatusComparesTheMatchedDocument pins the read side of the same contract: drift status of
+// a Secret in a multi-document file is decided against that Secret's document, not the file's first
+// one, or the second Secret reports identity drift against its sibling's manifest.
+func TestSyncStatusComparesTheMatchedDocument(t *testing.T) {
+	path := "clusters/payments/api.yaml"
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: path}, multiDocFile("payments", "api", "current", sealedManifest("payments", "sidecar")), "abc")
+
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{Namespace: "payments", Repository: "platform", Branch: "main", PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect}); err != nil {
+		t.Fatal(err)
+	}
+
+	statusFor := func(t *testing.T, name, live string) map[string]any {
+		t.Helper()
+		k8s := protectedK8s{secrets: []kubernetes.SealedSecret{{Name: name, Namespace: "payments", YAML: live}}}
+		h := NewProtectedHandlersWithGitOps(store, transport, k8s, nil, false)
+		req := protectedRequest(http.MethodGet, "/api/v1/gitops/sync?namespace=payments&name="+name, "", protectedIdentity(policy.MetadataRead))
+		rr := httptest.NewRecorder()
+		h.GitOpsSyncStatusHandler(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status = %d %s", name, rr.Code, rr.Body.String())
+		}
+		var status map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+
+	// The second document's Secret compares against its own document: matching it is in sync
+	// (sealedManifest's literal ciphertext), and a stale ciphertext is ciphertext drift, never identity.
+	if got := statusFor(t, "sidecar", sealedManifest("payments", "sidecar")); got["drift_status"] != "in-sync" {
+		t.Fatalf("second document in sync: %v", got)
+	}
+	stale := statusFor(t, "sidecar", deliveryManifest("payments", "sidecar", "stale"))
+	// The endpoint does not expose drift_reason; can_sync is the observable that the reason is not identity.
+	if stale["drift_status"] != "diverged" || stale["can_sync"] != true {
+		t.Fatalf("second document stale = %v", stale)
+	}
+}

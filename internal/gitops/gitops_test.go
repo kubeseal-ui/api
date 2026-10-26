@@ -135,3 +135,105 @@ func TestLocalTransportDryRunRejectsStaleBase(t *testing.T) {
 		t.Fatalf("error = %v, want BaseCommitError", err)
 	}
 }
+
+// sealedDoc builds one SealedSecret document with a distinguishable ciphertext.
+func sealedDoc(namespace, name, ciphertext string) string {
+	return "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: " + name +
+		"\n  namespace: " + namespace + "\nspec:\n  encryptedData:\n    key: " + ciphertext + "\n"
+}
+
+// multiDocFixture is a two-SealedSecret file whose second document names no namespace, so both
+// matching rules (specific identity and name-only) are exercised against the same file.
+func multiDocFixture() (string, string) {
+	first := sealedDoc("payments", "api", "cipher-one")
+	second := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: batch\nspec:\n  encryptedData:\n    key: cipher-two\n"
+	return first + "---\n" + second, first
+}
+
+// TestSpliceSealedSecretPreservesSiblings pins the multi-document delivery contract: replacing one
+// document leaves every other byte of the file identical, and the join round-trips the input.
+func TestSpliceSealedSecretPreservesSiblings(t *testing.T) {
+	file, first := multiDocFixture()
+	replacement := sealedDoc("payments", "api", "cipher-one-new") + "\n"
+
+	merged, ok := SpliceSealedSecret([]byte(file), []byte(replacement), "payments", "api")
+	if !ok {
+		t.Fatal("splice found no match")
+	}
+	want := replacement + "---\n" + file[len(first)+len("---\n"):]
+	if !bytes.Equal(merged, []byte(want)) {
+		t.Fatalf("sibling bytes changed: %q", string(merged))
+	}
+	// Re-splicing the merged file back to the original content must reproduce the original byte for byte.
+	roundTrip, ok := SpliceSealedSecret(merged, []byte(first), "payments", "api")
+	if !ok || !bytes.Equal(roundTrip, []byte(file)) {
+		t.Fatalf("round-trip lost bytes: ok=%v %q", ok, string(roundTrip))
+	}
+}
+
+// TestMatchingDocumentFeedsTheDriftCompare pins the read-side counterpart of SpliceSealedSecret:
+// comparing a Secret against its file must use that Secret's document, not the file's first one.
+func TestMatchingDocumentExtractsTheMatchedDocument(t *testing.T) {
+	file, first := multiDocFixture()
+	second := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: batch\nspec:\n  encryptedData:\n    key: cipher-two\n"
+
+	doc, ok := MatchingDocument([]byte(file), "payments", "api")
+	if !ok || !bytes.Equal(doc, []byte(first)) {
+		t.Fatalf("first doc = %q, %v", doc, ok)
+	}
+	// The name-only second document matches on name alone, per the splice's own rules; the chunk
+	// carries its preceding separator, since splitYAMLDocuments keeps each one with what follows.
+	doc, ok = MatchingDocument([]byte(file), "prod", "batch")
+	if !ok || !bytes.Equal(doc, []byte("---\n"+second)) {
+		t.Fatalf("name-only doc = %q, %v", doc, ok)
+	}
+	// A foreign kind in the file is not a match, and a missing identity matches nothing.
+	if _, ok := MatchingDocument([]byte(file), "payments", "absent"); ok {
+		t.Fatal("matched an identity the file does not hold")
+	}
+}
+
+func TestSpliceSealedSecretMatchesNameOnlyDocument(t *testing.T) {
+	file, _ := multiDocFixture()
+	replacement := sealedDoc("cluster", "batch", "cipher-two-new")
+
+	merged, ok := SpliceSealedSecret([]byte(file), []byte(replacement), "prod", "batch")
+	if !ok {
+		t.Fatal("splice found no match")
+	}
+	if !bytes.Contains(merged, []byte("cipher-two-new")) || bytes.Contains(merged, []byte("key: cipher-two\n")) {
+		t.Fatalf("name-only document not replaced: %q", string(merged))
+	}
+	if !bytes.Contains(merged, []byte("cipher-one")) {
+		t.Fatalf("sibling lost: %q", string(merged))
+	}
+	// The second document's chunk carries the separator, so the replacement must re-emit it.
+	if !bytes.Contains(merged, []byte("key: cipher-one\n---\n")) {
+		t.Fatalf("separator between siblings lost: %q", string(merged))
+	}
+}
+
+func TestSpliceSealedSecretNoMatchReturnsIncoming(t *testing.T) {
+	file, _ := multiDocFixture()
+	incoming := sealedDoc("payments", "other", "cipher-x")
+	merged, ok := SpliceSealedSecret([]byte(file), []byte(incoming), "payments", "other")
+	if ok {
+		t.Fatal("splice claimed a match that does not exist")
+	}
+	if !bytes.Equal(merged, []byte(incoming)) {
+		t.Fatalf("fallback altered incoming: %q", string(merged))
+	}
+}
+
+func TestSpliceSealedSecretAddsTrailingNewline(t *testing.T) {
+	file, _ := multiDocFixture()
+	incoming := "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: api\n  namespace: payments\nspec:\n  encryptedData:\n    key: new"
+	merged, ok := SpliceSealedSecret([]byte(file), []byte(incoming), "payments", "api")
+	if !ok {
+		t.Fatal("splice found no match")
+	}
+	// The match is the first document, so the newline lands before the sibling separator, not at the file's end.
+	if !bytes.Contains(merged, []byte("key: new\n---\n")) {
+		t.Fatalf("incoming gained no separator newline: %q", string(merged))
+	}
+}

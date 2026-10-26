@@ -1,7 +1,5 @@
-// Typed authentication references for the go-git transport: the platform-neutral transport
-// carries typed, go-git-supported credentials. Every credential value resolves from a file
-// (a Kubernetes Secret mount) at request time; tokens are never embedded in configuration or
-// logged.
+// Typed authentication references for the go-git transport; credential values resolve from
+// Secret-mounted files at request time and are never embedded in configuration or logged.
 package gitops
 
 import (
@@ -19,8 +17,7 @@ import (
 type AuthMode string
 
 const (
-	// AuthModeHTTPSToken sends Username as the Basic username and Token as the Basic
-	// password over HTTPS. The default platform mode.
+	// AuthModeHTTPSToken sends Token as the Basic password over HTTPS; the default platform mode.
 	AuthModeHTTPSToken AuthMode = "https-token"
 	// AuthModeSSHAgent authenticates over SSH through the local agent.
 	AuthModeSSHAgent AuthMode = "ssh-agent"
@@ -43,20 +40,16 @@ func ParseAuthMode(raw string) (AuthMode, error) {
 	return "", fmt.Errorf("unknown auth mode %q", raw)
 }
 
-// Credential is the typed authentication reference handed to the transport. Token values
-// come from Secret-mounted files and must never be logged; the redacting slog handler drops
-// any attribute key containing "token".
+// Credential is the typed authentication reference handed to the transport; token values are never logged.
 type Credential struct {
 	Mode     AuthMode
 	Username string
 	Token    string
-	// TokenFile resolves the token from a Secret-mounted file at call time. Mutually
-	// exclusive with Token.
+	// TokenFile resolves the token from a Secret-mounted file at call time; mutually exclusive with Token.
 	TokenFile string
 }
 
-// Validate checks the typing: https-token needs exactly one of Token/TokenFile, and none
-// may carry values. An empty Username defaults to "kubeseal-ui" at transport time.
+// Validate checks the typing: https-token needs exactly one of Token/TokenFile, and none may carry values.
 func (c Credential) Validate() error {
 	switch c.Mode {
 	case AuthModeHTTPSToken:
@@ -79,8 +72,7 @@ func (c Credential) Validate() error {
 	}
 }
 
-// transportAuth converts the typed credential to a go-git AuthMethod, resolving TokenFile
-// at call time so rotated Secrets take effect without a restart.
+// transportAuth converts the typed credential to a go-git AuthMethod, resolving TokenFile at call time.
 func (c Credential) transportAuth() (transport.AuthMethod, error) {
 	switch c.Mode {
 	case AuthModeHTTPSToken:
@@ -109,15 +101,12 @@ func (c Credential) transportAuth() (transport.AuthMethod, error) {
 	}
 }
 
-// CredentialResolver maps a server-side auth reference to the typed credential for a
-// repository. Resolvers fail closed: an unknown reference is an error, never an implicit
-// unauthenticated push.
+// CredentialResolver maps a server-side auth reference to a typed credential; an unknown reference is an error, never an unauthenticated push.
 type CredentialResolver interface {
 	Resolve(ctx context.Context, repository, authRef string) (Credential, error)
 }
 
 // StaticCredentialResolver serves pre-loaded credentials; tests and local remotes use it.
-// Production wiring uses FileCredentialResolver.
 type StaticCredentialResolver struct {
 	credentials map[string]Credential
 }
@@ -144,8 +133,7 @@ func (r *StaticCredentialResolver) Resolve(_ context.Context, _, authRef string)
 	return credential, nil
 }
 
-// FileCredential is the configuration-side typed reference whose token resolves from a
-// Secret-mounted file at request time.
+// FileCredential is the configuration-side typed reference whose token resolves from a Secret-mounted file.
 type FileCredential struct {
 	AuthRef   string
 	Mode      AuthMode
@@ -166,8 +154,7 @@ func (c FileCredential) Validate() error {
 	return nil
 }
 
-// FileCredentialResolver resolves FileCredential references by reading the token from disk
-// per call.
+// FileCredentialResolver resolves references by reading the token from disk per call.
 type FileCredentialResolver struct {
 	credentials map[string]FileCredential
 }
@@ -183,8 +170,7 @@ func NewFileCredentialResolver(credentials []FileCredential) (*FileCredentialRes
 	return resolver, nil
 }
 
-// Resolve reads the referenced token file. Every call re-reads so Secret rotation is picked
-// up without a restart.
+// Resolve re-reads the referenced token file on every call, so Secret rotation needs no restart.
 func (r *FileCredentialResolver) Resolve(_ context.Context, _, authRef string) (Credential, error) {
 	credential, ok := r.credentials[authRef]
 	if !ok {

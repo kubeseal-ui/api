@@ -16,16 +16,43 @@ import (
 
 // fakeTransport is an in-process http.RoundTripper so adapter tests never touch the loopback
 // socket (the sandbox blocks loopback HTTP). It records the request and returns a canned response.
+// The branch-existence GET and the PR POST are answered separately, because OpenProposal makes both
+// calls and a single canned status cannot tell them apart.
 type fakeTransport struct {
-	status  int
-	body    string
-	lastReq atomic.Value
-	err     error
-	calls   atomic.Int32
+	status    int
+	body      string
+	err       error
+	getStatus int
+	getBody   string
+	getErr    error
+	calls     atomic.Int32
+	gets      atomic.Int32
+	lastReq   atomic.Value
+	lastGet   atomic.Value
 }
 
 func (t *fakeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.calls.Add(1)
+	if req.Method == http.MethodGet {
+		t.gets.Add(1)
+		t.lastGet.Store(req)
+		if t.getErr != nil {
+			return nil, t.getErr
+		}
+		status := t.getStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		body := t.getBody
+		if body == "" {
+			body = `{"name":"branch"}`
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/vnd.github+json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	}
 	t.lastReq.Store(req)
 	if t.err != nil {
 		return nil, t.err
@@ -39,6 +66,14 @@ func (t *fakeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func (t *fakeTransport) lastRequest() *http.Request {
 	v := t.lastReq.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(*http.Request)
+}
+
+func (t *fakeTransport) lastBranchRequest() *http.Request {
+	v := t.lastGet.Load()
 	if v == nil {
 		return nil
 	}
@@ -89,8 +124,11 @@ func TestGitHubOpenProposalCreatesPullRequest(t *testing.T) {
 	if result.Commit != req.Push.Commit {
 		t.Errorf("commit = %q, want %q", result.Commit, req.Push.Commit)
 	}
-	if tr.calls.Load() != 1 {
-		t.Errorf("api calls = %d, want 1", tr.calls.Load())
+	if tr.gets.Load() != 1 {
+		t.Errorf("branch lookups = %d, want 1", tr.gets.Load())
+	}
+	if got := tr.lastBranchRequest().URL.Path; got != "/repos/org/platform/branches/kubeseal-ui/payments-foo" {
+		t.Errorf("branch lookup path = %q", got)
 	}
 	sent := tr.lastRequest()
 	if sent == nil {
@@ -117,7 +155,8 @@ func TestGitHubOpenProposalCreatesPullRequest(t *testing.T) {
 	}
 }
 
-// The adapter is stateless and does not dedupe, so a retry hits the API again.
+// The adapter is stateless and does not dedupe, so a retry hits the API again: one branch lookup
+// and one PR creation per call.
 func TestGitHubOpenProposalRetrySucceeds(t *testing.T) {
 	body := `{"html_url":"https://github.com/org/platform/pull/99"}`
 	tr := &fakeTransport{status: http.StatusOK, body: body}
@@ -134,8 +173,8 @@ func TestGitHubOpenProposalRetrySucceeds(t *testing.T) {
 	if result.URL == "" {
 		t.Fatal("expected non-empty url")
 	}
-	if tr.calls.Load() != 1 {
-		t.Fatalf("api calls = %d, want 1", tr.calls.Load())
+	if tr.calls.Load() != 2 {
+		t.Fatalf("api calls = %d, want 2 (branch lookup then pr creation)", tr.calls.Load())
 	}
 }
 
@@ -194,8 +233,30 @@ func TestGitHubOpenProposalAPIErrorFailsClosed(t *testing.T) {
 	if !strings.Contains(err.Error(), "github pr creation failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if tr.calls.Load() != 2 {
+		t.Errorf("api calls = %d, want 2 (branch lookup then one pr creation, no retry on auth failure)", tr.calls.Load())
+	}
+}
+
+// A push can report success without creating the branch, so the lookup runs first and its 404 is
+// reported as a missing branch rather than as a GitHub failure.
+func TestGitHubOpenProposalMissingBranchFails(t *testing.T) {
+	tr := &fakeTransport{status: http.StatusCreated, body: "{}", getStatus: http.StatusNotFound}
+	provider := newFakeProviderWith(t, "tok", tr)
+
+	req := ProposalRequest{
+		Change: Change{Target: Target{Repository: "org/platform", Branch: "main"}},
+		Push:   PushResult{Repository: "org/platform", Branch: "kubeseal-ui/payments-foo", Commit: "abc123"},
+	}
+	_, err := provider.OpenProposal(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for missing branch")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if tr.calls.Load() != 1 {
-		t.Errorf("api calls = %d, want 1 (no retry on auth failure)", tr.calls.Load())
+		t.Errorf("api calls = %d, want 1 (no pr creation after a missing branch)", tr.calls.Load())
 	}
 }
 

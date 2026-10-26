@@ -1,7 +1,5 @@
-// Package certprovider fetches and caches the controller's public certificate. The HTTP
-// implementation is driven by KUBESEAL_CERT_URL; fetching is lazy on the first Get and
-// re-fetched once the cached entry is older than the TTL, which is how key rotation is
-// picked up.
+// Package certprovider fetches and caches the controller's public certificate; the HTTP implementation is driven by
+// KUBESEAL_CERT_URL, fetched lazily on the first Get and re-fetched past the TTL, which is how key rotation is picked up.
 package certprovider
 
 import (
@@ -15,11 +13,9 @@ import (
 	"time"
 )
 
-// Provider supplies the active public certificate. Implementations must be safe for
-// concurrent use.
+// Provider supplies the active public certificate; implementations must be safe for concurrent use.
 type Provider interface {
-	// Get returns the cached certificate, fetching and validating it on a miss or expiry.
-	// The returned pointer must not be mutated after it is handed out.
+	// Get returns the cached certificate, fetching and validating it on a miss or expiry; the pointer must not be mutated after it is handed out.
 	Get(ctx context.Context) (*x509.Certificate, error)
 }
 
@@ -31,16 +27,14 @@ type HTTPOptions struct {
 	TTL     time.Duration
 	Timeout time.Duration
 
-	// MaxResponseBytes bounds the response body; default 1 MiB. A real PEM cert is under
-	// 10 KiB, so a runaway upstream must not be able to OOM the pod.
+	// MaxResponseBytes bounds the response body; default 1 MiB — a real PEM is under 10 KiB, so a runaway upstream must not OOM the pod.
 	MaxResponseBytes int64
 
 	// Client is optional; nil builds one from Timeout.
 	Client *http.Client
 }
 
-// httpProvider guards its fields with mu: reads happen on every encrypt request, writes
-// only on a cache miss or rotation.
+// httpProvider guards its fields with mu: reads on every encrypt request, writes only on a miss or rotation.
 type httpProvider struct {
 	opts HTTPOptions
 	mu   sync.Mutex
@@ -69,8 +63,7 @@ func NewHTTP(opts HTTPOptions) Provider {
 	}
 }
 
-// Get implements Provider. A miss or expiry triggers a single fetch, parse, validate, and
-// store.
+// Get implements Provider; a miss or expiry triggers a single fetch, parse, validate, and store.
 func (p *httpProvider) Get(ctx context.Context) (*x509.Certificate, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -88,8 +81,7 @@ func (p *httpProvider) Get(ctx context.Context) (*x509.Certificate, error) {
 	return cert, nil
 }
 
-// fetch issues the GET, parses and validates the PEM, and bounds the body with
-// io.LimitReader so a streaming server cannot exhaust memory.
+// fetch issues the GET, parses and validates the PEM, and bounds the body so a streaming server cannot exhaust memory.
 func (p *httpProvider) fetch(ctx context.Context) (*x509.Certificate, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.opts.URL, nil)
 	if err != nil {

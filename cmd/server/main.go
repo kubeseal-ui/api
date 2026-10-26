@@ -30,8 +30,7 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// devPrivProvider is a development-only PrivateKeyProvider returning a fixed RSA key for local
-// testing when ENABLE_DECRYPT=true. Production uses the Kubernetes-backed provider.
+// devPrivProvider is a development-only PrivateKeyProvider; production uses the Kubernetes-backed one.
 type devPrivProvider struct {
 	key *rsa.PrivateKey
 }
@@ -40,9 +39,9 @@ func (d *devPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, err
 	return []*rsa.PrivateKey{d.key}, nil
 }
 
-// discoverOIDC performs provider discovery when the OIDC environment is complete; incomplete or
-// absent configuration returns nil and the router stays fail-closed.
-func discoverOIDC(cfg *config.Config) *oidc.Provider {
+// discoverOIDC returns nil on incomplete or absent config, leaving the router fail-closed. Discovery
+// itself is lazy: an issuer that is down at boot must not pin the API into a restart to recover.
+func discoverOIDC(cfg *config.Config) oidc.AuthProvider {
 	if cfg.OIDCIssuer == "" || cfg.OIDCClientID == "" {
 		if cfg.OIDCIssuer != "" || cfg.OIDCClientID != "" {
 			slog.Warn("OIDC partially configured; both OIDC_ISSUER and OIDC_CLIENT_ID are required",
@@ -71,19 +70,10 @@ func discoverOIDC(cfg *config.Config) *oidc.Provider {
 		slog.Error("OIDC configuration incomplete", "error", "client secret and redirect URL are required")
 		return nil
 	}
-	discoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	provider, err := oidc.NewProvider(discoveryCtx, oidcCfg)
-	if err != nil {
-		slog.Error("OIDC provider discovery failed", "error", err)
-		return nil
-	}
-	return provider
+	return oidc.NewLazyProvider(oidcCfg)
 }
 
-// gitopsTransport builds the production go-git transport and typed credential resolver from
-// configuration. Both are nil when GitOps is disabled, leaving the serving path with no Git-backed
-// editing — the fail-closed contract.
+// gitopsTransport builds the production transport and credential resolver; both nil when GitOps is disabled (fail-closed).
 func gitopsTransport(cfg *config.Config) (gitops.GitTransport, error) {
 	if !cfg.GitOpsEnabled {
 		return nil, nil
@@ -105,11 +95,11 @@ func gitopsTransport(cfg *config.Config) (gitops.GitTransport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return transport, nil
+	// Process-lived cache: memoizes a branch pull so a drift-resolving listing does not re-fetch per Secret.
+	return gitops.NewCachingTransport(transport, cfg.GitSnapshotTTL), nil
 }
 
-// parseCredentialRefs parses the comma-separated typed credential list, each entry being
-// auth_ref:mode:username:token_file; empty usernames are allowed (the transport defaults them).
+// parseCredentialRefs parses "auth_ref:mode:username:token_file" entries; empty usernames are allowed.
 func parseCredentialRefs(raw string) []gitops.FileCredential {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -132,10 +122,7 @@ func parseCredentialRefs(raw string) []gitops.FileCredential {
 	return refs
 }
 
-// parseMappingSpecs parses the comma-separated namespace mapping list, each entry being
-// namespace:repo:branch:path_template:auth_ref:mode with an optional :adapter_name for proposal
-// mode followed by a `;`-separated allowed-directory list (proposal mode's adapter occupies the
-// slot before it); path templates use '-' in place of '/'.
+// parseMappingSpecs parses "namespace:repo:branch:path_template:auth_ref:mode[:adapter][:;allowed_paths]"; '-' renders as '/' in templates.
 func parseMappingSpecs(raw string) []policy.GitMappingSpec {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -189,6 +176,20 @@ func parseAllowedPaths(raw string) []string {
 	return paths
 }
 
+// checkMappingCredentials refuses a boot whose mappings name a credential GITOPS_CREDENTIAL_REFS does not define.
+func checkMappingCredentials(specs []policy.GitMappingSpec, refs []gitops.FileCredential) error {
+	known := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		known[ref.AuthRef] = struct{}{}
+	}
+	for _, spec := range specs {
+		if _, ok := known[spec.AuthRef]; !ok {
+			return fmt.Errorf("namespace %q maps to git credential %q, which GITOPS_CREDENTIAL_REFS does not define", spec.Namespace, spec.AuthRef)
+		}
+	}
+	return nil
+}
+
 // proposalAdapterSpec is one parsed GITOPS_PROPOSAL_ADAPTERS entry.
 type proposalAdapterSpec struct {
 	Name      string
@@ -197,9 +198,7 @@ type proposalAdapterSpec struct {
 	BaseURL   string
 }
 
-// parseProposalAdapterSpecs parses the comma-separated proposal adapter list, each entry being
-// name:type:token_file[:base_url]. Parsing fails closed: a malformed entry, a missing name/type/token
-// file, or a duplicate name is an error rather than a silently ignored adapter.
+// parseProposalAdapterSpecs parses "name:type:token_file[:base_url]" entries; malformed or duplicate entries fail closed.
 func parseProposalAdapterSpecs(raw string) ([]proposalAdapterSpec, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
@@ -232,13 +231,7 @@ func parseProposalAdapterSpecs(raw string) ([]proposalAdapterSpec, error) {
 	return specs, nil
 }
 
-// proposalAdapters returns the named host adapters available to values-driven seeding. The registry
-// grows as concrete host adapters land; platform-agnostic delivery requires none.
-//
-// "github" opens pull requests via the GitHub REST API using a fine-grained PAT read from a
-// Secret-mounted file per call. A namespace referencing an adapter name this registry does not hold
-// makes SeedGitMappings fail at boot (fail-closed), so an unconfigured adapter can never serve
-// proposal deliveries.
+// proposalAdapters builds the named adapters; a mapping referencing an unknown adapter fails the boot.
 func proposalAdapters(cfg *config.Config) (map[string]gitops.ProposalProvider, error) {
 	specs, err := parseProposalAdapterSpecs(cfg.GitOpsProposalAdapters)
 	if err != nil {
@@ -263,9 +256,7 @@ func proposalAdapters(cfg *config.Config) (map[string]gitops.ProposalProvider, e
 	return adapters, nil
 }
 
-// setupTelemetryFromConfig derives the telemetry options from the configuration and mounts the SDK.
-// Optional: no endpoint keeps /metrics at 503 and logging plain, so local and test boots never make
-// network calls. A setup failure disables telemetry with a warning rather than taking the API down.
+// setupTelemetryFromConfig is optional: no endpoint keeps /metrics at 503, and a setup failure logs a warning rather than exiting.
 func setupTelemetryFromConfig(cfg *config.Config, logger *slog.Logger) *observability.Telemetry {
 	version := cfg.OTelServiceVersion
 	if version == "" {
@@ -305,6 +296,40 @@ func setupTelemetryFromConfig(cfg *config.Config, logger *slog.Logger) *observab
 	return telemetry
 }
 
+// buildKubernetesClient is fatal on cluster failure: the api cannot answer a single read without it.
+func buildKubernetesClient(cfg config.Config) kubernetes.Client {
+	if cfg.FakeK8sClient {
+		return kubernetes.NewFake(
+			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
+			[]kubernetes.SealedSecret{
+				{Name: "example", Namespace: "default", Scope: "strict"},
+			},
+			nil,
+		)
+	}
+	kubeConfig, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatal("kubernetes config", "error", err)
+	}
+	client, err := kubernetes.NewClientFromConfig(kubeConfig, kubernetes.Options{ControllerNamespace: cfg.ControllerNamespace, ActiveKeyLabel: cfg.ActiveKeyLabel})
+	if err != nil {
+		log.Fatal("kubernetes client", "error", err)
+	}
+	return client
+}
+
+// prewarmGitBranches pulls every mapped branch at boot, so the first request skips a cold clone.
+func prewarmGitBranches(ctx context.Context, transport gitops.GitTransport, mappingSpecs []policy.GitMappingSpec, logger *slog.Logger) {
+	if transport == nil || len(mappingSpecs) == 0 {
+		return
+	}
+	warmTargets := make([]gitops.WarmTarget, 0, len(mappingSpecs))
+	for _, spec := range mappingSpecs {
+		warmTargets = append(warmTargets, gitops.WarmTarget{Repository: spec.Repository, Branch: spec.Branch, AuthRef: spec.AuthRef})
+	}
+	go gitops.PrewarmBranches(ctx, transport, warmTargets, logger)
+}
+
 func main() {
 	flag.Parse()
 	cfg, err := config.Load()
@@ -337,32 +362,14 @@ func main() {
 	}
 
 	// Kubernetes client (fake in explicit fake mode; production client otherwise)
-	var k8sClient kubernetes.Client
-	if cfg.FakeK8sClient {
-		k8sClient = kubernetes.NewFake(
-			[]kubernetes.Namespace{{Name: "default"}, {Name: "kube-system"}},
-			[]kubernetes.SealedSecret{
-				{Name: "example", Namespace: "default", Scope: "strict"},
-			},
-			nil,
-		)
-	} else {
-		kubeConfig, configErr := rest.InClusterConfig()
-		if configErr != nil {
-			log.Fatal("kubernetes config", "error", configErr)
-		}
-		k8sClient, configErr = kubernetes.NewClientFromConfig(kubeConfig, kubernetes.Options{ControllerNamespace: cfg.ControllerNamespace, ActiveKeyLabel: cfg.ActiveKeyLabel})
-		if configErr != nil {
-			log.Fatal("kubernetes client", "error", configErr)
-		}
-	}
+	k8sClient := buildKubernetesClient(cfg)
 
 	var privProvider crypto.PrivateKeyProvider
 	if cfg.EnableDecrypt {
 		if cfg.FakeK8sClient {
 			privProvider = &devPrivProvider{key: devPrivateKey()}
 		} else {
-			privProvider = kubePrivateKeyProvider{client: k8sClient}
+			privProvider = newKubePrivateKeyProvider(k8sClient, nil)
 		}
 	}
 	cryptoWrapper := crypto.New(certProvider, privProvider)
@@ -381,21 +388,28 @@ func main() {
 	if transport != nil {
 		slog.Info("gitops delivery enabled", "worktree_dir", cfg.GitWorktreeDir, "credentials", len(parseCredentialRefs(cfg.GitCredentialRefs)))
 	}
+	// Parsed once and reused: the boot check below and the router must see the same mappings.
+	mappingSpecs := parseMappingSpecs(cfg.GitMappingSpecs)
+	if cfg.GitOpsEnabled {
+		if credentialErr := checkMappingCredentials(mappingSpecs, parseCredentialRefs(cfg.GitCredentialRefs)); credentialErr != nil {
+			// Fail closed: a mapping whose credential does not exist can never deliver.
+			slog.Error("gitops mapping references an undefined credential", "error", credentialErr)
+			os.Exit(1)
+		}
+	}
 	adapters, adaptersErr := proposalAdapters(&cfg)
 	if adaptersErr != nil {
 		slog.Error("proposal adapter construction failed", "error", adaptersErr)
 		os.Exit(1)
 	}
 
-	// The policy store is built here rather than inside newRouter so that the loader below, which
-	// re-reads the document on SIGHUP, mutates the store the serving path reads from.
+	// Built here so the SIGHUP loader below mutates the store the serving path reads from.
 	policyStore := policy.NewPolicyStore()
 	var policyLoader *policy.Loader
 	if cfg.ConfigPath != "" {
 		policyLoader, err = policy.NewLoader(cfg.ConfigPath, policyStore)
 		if err != nil {
-			// No previous generation exists at boot, so there is nothing valid to fall back to:
-			// refuse to start rather than serve a policy the operator did not write.
+			// No valid generation exists yet, so there is nothing to fall back to.
 			slog.Error("authorization policy load failed", "path", cfg.ConfigPath, "error", err)
 			os.Exit(1)
 		}
@@ -414,7 +428,7 @@ func main() {
 		k8s:            k8sClient,
 		transport:      transport,
 		oidcProvider:   oidcProvider,
-		mappingSpecs:   parseMappingSpecs(cfg.GitMappingSpecs),
+		mappingSpecs:   mappingSpecs,
 		adapters:       adapters,
 		policyStore:    policyStore,
 		readyCheck:     readyCheck,
@@ -425,12 +439,14 @@ func main() {
 		slog.Error("router construction failed", "error", routerErr)
 		os.Exit(1)
 	}
+	// WriteTimeout must stay above the request deadline, or the response is severed mid-handler.
+	const writeGrace = 15 * time.Second
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		ReadTimeout:       cfg.APITimeout,
+		WriteTimeout:      cfg.APITimeout + writeGrace,
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -440,6 +456,9 @@ func main() {
 	if policyLoader != nil {
 		go watchPolicyReloads(ctx, policyLoader)
 	}
+
+	// Backgrounded: readiness must not block on a remote fetch.
+	prewarmGitBranches(ctx, transport, mappingSpecs, logger)
 
 	go func() {
 		slog.Info("starting api",
@@ -464,16 +483,11 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
-	// Flush metrics, traces, and buffered logs before exit so a rolling restart loses no in-flight
-	// signal.
+	// Flush in-flight signals before exit so a rolling restart loses none.
 	telemetry.Shutdown(shutdownCtx)
 }
 
-// watchPolicyReloads re-reads the policy document on SIGHUP until ctx ends.
-//
-// A failed reload is logged and the previous generation stays in force — falling back to no policy
-// would turn a file being edited into a lockout. The failure also reaches /readyz through the loader,
-// which makes a bad ConfigMap rollout visible rather than merely logged.
+// watchPolicyReloads re-reads the policy document on SIGHUP; a failed reload keeps the last valid generation.
 func watchPolicyReloads(ctx context.Context, loader *policy.Loader) {
 	reloads := make(chan os.Signal, 1)
 	signal.Notify(reloads, syscall.SIGHUP)

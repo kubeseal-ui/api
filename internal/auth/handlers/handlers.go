@@ -1,5 +1,4 @@
-// Package handlers provides the authentication HTTP handlers: login, callback, me,
-// logout, and csrf.
+// Package handlers provides the authentication HTTP handlers: login, callback, me, logout, and csrf.
 package handlers
 
 import (
@@ -56,8 +55,7 @@ func (h *AuthHandlers) signSession(session oidc.SessionData) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// sessionCookieData mirrors middleware's private type of the same name; the field names
-// and the embedded struct decide the JSON the middleware verifies.
+// sessionCookieData mirrors middleware's private type of the same name; the field names decide the JSON the middleware verifies.
 type sessionCookieData struct {
 	oidc.SessionData
 	Signature string `json:"sig"`
@@ -73,15 +71,13 @@ func signData(data any, key []byte) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
-// signedFlowState is the PKCE cookie envelope. The signature covers the FlowState fields
-// only, so `sig` can travel in the same JSON without being re-signed on verify.
+// signedFlowState is the PKCE cookie envelope; the signature covers the FlowState fields only.
 type signedFlowState struct {
 	oidc.FlowState
 	Signature string `json:"sig,omitempty"`
 }
 
-// flowStateBytes is the canonical bytes the verifier re-signs; excluding the signature
-// from them is what makes a mutated field invalidate the cookie.
+// flowStateBytes is the canonical bytes the verifier re-signs; excluding the signature from them is what invalidates a mutated cookie.
 func (s signedFlowState) flowStateBytes() ([]byte, error) {
 	return json.Marshal(s.FlowState)
 }
@@ -131,8 +127,7 @@ func (h *AuthHandlers) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Signing also makes the value cookie-safe: raw JSON cannot survive net/http's cookie
-	// transport, which drops invalid bytes like '"'.
+	// Signing also makes the value cookie-safe: raw JSON cannot survive net/http's cookie transport.
 	signed, err := signFlowState(*flow, h.SigningKey)
 	if err != nil {
 		slog.Error("auth: failed to sign flow state", "error", err)
@@ -325,9 +320,8 @@ func (h *AuthHandlers) MeHandler(w http.ResponseWriter, r *http.Request) {
 		"name":     identity.Name,
 		"username": identity.Username,
 	}
-	// "capabilities" is what the caller holds everywhere; "namespaces" is what it holds in
-	// named namespaces. An effective grant is the union. Both keys are always present so a
-	// client needs no presence check.
+	// "capabilities" is what the caller holds everywhere; "namespaces" is what it holds in named namespaces (the union).
+	// Both keys are always present so a client needs no presence check.
 	response["capabilities"] = identity.Capabilities
 	namespaces := identity.NamespaceCapabilities
 	if namespaces == nil {

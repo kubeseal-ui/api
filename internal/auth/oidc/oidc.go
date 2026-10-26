@@ -10,6 +10,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -308,8 +310,7 @@ func (p *Provider) VerifyIDToken(ctx context.Context, idToken, nonce string) (*V
 		return nil, fmt.Errorf("audience mismatch: client_id %q not in aud %v", p.cfg.ClientID, claims.Audience)
 	}
 
-	// The typed fields above cover the default claim names; a configured custom claim has
-	// to be decoded from the raw token map instead.
+	// The typed fields above cover the default claim names; a configured custom claim decodes from the raw token map instead.
 	groups := claims.Groups
 	username := claims.Username
 	if p.cfg.GroupsClaim != "" && p.cfg.GroupsClaim != "groups" || p.cfg.UsernameClaim != "" && p.cfg.UsernameClaim != "preferred_username" {
@@ -376,14 +377,52 @@ func (p *Provider) RefreshTokens(ctx context.Context, refreshToken string) (*Tok
 	}, nil
 }
 
-// RevokeToken is a best-effort stub: revocation is optional per RFC 7009, and the
-// revocation endpoint is not implemented.
+// revocationHTTPClient bounds the RFC 7009 call so logout cannot hang on a slow issuer.
+var revocationHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+// RevokeToken posts the refresh token to the issuer's RFC 7009 revocation endpoint; revocation is optional, so a missing
+// endpoint is not an error and every failure is returned for the caller to log.
 func (p *Provider) RevokeToken(ctx context.Context, token string) error {
-	revokeURL := p.provider.Endpoint().TokenURL
-	if revokeURL == "" {
+	if token == "" {
 		return nil
 	}
-	return nil
+	var metadata struct {
+		RevocationEndpoint string `json:"revocation_endpoint"`
+	}
+	if err := p.provider.Claims(&metadata); err != nil {
+		return fmt.Errorf("read provider metadata: %w", err)
+	}
+	if metadata.RevocationEndpoint == "" {
+		return nil
+	}
+	form := url.Values{"token": {token}, "token_type_hint": {"refresh_token"}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, metadata.RevocationEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("build revocation request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(p.cfg.ClientID), url.QueryEscape(p.cfg.ClientSecret))
+	resp, err := revocationHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("revocation request: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("oidc revocation: close response body", "error", closeErr)
+		}
+	}()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if err != nil {
+		return fmt.Errorf("read revocation response: %w", err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	// 400 invalid_token means the token is already unusable — the logout goal is met even though the status is not 200.
+	if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body), "invalid_token") {
+		return nil
+	}
+	return fmt.Errorf("revocation endpoint returned %s", resp.Status)
 }
 
 const (
@@ -420,8 +459,7 @@ func getScopeFromToken(token *oauth2.Token) string {
 	return ""
 }
 
-// CookieOptions returns a cookie with secure defaults. Secure is set true in the literal
-// so gosec G124 stays quiet, then overridden for non-production setups.
+// CookieOptions returns a cookie with secure defaults; Secure is set true in the literal so gosec G124 stays quiet.
 func (p *Provider) CookieOptions(path string, maxAge int) *http.Cookie {
 	cookie := &http.Cookie{
 		Path:     path,

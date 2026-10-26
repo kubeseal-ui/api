@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -25,24 +24,26 @@ import (
 
 func registerProtectedRoutes(r chi.Router, protected *handlers.ProtectedHandlers) {
 	r.Use(middleware.BodyLimit(10 * 1024 * 1024))
-	r.Get("/namespaces", protected.NamespacesHandler)
-	r.Get("/secrets", protected.SecretsHandler)
-	r.Get("/secrets/{namespace}/{name}", protected.SecretHandler)
-	r.Get("/gitops/paths", protected.GitPathsHandler)
-	r.Post("/secrets/{namespace}/{name}/diff", protected.DiffHandler)
-	r.Post("/gitops/dry-run", protected.GitOpsDryRunHandler)
-	r.Post("/gitops/deliver", protected.GitOpsDeliverHandler)
-	r.Get("/gitops/sync", protected.GitOpsSyncStatusHandler)
-	r.Post("/gitops/sync", protected.GitOpsSyncHandler)
-	r.Post("/secrets/{namespace}/{name}/reveal", protected.DecryptHandler)
-	// A batch has no single key to name in the path, so the keys travel in the body; the route stays
-	// a PATCH on the Secret's values collection, which is what it edits.
-	r.Patch("/secrets/{namespace}/{name}/values", protected.ResealHandler)
-	r.Post("/secrets/encrypt", protected.EncryptHandler)
+	// A Group's middlewares run after the route matches, which is what lets SetRoutePattern read chi's choice; a plain r.Use would run too early.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.SetRoutePattern)
+		r.Get("/namespaces", protected.NamespacesHandler)
+		r.Get("/secrets", protected.SecretsHandler)
+		r.Get("/secrets/{namespace}/{name}", protected.SecretHandler)
+		r.Get("/gitops/paths", protected.GitPathsHandler)
+		r.Post("/secrets/{namespace}/{name}/diff", protected.DiffHandler)
+		r.Post("/gitops/dry-run", protected.GitOpsDryRunHandler)
+		r.Post("/gitops/deliver", protected.GitOpsDeliverHandler)
+		r.Get("/gitops/sync", protected.GitOpsSyncStatusHandler)
+		r.Post("/gitops/sync", protected.GitOpsSyncHandler)
+		r.Post("/secrets/{namespace}/{name}/reveal", protected.DecryptHandler)
+		// A batch has no single key to name in the path, so the keys travel in the body.
+		r.Patch("/secrets/{namespace}/{name}/values", protected.ResealHandler)
+		r.Post("/secrets/encrypt", protected.EncryptHandler)
+	})
 }
 
-// routerOptions carries the router's dependencies. The transport and mapping specs are
-// values-driven: a non-nil transport enables Git-backed editing, and specs seed the policy store.
+// routerOptions carries the router's dependencies; a non-nil transport enables Git-backed editing, and mappingSpecs seed the policy store.
 type routerOptions struct {
 	logger       *slog.Logger
 	cfg          *config.Config
@@ -52,30 +53,29 @@ type routerOptions struct {
 	oidcProvider oidc.AuthProvider
 	mappingSpecs []policy.GitMappingSpec
 	adapters     map[string]gitops.ProposalProvider
-	// policyStore carries the roles, group grants, and Git mappings. It is built by main, which owns
-	// the policy loader and its SIGHUP reload, so the router serves from the same store that gets
-	// reloaded. A nil store gets a fresh one, which is what the router tests want.
+	// policyStore is built by main, which owns the loader and its SIGHUP reload, so the router serves from the same store that gets reloaded.
 	policyStore *policy.PolicyStore
-	// readyCheck adds a readiness condition from state config.Load cannot see, such as a policy
-	// document that failed to reload.
+	// readyCheck adds a readiness condition from state config.Load cannot see, such as a policy document that failed to reload.
 	readyCheck     func() error
 	securityEvents handlers.SecurityEventSink
 	metricsHandler http.Handler
 }
 
-// newRouter builds the chi router with authenticated routes. A non-nil transport constructs the
-// protected handlers with their GitOps dependencies, so delivery endpoints are live; nil keeps the
-// fail-closed behavior of a boot without GitOps. A seeding failure is returned so main can refuse to
-// boot with a broken mapping list.
+// newRouter builds the chi router with authenticated routes; nil transport keeps delivery fail-closed, and a seeding failure is returned so main refuses to boot.
 func newRouter(options routerOptions) (http.Handler, error) {
+	// chi's Timeout is a context deadline, not a forcible stop, so handlers must honour it — the Git and Kubernetes calls thread the request context and do.
+	apiTimeout := config.DefaultAPITimeout
+	if options.cfg != nil && options.cfg.APITimeout > 0 {
+		apiTimeout = options.cfg.APITimeout
+	}
 	r := chi.NewRouter()
-	// OTelSpan starts a server span per request and must wrap everything, including the logger, so
-	// log lines carry trace_id/span_id. Mounted unconditionally: with telemetry disabled the global
-	// tracer provider is a no-op and spans cost almost nothing.
+	// OTelSpan must wrap everything, the logger included, so log lines carry trace_id/span_id; with telemetry disabled it is a cheap no-op.
 	r.Use(middleware.RequestID)
+	// RouteRecorder must sit outside the router's matching, so the log line and metric name the route that ran rather than "unmatched".
+	r.Use(middleware.RouteRecorder)
 	r.Use(middleware.OTelSpan)
 	r.Use(middleware.Recoverer)
-	r.Use(chimw.Timeout(30 * time.Second))
+	r.Use(chimw.Timeout(apiTimeout))
 	r.Use(middleware.RequestLogger(options.logger))
 	r.Get("/healthz", handlers.Healthz)
 	if options.readyCheck != nil {
@@ -83,9 +83,7 @@ func newRouter(options routerOptions) (http.Handler, error) {
 	} else {
 		r.Get("/readyz", handlers.Readyz)
 	}
-	// /metrics serves the Prometheus exposition. The handler returns 503 when metrics are disabled, so
-	// ServiceMonitor marks the target down instead of scraping an empty page silently. Unauthenticated
-	// by design: the exposition carries handler/method/code labels only, no identities or names.
+	// Unauthenticated by design: the exposition carries handler/method/code labels only, no identities or names.
 	if options.metricsHandler != nil {
 		r.Handle("/metrics", options.metricsHandler)
 	}
@@ -95,8 +93,7 @@ func newRouter(options routerOptions) (http.Handler, error) {
 		logger = slog.Default()
 	}
 
-	// OIDC discovery is performed by main and injected here, which keeps the router free of network
-	// I/O and therefore deterministic and testable.
+	// OIDC discovery runs in main and is injected here, keeping the router free of network I/O.
 	var provider oidc.AuthProvider
 	if options.cfg != nil && options.cfg.SessionSigningKey != "" && options.oidcProvider != nil {
 		provider = options.oidcProvider
@@ -114,12 +111,10 @@ func newRouter(options routerOptions) (http.Handler, error) {
 	} else {
 		protected = handlers.NewProtectedHandlers(options.k8s, options.crypto, options.cfg != nil && options.cfg.EnableDecrypt)
 	}
-	// Security events flow to stdout through the redacting handler per the doc contract: one bounded
-	// JSON event per reveal, patch, and delivery attempt.
+	// Security events flow to stdout through the redacting handler per the doc contract.
 	protected.SecurityEvents = options.securityEvents
 
-	// Seed the namespace Git mappings from values. Enabled GitOps with no specs boots fail-closed:
-	// delivery endpoints exist but every namespace resolves "mapping not found" until mappings are set.
+	// Fail closed: enabled GitOps with no specs boots, but every namespace answers "mapping not found" until mappings are set.
 	if options.transport != nil && len(options.mappingSpecs) > 0 {
 		if err := policyStore.SeedGitMappings(options.mappingSpecs, options.adapters); err != nil {
 			return nil, fmt.Errorf("gitops mapping seeding: %w", err)
@@ -130,8 +125,7 @@ func newRouter(options routerOptions) (http.Handler, error) {
 		registerProtectedRoutes(r, protected)
 	}
 
-	// No provider means no auth route is exposed, preserving the fail-closed behavior in local tests
-	// and unconfigured boots.
+	// No provider means no auth route is exposed, preserving fail-closed behavior.
 	if provider != nil {
 		authCfg := authmw.DefaultAuthConfig(provider)
 		authCfg.SigningKey = []byte(options.cfg.SessionSigningKey)
@@ -142,8 +136,7 @@ func newRouter(options routerOptions) (http.Handler, error) {
 		}
 		authCfg.ResolveCapabilities = func(groups []string) authmw.CapabilityGrants {
 			global, scoped := policyStore.NamespaceGrants(groups)
-			// The outcome lands as a metric with the bounded result label only; groups never become
-			// labels.
+			// The outcome lands as a metric with a bounded result label only; groups never become labels.
 			if len(global) > 0 || len(scoped) > 0 {
 				metrics.RecordOpenFGACheck("allow")
 			} else {
@@ -181,9 +174,7 @@ func capabilityStrings(capabilities []policy.Capability) []string {
 	return result
 }
 
-// namespaceCapabilityStrings renders the per-namespace grants, returning nil rather than an empty map
-// when there are none: an identity with only global grants should not carry an allocated map through
-// every request.
+// namespaceCapabilityStrings renders the per-namespace grants, returning nil rather than an empty map so global-only identities carry no allocation.
 func namespaceCapabilityStrings(scoped map[string][]policy.Capability) map[string][]string {
 	if len(scoped) == 0 {
 		return nil

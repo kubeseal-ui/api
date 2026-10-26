@@ -3,6 +3,7 @@ package crypto
 import (
 	"context"
 	"crypto/rsa"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -164,6 +165,94 @@ func TestDecryptAfterKeyRotation(t *testing.T) {
 	}
 }
 
+// rotatingPrivProvider serves a stale list until it is invalidated, which is what a key that rotated
+// inside the provider's cache window looks like from here.
+type rotatingPrivProvider struct {
+	current     []*rsa.PrivateKey
+	fresh       []*rsa.PrivateKey
+	calls       int
+	invalidated int
+}
+
+func (p *rotatingPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, error) {
+	p.calls++
+	return p.current, nil
+}
+
+func (p *rotatingPrivProvider) InvalidateKeyCache() {
+	p.invalidated++
+	p.current = p.fresh
+}
+
+// plainPrivProvider implements only PrivateKeyProvider, which is what a provider that does not cache
+// looks like: the invalidation is an optional capability, so the retry must be skipped rather than
+// assumed.
+type plainPrivProvider struct {
+	keys  []*rsa.PrivateKey
+	calls int
+}
+
+func (p *plainPrivProvider) PrivateKeys(_ context.Context) ([]*rsa.PrivateKey, error) {
+	p.calls++
+	return p.keys, nil
+}
+
+// TestDecryptRetriesAfterInvalidatingAStaleKeyList covers the condition that makes caching the
+// controller key list acceptable. A key that rotated after the provider built its list is missing
+// from it, which arrives as an unseal failure; without the retry that is a Secret that cannot be
+// revealed at all until the cache happens to expire.
+func TestDecryptRetriesAfterInvalidatingAStaleKeyList(t *testing.T) {
+	sealer, oldKey := mustNewTestCrypto(t)
+	_, newKey := mustNewTestCrypto(t)
+
+	sealed, err := sealer.EncryptYAML(t.Context(),
+		SecretYAML("secret", "default", map[string]string{"key": "val"}, ""),
+		"default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	provider := &rotatingPrivProvider{
+		current: []*rsa.PrivateKey{newKey},         // the stale list: the rotated-in key only
+		fresh:   []*rsa.PrivateKey{newKey, oldKey}, // what a fresh read returns
+	}
+	decrypted, err := New(sealer.cert, provider).DecryptYAML(t.Context(), sealed)
+	if err != nil {
+		t.Fatalf("DecryptYAML: %v", err)
+	}
+	if !strings.Contains(decrypted, "key: val") {
+		t.Fatalf("decrypted output missing value: %s", decrypted)
+	}
+	if provider.invalidated != 1 {
+		t.Fatalf("invalidation calls = %d, want 1", provider.invalidated)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("key list calls = %d, want 2 (the failing attempt and the retry)", provider.calls)
+	}
+}
+
+// TestDecryptDoesNotRetryWithoutACache is the other half: a provider with nothing to drop must not be
+// asked to, so an operation that genuinely failed stays one key fetch rather than two.
+func TestDecryptDoesNotRetryWithoutACache(t *testing.T) {
+	sealer, _ := mustNewTestCrypto(t)
+	_, otherKey := mustNewTestCrypto(t)
+
+	sealed, err := sealer.EncryptYAML(t.Context(),
+		SecretYAML("secret", "default", map[string]string{"key": "val"}, ""),
+		"default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	provider := &plainPrivProvider{keys: []*rsa.PrivateKey{otherKey}}
+	if _, err := New(sealer.cert, provider).DecryptYAML(t.Context(), sealed); err == nil {
+		t.Fatal("expected decryption with only an unrelated key to fail, got nil")
+	}
+	if provider.calls != 1 {
+		t.Fatalf("key list calls = %d, want 1", provider.calls)
+	}
+}
+
 func TestResealReplace(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -274,6 +363,173 @@ func TestResealDeleteLastKeyFails(t *testing.T) {
 	}
 }
 
+// TestSealMutationsNeedsNoPrivateKey pins the blind path: a wrapper built without a private-key
+// provider can still add, replace, and delete entries, because only the certificate is used.
+func TestSealMutationsNeedsNoPrivateKey(t *testing.T) {
+	sealer, _ := mustNewTestCrypto(t)
+	sealed, err := sealer.EncryptYAML(t.Context(), SecretYAML("secret", "default", map[string]string{
+		"existing": "old-value",
+	}, ""), "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	blind := New(sealer.cert, nil)
+	out, err := blind.SealMutations(t.Context(), sealed, []Mutation{
+		{Key: "added", Value: "new-value", Op: ResealAdd},
+	})
+	if err != nil {
+		t.Fatalf("SealMutations: %v", err)
+	}
+
+	decrypted, err := sealer.DecryptYAML(t.Context(), out)
+	if err != nil {
+		t.Fatalf("DecryptYAML after blind edit: %v", err)
+	}
+	if !strings.Contains(decrypted, "existing: old-value") {
+		t.Errorf("existing key should be preserved: %s", decrypted)
+	}
+	if !strings.Contains(decrypted, "added: new-value") {
+		t.Errorf("added key should be present: %s", decrypted)
+	}
+}
+
+// TestSealMutationsCarriesEveryUntouchedEntryByteForByte is what makes the blind path safe: only the
+// entries named by the batch change, so a caller who cannot decrypt still cannot corrupt the rest.
+func TestSealMutationsCarriesEveryUntouchedEntryByteForByte(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+	sealed, err := w.EncryptYAML(t.Context(), SecretYAML("secret", "default", map[string]string{
+		"keep":   "keep-value",
+		"change": "old-value",
+		"remove": "remove-value",
+	}, ""), "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+	before, err := parseSealedSecret(sealed)
+	if err != nil {
+		t.Fatalf("parse before: %v", err)
+	}
+
+	out, err := w.SealMutations(t.Context(), sealed, []Mutation{
+		{Key: "change", Value: "new-value", Op: ResealReplace},
+		{Key: "remove", Op: ResealDelete},
+		{Key: "added", Value: "added-value", Op: ResealAdd},
+	})
+	if err != nil {
+		t.Fatalf("SealMutations: %v", err)
+	}
+	after, err := parseSealedSecret(out)
+	if err != nil {
+		t.Fatalf("parse after: %v", err)
+	}
+
+	if after.Spec.EncryptedData["keep"] != before.Spec.EncryptedData["keep"] {
+		t.Error("an entry the batch did not name must not be resealed")
+	}
+	if after.Spec.EncryptedData["change"] == before.Spec.EncryptedData["change"] {
+		t.Error("a replaced entry must carry new ciphertext")
+	}
+	if _, ok := after.Spec.EncryptedData["remove"]; ok {
+		t.Error("a deleted entry must be gone")
+	}
+	if _, ok := after.Spec.EncryptedData["added"]; !ok {
+		t.Error("an added entry must be present")
+	}
+}
+
+// TestSealMutationsKeepsTheSealingScope proves the new entries were sealed under the object's own
+// scope: a strict label mismatched with the annotations would fail to unseal.
+func TestSealMutationsKeepsTheSealingScope(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+	sealed, err := w.EncryptYAML(t.Context(), SecretYAML("secret", "default", map[string]string{
+		"existing": "old-value",
+	}, ""), "default", "secret", NamespaceWideScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+	before, err := parseSealedSecret(sealed)
+	if err != nil {
+		t.Fatalf("parse before: %v", err)
+	}
+
+	out, err := w.SealMutations(t.Context(), sealed, []Mutation{{Key: "added", Value: "new-value", Op: ResealAdd}})
+	if err != nil {
+		t.Fatalf("SealMutations: %v", err)
+	}
+	after, err := parseSealedSecret(out)
+	if err != nil {
+		t.Fatalf("parse after: %v", err)
+	}
+	for key, want := range before.Annotations {
+		if after.Annotations[key] != want {
+			t.Errorf("annotation %q changed from %q to %q", key, want, after.Annotations[key])
+		}
+	}
+	decrypted, err := w.DecryptYAML(t.Context(), out)
+	if err != nil {
+		t.Fatalf("DecryptYAML after blind edit: %v", err)
+	}
+	if !strings.Contains(decrypted, "added: new-value") {
+		t.Errorf("added key did not survive a namespace-wide unseal: %s", decrypted)
+	}
+}
+
+// TestSealMutationsRefusesTheLegacyDataBlob: spec.data is one opaque pre-v0.11 blob, so it cannot be
+// edited key by key without decrypting all of it.
+func TestSealMutationsRefusesTheLegacyDataBlob(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+	const legacy = `apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: secret
+  namespace: default
+spec:
+  data: AgAAAA==
+  encryptedData: {}
+`
+	_, err := w.SealMutations(t.Context(), legacy, []Mutation{{Key: "added", Value: "v", Op: ResealAdd}})
+	if !errors.Is(err, ErrInvalidMutation) {
+		t.Fatalf("error = %v, want ErrInvalidMutation", err)
+	}
+}
+
+// TestResealManyDeletesTheOnlyKeyWhileAddingAnother pins that deleting the only key is allowed when
+// the same batch adds another: the Secret nets to one key, so it is never empty. The "cannot delete
+// the final key" rule must look at the net of the whole batch, not refuse the delete because it
+// sorts ahead of the add in the client's array. Regression for a 400 the editor hit on exactly this
+// edit — delete the one key, add a replacement.
+func TestResealManyDeletesTheOnlyKeyWhileAddingAnother(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := SecretYAML("secret", "default", map[string]string{"key": "old"}, "")
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	// Delete sent before the add, which is the order the editor stages existing-key changes ahead of
+	// new rows.
+	resealed, err := w.ResealMany(t.Context(), sealed, []Mutation{
+		{Key: "key", Op: ResealDelete},
+		{Key: "ff", Value: "new", Op: ResealAdd},
+	})
+	if err != nil {
+		t.Fatalf("ResealMany delete-and-add should be allowed: %v", err)
+	}
+
+	decrypted, err := w.DecryptYAML(t.Context(), resealed)
+	if err != nil {
+		t.Fatalf("DecryptYAML after ResealMany: %v", err)
+	}
+	if strings.Contains(decrypted, "key:") {
+		t.Errorf("deleted key should not appear: %s", decrypted)
+	}
+	if !strings.Contains(decrypted, "ff: new") {
+		t.Errorf("added key should be present: %s", decrypted)
+	}
+}
+
 func TestResealReplaceNonExistentFails(t *testing.T) {
 	w, _ := mustNewTestCrypto(t)
 
@@ -376,12 +632,38 @@ func TestResealManyRejectsInvalidBatches(t *testing.T) {
 			{Key: "two", Op: ResealDelete},
 		}},
 		{"empty key", []Mutation{{Key: "", Value: "a", Op: ResealAdd}}},
+		{"add a key with a space", []Mutation{{Key: "my key", Value: "a", Op: ResealAdd}}},
+		{"replace onto a key with a leading dash", []Mutation{{Key: "-lead", Value: "a", Op: ResealReplace}}},
 		{"unknown operation", []Mutation{{Key: "one", Value: "a", Op: ResealOp("merge")}}},
 	}
 	for _, tc := range cases {
 		if _, err := w.ResealMany(t.Context(), sealed, tc.mutations); err == nil {
 			t.Errorf("%s: expected an error, got nil", tc.name)
 		}
+	}
+}
+
+// A Secret sealed before key-name validation may carry a key the rule now refuses; removing
+// that key must stay possible, so the delete op is exempt from the check.
+func TestResealManyAllowsDeletingAnInvalidKeyName(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+
+	secretYAML := SecretYAML("secret", "default", map[string]string{"bad key": "v", "good": "v"}, "")
+	sealed, err := w.EncryptYAML(t.Context(), secretYAML, "default", "secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	out, err := w.ResealMany(t.Context(), sealed, []Mutation{{Key: "bad key", Op: ResealDelete}})
+	if err != nil {
+		t.Fatalf("ResealMany delete of an invalid key name: %v", err)
+	}
+	keys, err := w.ExtractKeys(out)
+	if err != nil {
+		t.Fatalf("ExtractKeys: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != "good" {
+		t.Errorf("expected only 'good' left, got %v", keys)
 	}
 }
 

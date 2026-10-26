@@ -59,7 +59,7 @@ func TestScopedGrantAuthorizesOnlyItsNamespace(t *testing.T) {
 	if denied.Code != http.StatusForbidden {
 		t.Fatalf("development status = %d, want 403", denied.Code)
 	}
-	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied", "")
+	assertErrorEnvelope(t, denied, "CAPABILITY_DENIED", "Access denied: missing capability metadata:read", "")
 }
 
 // The namespace listing is filtered rather than gatekept: a caller with a grant in one namespace
@@ -176,7 +176,7 @@ func TestGitPathsHandlerKeepsTheWildcardMapping(t *testing.T) {
 	store := policy.NewPolicyStore()
 	for _, namespace := range []string{policy.AnyNamespace, "payments", "development"} {
 		if err := store.SetGitMapping(policy.GitMapping{
-			Namespace: namespace, Repository: "YogaNovvaindra/kube", Branch: "main",
+			Namespace: namespace, Repository: "platform/config", Branch: "main",
 			PathTemplate: "{namespace}/{name}-cred.yml", AuthRef: "git-auth",
 			Mode: policy.GitDeliveryDirect,
 		}); err != nil {
@@ -281,7 +281,7 @@ func TestEncryptRequiresSealCapabilityInTheTargetNamespace(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403: %s", rr.Code, rr.Body.String())
 	}
-	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied", "")
+	assertErrorEnvelope(t, rr, "CAPABILITY_DENIED", "Access denied: missing capability secret:seal", "")
 }
 
 // Delivery is an act in the namespace the mapping resolved to, so the grant has to be there — the

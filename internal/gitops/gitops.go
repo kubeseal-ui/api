@@ -25,8 +25,7 @@ type ManifestSnapshot struct {
 	Commit  string
 }
 
-// Change describes an edit based on BaseCommit. Branch is optional; when empty, the target
-// branch is used. Implementations must never force-push a change.
+// Change describes an edit built on BaseCommit; implementations must never force-push.
 type Change struct {
 	Target     Target
 	BaseCommit string
@@ -63,9 +62,7 @@ type ProposalResult struct {
 	Commit     string
 }
 
-// GitTransport performs portable Git operations. It has no host-provider API. authRef selects
-// the typed credential for the target repository; the resolver resolves it server-side. An
-// empty authRef is valid only for remotes that need no credentials.
+// GitTransport performs portable Git operations; authRef selects the typed credential server-side.
 type GitTransport interface {
 	ReadManifest(ctx context.Context, target Target, authRef string) (ManifestSnapshot, error)
 	SearchManifest(ctx context.Context, repository, branch, namespace, name, authRef string) (ManifestSnapshot, error)
@@ -73,10 +70,7 @@ type GitTransport interface {
 	PushBranch(ctx context.Context, change Change, authRef string) (PushResult, error)
 }
 
-// ManifestHistory is the optional capability answering what a mapped file held before its most
-// recent change. Drift reports only that the live Secret and the file differ; comparing the live
-// Secret with this version is what tells the two apart — a match means Git moved and the cluster
-// did not, so overwriting the file would discard the change that moved it.
+// ManifestHistory answers what a mapped file held before its last change; a live match against it means Git moved and the cluster did not.
 type ManifestHistory interface {
 	PreviousManifest(ctx context.Context, target Target, authRef string) ([]byte, error)
 }
@@ -100,8 +94,7 @@ func (e *ConflictError) Error() string {
 
 var ErrNotFound = errors.New("git target not found")
 
-// ErrNoHistory means nothing precedes the current version of the target: the file has no earlier
-// content, or the transport cannot read history at all.
+// ErrNoHistory reports no earlier content, or a transport that cannot read history at all.
 var ErrNoHistory = errors.New("git target has no previous version")
 
 type localEntry struct {
@@ -120,9 +113,7 @@ func branchKey(repository, branch string) string {
 type LocalTransport struct {
 	mu      sync.RWMutex
 	entries map[Target]localEntry
-	// heads tracks a branch head per repository+branch, which is what a BaseCommit is compared
-	// against. Without it there would be no way to report a base commit for a file that does
-	// not exist yet, and mock mode could not exercise the new-secret flow at all.
+	// heads tracks branch heads, the values BaseCommit is compared against — including for files that do not exist yet.
 	heads map[string]string
 }
 
@@ -130,9 +121,7 @@ func NewLocalTransport() *LocalTransport {
 	return &LocalTransport{entries: make(map[Target]localEntry), heads: make(map[string]string)}
 }
 
-// Seed initializes a target; seeding a file also moves its branch head to that commit,
-// standing in for the real remote's head. A re-seed keeps the superseded content as the
-// previous version.
+// Seed initializes a target and moves its branch head; a re-seed keeps the superseded content as the previous version.
 func (t *LocalTransport) Seed(target Target, content, commit string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -140,8 +129,7 @@ func (t *LocalTransport) Seed(target Target, content, commit string) {
 	t.heads[branchKey(target.Repository, target.Branch)] = commit
 }
 
-// put records content at target, holding on to what the path held as its previous version.
-// Callers hold the lock.
+// put records content at target, holding what the path held as its previous version; callers hold the lock.
 func (t *LocalTransport) put(target Target, content []byte, commit string) {
 	entry := localEntry{content: append([]byte(nil), content...), commit: commit}
 	if prior, ok := t.entries[target]; ok {
@@ -168,12 +156,7 @@ func (t *LocalTransport) PreviousManifest(_ context.Context, target Target, _ st
 	return append([]byte(nil), entry.previous...), nil
 }
 
-// ReadManifest returns the entry at target. A vacant path is ErrNotFound.
-//
-// The error path is not a zero snapshot: it carries the branch head, which is the value a new
-// file is built on and the value a later BaseCommit check compares against. A branch nothing
-// has been seeded on has no head, so the commit is empty — the new-secret flow surfaces that
-// rather than sending an empty base commit to endpoints that reject it.
+// ReadManifest returns ErrNotFound for a vacant path; the error snapshot still carries the branch head a new file is built on.
 func (t *LocalTransport) ReadManifest(_ context.Context, target Target, _ string) (ManifestSnapshot, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -199,28 +182,106 @@ type partialSealedSecret struct {
 	} `yaml:"spec"`
 }
 
-// MatchesSealedSecret reports whether raw YAML content (single or multi-doc) holds a
-// SealedSecret matching the given name and namespace.
+// identityKey is the lookup key; the separator cannot occur in a Kubernetes name, so no pair collides.
+func identityKey(namespace, name string) string { return namespace + "\x00" + name }
+
+// sealedSecretIdentity reports the lookup key of one YAML document; false when it is not a SealedSecret.
+func sealedSecretIdentity(doc []byte) (string, bool) {
+	var parsed partialSealedSecret
+	if err := yaml.Unmarshal(doc, &parsed); err != nil {
+		return "", false
+	}
+	if parsed.Kind != "SealedSecret" {
+		return "", false
+	}
+	namespace := parsed.Metadata.Namespace
+	if namespace == "" {
+		namespace = parsed.Spec.Template.Metadata.Namespace
+	}
+	return identityKey(namespace, parsed.Metadata.Name), true
+}
+
+// splitYAMLDocuments splits on bare `---` lines, keeping each separator with the document that
+// follows, so bytes.Join of the parts reproduces the input byte for byte.
+func splitYAMLDocuments(content []byte) [][]byte {
+	var docs [][]byte
+	var current []byte
+	for _, line := range bytes.SplitAfter(content, []byte("\n")) {
+		if len(current) > 0 && bytes.Equal(bytes.TrimSpace(line), []byte("---")) {
+			docs = append(docs, current)
+			current = nil
+		}
+		current = append(current, line...)
+	}
+	if len(current) > 0 {
+		docs = append(docs, current)
+	}
+	return docs
+}
+
+// sealedSecretIdentities indexes every SealedSecret doc, so a search hit and a content match use one parser.
+func sealedSecretIdentities(content []byte) []string {
+	var identities []string
+	for _, doc := range splitYAMLDocuments(content) {
+		if key, ok := sealedSecretIdentity(doc); ok {
+			identities = append(identities, key)
+		}
+	}
+	return identities
+}
+
+// MatchesSealedSecret reports multi-doc content holding a matching SealedSecret; a manifest naming no namespace matches by name alone.
 func MatchesSealedSecret(content []byte, namespace, name string) bool {
-	docs := bytes.Split(content, []byte("\n---"))
-	for _, docBytes := range docs {
-		var doc partialSealedSecret
-		if err := yaml.Unmarshal(docBytes, &doc); err != nil {
-			continue
+	for _, identity := range sealedSecretIdentities(content) {
+		if identity == identityKey(namespace, name) || identity == identityKey("", name) {
+			return true
 		}
-		if doc.Kind != "SealedSecret" || doc.Metadata.Name != name {
-			continue
-		}
-		manifestNs := doc.Metadata.Namespace
-		if manifestNs == "" {
-			manifestNs = doc.Spec.Template.Metadata.Namespace
-		}
-		if manifestNs != "" && manifestNs != namespace {
-			continue
-		}
-		return true
 	}
 	return false
+}
+
+// MatchingDocument returns the document matching namespace/name from multi-doc content, using the
+// same identity rules as MatchesSealedSecret and SpliceSealedSecret; false means no document matched.
+func MatchingDocument(content []byte, namespace, name string) ([]byte, bool) {
+	for _, doc := range splitYAMLDocuments(content) {
+		if key, ok := sealedSecretIdentity(doc); ok && (key == identityKey(namespace, name) || key == identityKey("", name)) {
+			return doc, true
+		}
+	}
+	return nil, false
+}
+
+// SpliceSealedSecret replaces the document matching namespace/name inside a multi-document file,
+// leaving every sibling byte for byte identical; false means nothing matched and `incoming` is the
+// whole file. The destination lookup guarantees a match before this is called — false is a race,
+// and the caller falls back to whole-file content only because the base-commit guard still stands.
+func SpliceSealedSecret(existing, incoming []byte, namespace, name string) ([]byte, bool) {
+	docs := splitYAMLDocuments(existing)
+	for i, doc := range docs {
+		if key, ok := sealedSecretIdentity(doc); ok && (key == identityKey(namespace, name) || key == identityKey("", name)) {
+			if !bytes.HasSuffix(incoming, []byte("\n")) {
+				incoming = append(incoming, '\n')
+			}
+			// Chunks after the first carry their preceding separator (possibly CRLF); the replacement
+			// must keep it, or the sibling documents merge into one body.
+			if i > 0 && bytes.HasPrefix(doc, []byte("---")) {
+				sep := doc[:bytes.IndexByte(doc, '\n')+1]
+				incoming = append(sep, incoming...)
+			}
+			docs[i] = incoming
+			return bytes.Join(docs, nil), true
+		}
+	}
+	return incoming, false
+}
+
+// lookupIdentity prefers the namespace-specific hit over a manifest that names no namespace.
+func lookupIdentity(index map[string]string, namespace, name string) (string, bool) {
+	if path, ok := index[identityKey(namespace, name)]; ok {
+		return path, true
+	}
+	path, ok := index[identityKey("", name)]
+	return path, ok
 }
 
 func (t *LocalTransport) SearchManifest(_ context.Context, repository, branch, namespace, name, _ string) (ManifestSnapshot, error) {
@@ -259,9 +320,7 @@ func (t *LocalTransport) PushBranch(_ context.Context, change Change, _ string) 
 	target.Branch = branch
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// BaseCommit is checked against the head of the branch being built on, not against the
-	// file's own last commit. The two differ in exactly the new-file case: the file has no
-	// commit yet, and the change is legitimately built on the current head.
+	// BaseCommit is checked against the branch head, not the file's last commit — the two differ exactly in the new-file case.
 	head := t.heads[branchKey(change.Target.Repository, change.Target.Branch)]
 	if change.BaseCommit != "" && change.BaseCommit != head {
 		return PushResult{}, &ConflictError{change.BaseCommit, head}

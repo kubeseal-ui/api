@@ -25,6 +25,8 @@ var (
 	gitopsDeliveries   metric.Int64Counter
 	openFGAChecks      metric.Int64Counter
 	oidcAuths          metric.Int64Counter
+	listingDuration    metric.Float64Histogram
+	listingItems       metric.Int64Histogram
 	instrumentsOnce    sync.Once
 	instrumentsErr     error
 	instrumentsReadyMu sync.RWMutex
@@ -71,6 +73,18 @@ func Instruments() error {
 		}
 		if oidcAuths, err = meter.Int64Counter("kubeseal_ui_oidc_auth_total",
 			metric.WithDescription("OIDC authentication outcomes by result")); err != nil {
+			instrumentsErr = err
+			return
+		}
+		if listingDuration, err = meter.Float64Histogram("kubeseal_ui_secret_listing_duration_seconds",
+			metric.WithDescription("Cross-namespace listing duration in seconds by result"),
+			metric.WithExplicitBucketBoundaries(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30)); err != nil {
+			instrumentsErr = err
+			return
+		}
+		if listingItems, err = meter.Int64Histogram("kubeseal_ui_secret_listing_items",
+			metric.WithDescription("Secrets returned per cross-namespace listing, by result"),
+			metric.WithExplicitBucketBoundaries(1, 5, 10, 25, 50, 100, 250, 500, 1000)); err != nil {
 			instrumentsErr = err
 			return
 		}
@@ -136,6 +150,18 @@ func RecordOIDCAuth(result string) {
 		return
 	}
 	oidcAuths.Add(context.TODO(), 1, metric.WithAttributes(mustString("result", result)))
+}
+
+// RecordSecretListing records one cross-namespace listing. result is the bounded outcome the
+// listing reached: "success", or "degraded" when at least one Secret's drift could not be resolved
+// and was reported as unknown. The item count is here because the listing's cost is per Secret.
+func RecordSecretListing(result string, items int, duration time.Duration) {
+	if err := Instruments(); err != nil || listingDuration == nil {
+		return
+	}
+	attrs := metric.WithAttributes(mustString("result", result))
+	listingDuration.Record(context.TODO(), duration.Seconds(), attrs)
+	listingItems.Record(context.TODO(), int64(items), attrs)
 }
 
 // mustString turns an empty label value into "unknown": legal, but useless as a label.

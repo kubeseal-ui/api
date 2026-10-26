@@ -1,11 +1,7 @@
-// Package policy implements the capability registry, role definitions, namespace Git
-// mappings, and authorization logic for the kubeseal-ui API.
+// Package policy implements the capability registry, roles, namespace Git mappings, and authorization.
 //
-// Grants are namespace-scoped: a group rule names a role and the namespaces it applies in,
-// and an identity's capabilities in a namespace are the union of its rules scoped to that
-// namespace and its rules scoped to "*". With no policy document loaded — see document.go —
-// the store falls back to the older behaviour where an OIDC group named exactly after a
-// role granted that role everywhere.
+// Grants are namespace-scoped; with no policy document loaded, an OIDC group named exactly after a
+// role grants that role everywhere.
 package policy
 
 import (
@@ -80,9 +76,7 @@ var (
 		},
 	}
 
-	// Delivery roles are deliberately separate from the editing roles: neither bundle
-	// carries seal or decrypt. Holding gitops:push lets a user deliver a manifest someone
-	// else sealed; it does not let them read plaintext or create secrets.
+	// Delivery roles carry neither seal nor decrypt: pushing a sealed manifest is not reading plaintext.
 	RoleReleaseProposer = Role{
 		Name: "release-proposer",
 		Capabilities: []Capability{
@@ -215,13 +209,10 @@ type GitMapping struct {
 	PathTemplate string // e.g. "clusters/prod/{namespace}/{name}.yaml"
 	AuthRef      string
 	Mode         GitDeliveryMode
-	// ProposalAdapter is required when Mode is proposal. Instance wiring (tests,
-	// programmatic setup) populates the adapter; values-driven seeding populates
-	// ProposalAdapterName instead.
+	// ProposalAdapter is required in proposal mode; tests set it, values-driven seeding sets ProposalAdapterName.
 	ProposalAdapter     gitops.ProposalProvider
 	ProposalAdapterName string
-	// AllowedPaths optionally lists directory prefixes (relative to the repo root) users may
-	// target for new sealed secrets; empty means only the rendered PathTemplate is allowed.
+	// AllowedPaths lists directory prefixes new sealed secrets may target; empty means only the rendered PathTemplate.
 	AllowedPaths []string
 }
 
@@ -274,13 +265,9 @@ type PolicyStore struct {
 	GitMappings   map[string]GitMapping // namespace -> GitMapping
 	EnableDecrypt bool
 
-	// groupRules are the group-to-role grants, each scoped to the namespaces it names,
-	// ordered as the document listed them.
+	// groupRules are the group-to-role grants, ordered as the document listed them.
 	groupRules []GroupRule
-	// explicit records whether a policy document is in force, which is what turns off the
-	// legacy fallback where an OIDC group named exactly after a role granted that role
-	// everywhere: a deployment with a file must be able to revoke a grant by leaving it
-	// out. Apply sets it; SetGroupRoles, which exists for tests, does not.
+	// explicit turns off the legacy group-name fallback, so a document can revoke a grant by omitting it; only Apply sets it.
 	explicit bool
 }
 
@@ -291,10 +278,7 @@ func NewPolicyStore() *PolicyStore {
 	}
 }
 
-// NamespaceGrants returns the capabilities an identity's groups grant in every namespace,
-// and the ones they grant only in the namespaces they name. A namespace absent from the
-// scoped map has no grants of its own — which is a different thing from a namespace that is
-// denied, since the global set still applies there.
+// NamespaceGrants returns global capabilities plus per-namespace ones; a namespace absent from the map still gets the global set.
 func (s *PolicyStore) NamespaceGrants(groups []string) ([]Capability, map[string][]Capability) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -341,9 +325,7 @@ func (s *PolicyStore) NamespaceGrants(groups []string) ([]Capability, map[string
 	return orderedCapabilities(global), result
 }
 
-// CapabilitiesForGroups returns every capability the identity holds somewhere, whichever
-// namespace grants it: the pre-filter for a request whose namespace is not known yet. It
-// must not authorize a specific namespace — that is what NamespaceGrants is for.
+// CapabilitiesForGroups is the pre-filter for requests whose namespace is not yet known; never authorize a specific namespace with it.
 func (s *PolicyStore) CapabilitiesForGroups(groups []string) []Capability {
 	global, scoped := s.NamespaceGrants(groups)
 	seen := make(map[Capability]bool, len(global))
@@ -360,8 +342,7 @@ func addCapabilities(seen map[Capability]bool, caps []Capability) {
 	}
 }
 
-// orderedCapabilities renders a capability set in the canonical order of All,
-// so two resolutions of the same grants produce the same list.
+// orderedCapabilities renders a set in the canonical order of All, so equal grants render identically.
 func orderedCapabilities(seen map[Capability]bool) []Capability {
 	result := make([]Capability, 0, len(seen))
 	for _, capability := range All {
@@ -424,9 +405,7 @@ func (s *PolicyStore) GetGitMapping(namespace string) (GitMapping, bool) {
 	return GitMapping{}, false
 }
 
-// SetGroupRoles atomically replaces a group's role mapping. The rules it writes apply in
-// every namespace, which is the only thing an unnamespaced group-to-role mapping can mean;
-// a namespaced grant comes from a policy document through Apply.
+// SetGroupRoles writes group rules that apply in every namespace; namespaced grants come only from a document via Apply.
 func (s *PolicyStore) SetGroupRoles(group string, roles []string) error {
 	if strings.TrimSpace(group) == "" {
 		return errors.New("group is required")
@@ -453,8 +432,7 @@ func (s *PolicyStore) SetGroupRoles(group string, roles []string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// A fresh slice rather than a compaction in place: a reader that took the slice under
-	// RLock must never observe this write through the array it is still walking.
+	// Fresh slice, not in place: a reader walking the old slice under RLock must not see this write.
 	next := make([]GroupRule, 0, len(s.groupRules)+len(replacement))
 	for _, existing := range s.groupRules {
 		if existing.Name != group {
@@ -493,9 +471,7 @@ func (s *PolicyStore) GetAllMappings() map[string]GitMapping {
 	return result
 }
 
-// GitMappingSpec is the values-driven mapping definition: GitMapping with the proposal
-// adapter referenced by registry name instead of by instance, so configuration carries no
-// code.
+// GitMappingSpec is the values-driven mapping: the proposal adapter referenced by name, not instance.
 type GitMappingSpec struct {
 	Namespace           string
 	Repository          string
@@ -504,13 +480,11 @@ type GitMappingSpec struct {
 	AuthRef             string
 	Mode                GitDeliveryMode
 	ProposalAdapterName string
-	// AllowedPaths optionally lists directory prefixes users may target; empty means only
-	// the rendered PathTemplate is allowed.
+	// AllowedPaths lists directory prefixes new sealed secrets may target; empty means only the rendered PathTemplate.
 	AllowedPaths []string
 }
 
-// SeedGitMappings atomically replaces all mappings from specs, resolving each proposal-mode
-// adapter from the registry: an unknown name is a configuration error, never a nil adapter.
+// SeedGitMappings replaces all mappings, resolving each proposal adapter by name; unknown names error.
 func (s *PolicyStore) SeedGitMappings(specs []GitMappingSpec, adapters map[string]gitops.ProposalProvider) error {
 	mappings := make([]GitMapping, 0, len(specs))
 	for _, spec := range specs {
@@ -545,42 +519,6 @@ func (s *PolicyStore) ResolveGitMapping(namespace string) (GitMapping, error) {
 	return m, nil
 }
 
-func RequiredCapabilitiesForOperation(op string) []Capability {
-	switch op {
-	case "list_namespaces", "get_sealedsecret", "list_sealedsecrets":
-		return []Capability{MetadataRead}
-	case "encrypt":
-		return []Capability{SecretSeal}
-	case "decrypt":
-		return []Capability{SecretDecrypt}
-	case "reseal":
-		return []Capability{SecretSeal, SecretDecrypt}
-	case "gitops_dry_run", "gitops_propose":
-		return []Capability{GitOpsPropose}
-	case "gitops_push":
-		return []Capability{GitOpsPush}
-	case "manage_acl":
-		return []Capability{AccessManage}
-	default:
-		return nil // Unknown operation = deny
-	}
-}
-
-// CheckAuthorization checks if an identity has all required capabilities for an operation.
-// Decrypt and reseal additionally require ENABLE_DECRYPT, which the handler enforces.
-func CheckAuthorization(identity Identity, operation string) error {
-	required := RequiredCapabilitiesForOperation(operation)
-	if required == nil {
-		return errors.New("unknown operation: " + operation)
-	}
-	for _, cap := range required {
-		if !identity.Has(cap) {
-			return fmt.Errorf("missing capability %q for operation %q", cap, operation)
-		}
-	}
-	return nil
-}
-
 func GitOpsCapabilityRequired(mode GitDeliveryMode) Capability {
 	switch mode {
 	case GitDeliveryDirect:
@@ -599,18 +537,19 @@ func (g GitMapping) RenderPath(namespace, name string) string {
 	path := strings.ReplaceAll(g.PathTemplate, "{namespace}", namespace)
 	path = strings.ReplaceAll(path, "{name}", name)
 	clean := pathpkg.Clean(path)
-	if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." || strings.HasPrefix(clean, "/") {
+	if !safeRelativePath(clean) {
 		return ""
 	}
 	return clean
 }
 
-// IsPathAllowed reports whether targetPath may be written here. With AllowedPaths empty only
-// the exact RenderPath for this namespace/name is allowed; otherwise the target must sit
-// under one of the allowed directory prefixes.
+// IsPathAllowed judges only canonical paths: a raw string with .. passes the prefix test while the transport cleans it for real, so anything Clean would rewrite is refused.
 func (g GitMapping) IsPathAllowed(targetPath, namespace, name string) bool {
 	defaultPath := g.RenderPath(namespace, name)
 	if defaultPath == "" {
+		return false
+	}
+	if targetPath != pathpkg.Clean(targetPath) || !safeRelativePath(targetPath) {
 		return false
 	}
 	if len(g.AllowedPaths) == 0 {
@@ -618,19 +557,21 @@ func (g GitMapping) IsPathAllowed(targetPath, namespace, name string) bool {
 	}
 	for _, allowed := range g.AllowedPaths {
 		// An allowed prefix may itself carry {namespace}.
-		prefix := strings.ReplaceAll(allowed, "{namespace}", namespace)
+		prefix := pathpkg.Clean(strings.ReplaceAll(allowed, "{namespace}", namespace))
 		if !strings.HasSuffix(prefix, "/") {
 			prefix += "/"
 		}
 		if strings.HasPrefix(targetPath, prefix) {
-			clean := pathpkg.Clean(targetPath)
-			if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." || strings.HasPrefix(clean, "/") {
-				return false
-			}
-			return clean != "" && clean != "."
+			return true
 		}
 	}
 	return false
+}
+
+// safeRelativePath: an already-cleaned path must name a file inside the repository, not above the checkout.
+func safeRelativePath(clean string) bool {
+	return clean != "" && clean != "." && clean != ".." &&
+		!strings.HasPrefix(clean, "../") && !strings.HasPrefix(clean, "/")
 }
 
 func safePathComponent(value string) bool {

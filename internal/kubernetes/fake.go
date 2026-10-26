@@ -48,8 +48,7 @@ func (f *Fake) GetSealedSecret(_ context.Context, namespace, name string) (Seale
 
 var ErrNotFound = errors.New("kubernetes: not found")
 
-// FindActiveControllerKey applies pickActive's rule to the fixture keys, failing closed
-// when none is valid.
+// FindActiveControllerKey applies pickActive's rule to the fixture keys, failing closed when none is valid.
 func (f *Fake) FindActiveControllerKey(_ context.Context) (ActiveKey, error) {
 	valid := f.validKeys()
 	if len(valid) == 0 {
@@ -85,8 +84,7 @@ func (f *Fake) validKeys() []Secret {
 	return out
 }
 
-// pickActive picks the newest creationTimestamp, using the name as the stable
-// tie-breaker. Keys tying on both are indistinguishable (ambiguous) and fail closed.
+// pickActive picks the newest creationTimestamp with the name as tie-breaker; keys tying on both are ambiguous and fail closed.
 func pickActive(keys []Secret) (ActiveKey, error) {
 	if len(keys) == 0 {
 		return ActiveKey{}, fmt.Errorf("kubernetes: no valid active key found")

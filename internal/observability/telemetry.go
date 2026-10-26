@@ -1,7 +1,5 @@
-// Package observability mounts the OpenTelemetry SDK: metrics, traces and logs, all over
-// OTLP gRPC to a collector. It is optional — with no endpoint configured the SDK stays
-// unmounted, /metrics serves the Prometheus exporter alone, and logging falls back to plain
-// slog. An exporter construction failure disables that signal rather than the boot.
+// Package observability mounts the OpenTelemetry SDK (metrics, traces, logs over OTLP gRPC); with no endpoint configured the
+// SDK stays unmounted and logging falls back to plain slog. An exporter construction failure disables that signal, not the boot.
 package observability
 
 import (
@@ -18,7 +16,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/prometheus"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -65,16 +62,13 @@ func (o TelemetryOptions) resourceAttributes() (*resource.Resource, error) {
 			semconv.SchemaURL,
 			semconv.ServiceName(o.ServiceName),
 			semconv.ServiceVersion(o.ServiceVersion),
-			// deployment.environment (the classic key), not deployment.environment.name:
-			// the chart and the dashboards key on the classic attribute.
+			// deployment.environment (the classic key), not deployment.environment.name — the chart and dashboards key on the classic attribute.
 			attribute.String("deployment.environment", o.Environment),
 			semconv.K8SNamespaceName("kubeseal-ui"),
 		))
 }
 
-// SetupTelemetry builds the three signal providers and mounts them as the global OTel
-// defaults. A failed exporter disables that signal with a warning instead of failing the
-// boot. Call Shutdown on process exit.
+// SetupTelemetry builds the three signal providers and mounts them as the global OTel defaults; a failed exporter disables that signal, not the boot.
 func SetupTelemetry(opts TelemetryOptions) (*Telemetry, error) {
 	tel := &Telemetry{logger: opts.Logger}
 	if opts.ServiceName == "" {
@@ -126,7 +120,7 @@ func SetupTelemetry(opts TelemetryOptions) (*Telemetry, error) {
 			sdklog.WithResource(res),
 			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp)),
 		)
-		global.SetLoggerProvider(tel.LoggerProvider)
+		otel.SetLoggerProvider(tel.LoggerProvider)
 	}
 
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -171,9 +165,7 @@ func setupMetrics(tel *Telemetry, res *resource.Resource, opts TelemetryOptions)
 	return nil
 }
 
-// MetricsHandler serves the Prometheus text exposition at /metrics, and answers 503 when
-// metrics are disabled so ServiceMonitor marks the target down rather than scraping an
-// empty page silently.
+// MetricsHandler serves the Prometheus exposition at /metrics, answering 503 when disabled so ServiceMonitor marks the target down.
 func (t *Telemetry) MetricsHandler() http.Handler {
 	if t == nil || !t.MetricsEnabled {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
