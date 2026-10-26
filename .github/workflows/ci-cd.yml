@@ -175,7 +175,14 @@ jobs:
 
     - name: Generate changelog
       run: |
-        git log --pretty=format:'- %s (%an)' $(git describe --tags --abbrev=0 HEAD^)..HEAD > CHANGELOG.md || echo "No previous tag" > CHANGELOG.md
+        if previous_tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null); then
+          git log --pretty=format:'- %s (%an)' "$previous_tag"..HEAD > CHANGELOG.md
+        else
+          git log --pretty=format:'- %s (%an)' HEAD > CHANGELOG.md
+        fi
+        if [ ! -s CHANGELOG.md ]; then
+          printf '%s\n' "No commits since the previous tag." > CHANGELOG.md
+        fi
 
     - name: Create Release
       uses: softprops/action-gh-release@v3
