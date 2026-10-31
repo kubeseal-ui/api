@@ -36,6 +36,38 @@ func TestEncryptDecryptRoundTripStrict(t *testing.T) {
 	}
 }
 
+func TestDecryptKeyOnlyOpensRequestedEncryptedData(t *testing.T) {
+	w, _ := mustNewTestCrypto(t)
+	sealedYAML, err := w.EncryptYAML(t.Context(), SecretYAML("my-secret", "default", map[string]string{
+		"username": "admin",
+		"password": "hunter2",
+	}, ""), "default", "my-secret", StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+	sealed, err := parseSealedSecret(sealedYAML)
+	if err != nil {
+		t.Fatalf("parseSealedSecret: %v", err)
+	}
+	sealed.Spec.EncryptedData["unrelated"] = "not-base64"
+	sealedYAML, err = encodeSealedSecret(sealed, w.codecs)
+	if err != nil {
+		t.Fatalf("encodeSealedSecret: %v", err)
+	}
+
+	got, err := w.DecryptKey(t.Context(), sealedYAML, "password")
+	if err != nil {
+		t.Fatalf("DecryptKey: %v", err)
+	}
+	if got != "hunter2" {
+		t.Fatalf("DecryptKey = %q, want %q", got, "hunter2")
+	}
+
+	if _, err := w.DecryptKey(t.Context(), sealedYAML, "missing"); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("DecryptKey missing key error = %v, want ErrKeyNotFound", err)
+	}
+}
+
 // TestEncryptYAMLWritesYAML pins the manifest format: every manifest a client sees comes
 // from EncryptYAML and is committed verbatim, and JSON is a valid YAML subset, so a
 // one-line JSON document would parse and reconcile while breaking every diff.

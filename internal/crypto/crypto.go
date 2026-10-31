@@ -4,8 +4,10 @@ package crypto
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -25,6 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 	sigsyaml "sigs.k8s.io/yaml"
 )
+
+var ErrKeyNotFound = errors.New("crypto: encrypted key not found")
 
 // Scope is how tightly a sealed secret is pinned to a namespace/name.
 type Scope int
@@ -191,6 +195,51 @@ func (w *Wrapper) DecryptYAML(ctx context.Context, sealedYAML string) (string, e
 		return "", fmt.Errorf("crypto: encode secret: %w", err)
 	}
 	return string(y), nil
+}
+
+// DecryptKey opens only the requested encryptedData entry instead of unsealing every key.
+func (w *Wrapper) DecryptKey(ctx context.Context, sealedYAML, key string) (string, error) {
+	if w.priv == nil {
+		return "", fmt.Errorf("crypto: decrypt is disabled (ENABLE_DECRYPT=false)")
+	}
+
+	sealed, err := parseSealedSecret(sealedYAML)
+	if err != nil {
+		return "", err
+	}
+	encoded, ok := sealed.Spec.EncryptedData[key]
+	if !ok {
+		return "", ErrKeyNotFound
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("crypto: decode encrypted key: %w", err)
+	}
+
+	decrypt := func() ([]byte, error) {
+		privKeys, keyErr := w.privateKeyMap(ctx)
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		label := ssv1alpha1.EncryptionLabel(
+			sealed.GetNamespace(),
+			sealed.GetName(),
+			ssv1alpha1.SecretScope(sealed.GetObjectMeta()),
+		)
+		return crypto.HybridDecrypt(rand.Reader, privKeys, ciphertext, label)
+	}
+
+	plaintext, err := decrypt()
+	if err != nil {
+		if stale, ok := w.priv.(KeyCacheInvalidator); ok {
+			stale.InvalidateKeyCache()
+			plaintext, err = decrypt()
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("crypto: decrypt key: %w", err)
+	}
+	return string(plaintext), nil
 }
 
 // unseal fetches the controller keys and opens the document with them.

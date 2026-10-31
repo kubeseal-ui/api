@@ -875,17 +875,16 @@ func (h *ProtectedHandlers) DecryptHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusConflict, "GIT_DRIFT", "Git and live secret differ")
 		return
 	}
-	plain, err := h.Crypto.DecryptYAML(r.Context(), secret.YAML)
+	value, err := h.Crypto.DecryptKey(r.Context(), secret.YAML, key)
+	if errors.Is(err, crypto.ErrKeyNotFound) {
+		result = opResultNotFound
+		writeError(w, r, http.StatusNotFound, "KEY_NOT_FOUND", "Key not found")
+		return
+	}
 	if err != nil {
 		result = opResultFailed
 		slog.Error("decrypt sealed secret failed", "namespace", namespace, "name", name, "key", key, "request_id", requestID(r), "error", err)
 		writeError(w, r, http.StatusBadGateway, "DECRYPTION_FAILED", "Unable to decrypt secret")
-		return
-	}
-	value, ok := extractStringDataKey(plain, key)
-	if !ok {
-		result = opResultNotFound
-		writeError(w, r, http.StatusNotFound, "KEY_NOT_FOUND", "Key not found")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -1130,18 +1129,4 @@ func (h *ProtectedHandlers) ResealHandler(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	jsonResponse(w, http.StatusOK, map[string]any{"yaml": sealed, "checksum": encryptedChecksum(sealed), "diff_before": secret.YAML, "diff_after": sealed, "mutations": mutationSummary(req.Mutations)})
 	result = opResultSuccess
-}
-
-func extractStringDataKey(yamlText, key string) (string, bool) {
-	var secret corev1.Secret
-	if err := yaml.Unmarshal([]byte(yamlText), &secret); err != nil {
-		return "", false
-	}
-	if value, ok := secret.StringData[key]; ok {
-		return value, true
-	}
-	if value, ok := secret.Data[key]; ok {
-		return string(value), true
-	}
-	return "", false
 }
