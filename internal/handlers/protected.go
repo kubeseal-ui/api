@@ -22,7 +22,6 @@ import (
 	"github.com/kubeseal-ui/api/internal/kubernetes"
 	"github.com/kubeseal-ui/api/internal/metrics"
 	"github.com/kubeseal-ui/api/internal/policy"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 )
