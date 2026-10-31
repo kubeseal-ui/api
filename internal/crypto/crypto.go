@@ -82,7 +82,7 @@ type PrivateKeyProvider interface {
 	PrivateKeys(ctx context.Context) ([]*rsa.PrivateKey, error)
 }
 
-// KeyCacheInvalidator lets DecryptYAML drop a cached key list and retry before failing.
+// KeyCacheInvalidator lets decrypt operations drop a cached key list and retry before failing.
 type KeyCacheInvalidator interface {
 	InvalidateKeyCache()
 }
@@ -209,6 +209,22 @@ func (w *Wrapper) DecryptKey(ctx context.Context, sealedYAML, key string) (strin
 	}
 	encoded, ok := sealed.Spec.EncryptedData[key]
 	if !ok {
+		if sealed.Spec.Data != nil {
+			plain, decryptErr := w.DecryptYAML(ctx, sealedYAML)
+			if decryptErr != nil {
+				return "", decryptErr
+			}
+			var secret corev1.Secret
+			if decodeErr := yaml.Unmarshal([]byte(plain), &secret); decodeErr != nil {
+				return "", fmt.Errorf("crypto: decode decrypted Secret: %w", decodeErr)
+			}
+			if value, found := secret.StringData[key]; found {
+				return value, nil
+			}
+			if value, found := secret.Data[key]; found {
+				return string(value), nil
+			}
+		}
 		return "", ErrKeyNotFound
 	}
 	ciphertext, err := base64.StdEncoding.DecodeString(encoded)

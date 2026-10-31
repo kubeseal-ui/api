@@ -249,6 +249,55 @@ func TestDecryptRequiresBaseCommit(t *testing.T) {
 	assertErrorEnvelope(t, rr, "INVALID_REQUEST", "Invalid request", "")
 }
 
+func TestDecryptReturnsOnlyRequestedKey(t *testing.T) {
+	w, _, err := crypto.NewTestCrypto()
+	if err != nil {
+		t.Fatalf("NewTestCrypto: %v", err)
+	}
+	live, err := w.EncryptYAML(t.Context(), `apiVersion: v1
+kind: Secret
+metadata:
+  name: name
+  namespace: ns
+stringData:
+  password: hunter2
+  username: admin
+`, "ns", "name", crypto.StrictScope)
+	if err != nil {
+		t.Fatalf("EncryptYAML: %v", err)
+	}
+
+	transport := gitops.NewLocalTransport()
+	transport.Seed(gitops.Target{Repository: "platform", Branch: "main", Path: "clusters/ns/name.yaml"}, live, "abc")
+	store := policy.NewPolicyStore()
+	if err := store.SetGitMapping(policy.GitMapping{
+		Namespace: "ns", Repository: "platform", Branch: "main",
+		PathTemplate: "clusters/{namespace}/{name}.yaml", AuthRef: "auth", Mode: policy.GitDeliveryDirect,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewProtectedHandlersWithGitOps(store, transport,
+		protectedK8s{secrets: []kubernetes.SealedSecret{{Name: "name", Namespace: "ns", YAML: live}}},
+		w, true)
+	rr := httptest.NewRecorder()
+	h.DecryptHandler(rr, protectedRequest(http.MethodPost, "/api/v1/secrets/ns/name/reveal",
+		`{"key":"password","base_commit":"abc"}`, protectedIdentity(policy.SecretDecrypt)))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["key"] != "password" || response["value"] != "hunter2" {
+		t.Fatalf("response = %#v", response)
+	}
+	if rr.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", rr.Header().Get("Cache-Control"))
+	}
+}
+
 func mutation(key, operation, value string) map[string]string {
 	return map[string]string{"key": key, "operation": operation, "value": value}
 }
